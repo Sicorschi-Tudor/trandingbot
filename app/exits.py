@@ -21,12 +21,22 @@ Modes:
 - stall: at the first closed bar ≥ stall_minutes after the entry, close if -stall_band_r ≤ R ≤ +stall_band_r.
 - giveback: once MFE ≥ gb_arm_r, close at a bar close where R ≤ MFE×(1-gb_frac).
 - combo: params.modes = list of the modes above, applied together (shared params).
+Stage C2 (higher timeframes, long holds):
+- channel: Turtle-style exit at the bar close: BUY closes when the close is below the lowest low of the previous
+  channel_n bars (the bar itself excluded), SELL when it is above the highest high. Buffer seeded from the
+  warm-up history, so the first bars of the trade already see a full channel.
+- signal_flip: at every closed bar asks the strategy for its direction (`bias_fn(bar)` given to attach, computed
+  only from closed bars up to that bar); closes when it is the opposite of the trade (flip_on_flat=1: also when
+  it is 0). Without a bias_fn (e.g. shadow labels) the mode does nothing.
+- time stop for long holds: params max_hold_minutes / max_hold_hours / max_hold_days (any mode, also base; up
+  to 60 days, 0 = none) override the strategy's max_hold_minutes in the backtest (hold_minutes()).
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 
-MODES = ("base", "trailing", "partial", "invalidation", "stall", "giveback", "combo")
+MODES = ("base", "trailing", "partial", "invalidation", "stall", "giveback", "channel", "signal_flip", "combo")
 DEFAULT_PARAMS: dict[str, dict] = {
     "base": {},
     "trailing": {"trail_start_r": 1.0, "trail_atr_mult": 1.5, "trail_min_r": 0.5},
@@ -34,9 +44,13 @@ DEFAULT_PARAMS: dict[str, dict] = {
     "invalidation": {"min_bars": 3},
     "stall": {"stall_minutes": 60, "stall_band_r": 0.3},
     "giveback": {"gb_arm_r": 1.0, "gb_frac": 0.5},
+    "channel": {"channel_n": 20},
+    "signal_flip": {"flip_on_flat": 0},
     "combo": {"modes": ["trailing", "stall"]},
 }
-AT_CLOSE_REASONS = ("INVALIDATION", "STALL", "GIVEBACK")  # exits at the bar close (exit time = bar end)
+AT_CLOSE_REASONS = ("INVALIDATION", "STALL", "GIVEBACK", "CHANNEL", "FLIP")  # exits at the bar close (time = bar end)
+HOLD_KEYS = {"max_hold_minutes": 1.0, "max_hold_hours": 60.0, "max_hold_days": 1440.0}  # -> minutes
+MAX_HOLD_MINUTES = 60 * 1440  # 60 days
 WARMUP_BARS = 200  # closed bars before the entry used to seed the exit indicators
 BE_LOCK_POINTS = 2  # = labeler.BE_LOCK_MIN_POINTS (position_manager.plan)
 
@@ -131,6 +145,14 @@ class ExitPolicy:
             raise ValueError("exit.params.partial_frac trebuie să fie între 0 și 1")
         if "giveback" in self.modes and not 0 < p["gb_frac"] <= 1:
             raise ValueError("exit.params.gb_frac trebuie să fie în (0, 1]")
+        if "channel" in self.modes and not 1 <= p["channel_n"] <= 1000:
+            raise ValueError("exit.params.channel_n trebuie să fie între 1 și 1000")
+        hold = sum(1 for k in HOLD_KEYS if k in p)
+        if hold > 1:
+            raise ValueError("exit.params: un singur câmp dintre max_hold_minutes / max_hold_hours / max_hold_days")
+        for k, mult in HOLD_KEYS.items():
+            if k in p and not 0 <= p[k] * mult <= MAX_HOLD_MINUTES:
+                raise ValueError(f"exit.params.{k}: între 0 și 60 de zile (0 = fără limită)")
         self.p = p
 
     @classmethod
@@ -151,6 +173,14 @@ class ExitPolicy:
     def needs_indicators(self) -> bool:
         return any(m in ("trailing", "invalidation") for m in self.modes)
 
+    @property
+    def hold_minutes(self) -> float | None:
+        """Time stop from the exit params in minutes (0 = none), None when the params do not set one."""
+        for k, mult in HOLD_KEYS.items():
+            if k in self.p:
+                return self.p[k] * mult
+        return None
+
     def to_dict(self) -> dict:
         d = {"mode": self.mode, "params": dict(self.p)}
         if self.mode == "combo":
@@ -159,10 +189,11 @@ class ExitPolicy:
 
 
 def attach(pos, policy: ExitPolicy | None, history: list[dict] | None = None, bar_sec: int = 60,
-           partial_frac: float | None = None) -> None:
+           partial_frac: float | None = None, bias_fn=None) -> None:
     """Arm a SimPosition with a non-base policy (base -> the labeler's own code path, bit-identical).
     history: closed bars before the entry bar (indicator warm-up). partial_frac: effective fraction after lot
-    rounding (0 disables the partial close), default the policy's."""
+    rounding (0 disables the partial close), default the policy's. bias_fn(bar) -> +1/-1/0: the strategy's
+    direction at the close of `bar` (signal_flip; closed bars only)."""
     if policy is None or policy.is_base:
         return
     pos.exit = policy
@@ -172,6 +203,12 @@ def attach(pos, policy: ExitPolicy | None, history: list[dict] | None = None, ba
     frac = policy.p.get("partial_frac", 0.0) if partial_frac is None else partial_frac
     pos.xs = {"bars": 0, "best": None, "trailed": False, "partial_frac": float(frac) if "partial" in policy.modes else 0.0,
               "partial_done": False, "be_pending": False, "stall_checked": False}
+    if "channel" in policy.modes:
+        n = int(policy.p["channel_n"])
+        pos.xs["chan_n"] = n
+        pos.xs["chan"] = deque(((b["h"], b["l"]) for b in (history or [])[-n:]), maxlen=n)
+    if "signal_flip" in policy.modes:
+        pos.xs["bias_fn"] = bias_fn
 
 
 def _try_be(pos, fav_px: float, spread_px: float) -> None:
@@ -243,6 +280,18 @@ def step(pos, bar: dict, spread_px: float) -> tuple[str, float] | None:
         mfe_r = pos.mfe / r_dist
         if mfe_r >= p["gb_arm_r"] and r_now <= mfe_r * (1 - p["gb_frac"]):
             return "GIVEBACK", cpx
+    if "channel" in modes:
+        buf = xs["chan"]
+        full = len(buf) >= xs["chan_n"]
+        c = bar["c"]
+        crossed = full and (c < min(x[1] for x in buf) if sg > 0 else c > max(x[0] for x in buf))
+        buf.append((bar["h"], bar["l"]))  # the current bar joins the channel of the next ones
+        if crossed:
+            return "CHANNEL", cpx
+    if "signal_flip" in modes and xs.get("bias_fn") is not None:
+        d = xs["bias_fn"](bar)
+        if d is not None and (d * sg < 0 or (d == 0 and p["flip_on_flat"] > 0)):
+            return "FLIP", cpx
     if "trailing" in modes and r_dist > 0:
         best = xs["best"]
         if best is None or (cpx - best) * sg > 0:
@@ -257,4 +306,4 @@ def step(pos, bar: dict, spread_px: float) -> tuple[str, float] | None:
 
 
 __all__ = ["ExitPolicy", "IncIndicators", "attach", "step", "MODES", "DEFAULT_PARAMS", "AT_CLOSE_REASONS",
-           "WARMUP_BARS"]
+           "WARMUP_BARS", "HOLD_KEYS", "MAX_HOLD_MINUTES"]

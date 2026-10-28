@@ -1532,18 +1532,8 @@ class Engine:
         return out
 
     def archive_status(self) -> dict:
-        st = getattr(self.rt, "archive_status", None) or {}
-        days = int(getattr(self.settings, "ARCHIVE_DAYS", 120) or 120)
-        now = time.time()
-        symbols = {}
-        for sym, tfs in st.items():
-            symbols[sym] = {}
-            for tf, info in (tfs or {}).items():
-                oldest = info.get("oldest_ts")
-                loaded = round(max(0.0, now - oldest) / 86400, 1) if oldest else 0.0
-                symbols[sym][tf] = {**info, "days_loaded": loaded, "days_target": days}
-        return {"enabled": bool(getattr(self.settings, "ARCHIVE_ENABLED", True)), "days_target": days,
-                "ea_version": self.rt.bridge.get("ea_version"), "symbols": symbols}
+        from . import archive  # per-TF days_target (ARCHIVE_EXTRA), phase, exhausted / history_start_ts
+        return archive.status_view(self.rt)
 
     # ---- backtests --------------------------------------------------------
     def backtest_running(self) -> bool:

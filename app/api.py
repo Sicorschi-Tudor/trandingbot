@@ -553,6 +553,15 @@ async def get_exits():
     return [{"mode": m, "params": p} for m, p in exit_catalog().items()]
 
 
+def research_strategy_names(eng: Engine) -> list[str]:
+    """Stage C2 research plugins (donchian-v1, ma-trend-v1, tsmom-v1): allowed in backtests, not in names()."""
+    reg = eng.strategy_registry()
+    try:
+        return [str(n) for n in reg.research_names()] if reg is not None and hasattr(reg, "research_names") else []
+    except Exception:
+        return []
+
+
 def validate_backtest_params(body: dict, eng: Engine) -> dict:
     st = eng.rt.strategy
     syms = body.get("symbols") or eng.rt.active_symbols()
@@ -568,6 +577,10 @@ def validate_backtest_params(body: dict, eng: Engine) -> dict:
         if s not in symbols:
             symbols.append(s)
     out: dict = {"symbols": symbols}
+    name = str(body.get("strategy_name") or "trend-v1").strip()
+    research = name in research_strategy_names(eng)  # C2 plugins: backtest only, never selectable live
+    if name not in eng.strategy_names() and not research:
+        raise HTTPException(status_code=422, detail=f"strategy_name: strategie necunoscută {name!r}")
     if body.get("start_ts") is not None or body.get("end_ts") is not None:
         start = _num("start_ts", body.get("start_ts"), int, 946684800, 4102444800)
         end = _num("end_ts", body.get("end_ts", int(utcnow().timestamp())), int, 946684800, 4102444800)
@@ -575,24 +588,30 @@ def validate_backtest_params(body: dict, eng: Engine) -> dict:
             raise HTTPException(status_code=422, detail="end_ts trebuie să fie după start_ts")
         out.update(start_ts=start, end_ts=end)
     else:
-        out["days"] = _num("days", body.get("days", 30), int, 1, 730)
+        out["days"] = _num("days", body.get("days", 30), int, 1, 3650 if research else 730)
     for k, default in (("signal_tf", st["signal_timeframe"]), ("htf_tf", st["htf_timeframe"])):
+        if research and not body.get(k):
+            continue  # research plugins (C2): RUN_DEFAULTS of the plugin (D1, fără HTF), not the live timeframes
         tf = str(body.get(k) or default).upper()
+        if research and k == "htf_tf" and tf == "NONE":
+            out[k] = tf
+            continue
         if tf not in TF_SECONDS:
             raise HTTPException(status_code=422, detail=f"{k}: timeframe invalid")
         out[k] = tf
-    if TF_SECONDS[out["htf_tf"]] <= TF_SECONDS[out["signal_tf"]]:
+    if out.get("htf_tf") in TF_SECONDS and out.get("signal_tf") in TF_SECONDS and \
+            TF_SECONDS[out["htf_tf"]] <= TF_SECONDS[out["signal_tf"]]:
         raise HTTPException(status_code=422, detail="htf_tf trebuie să fie mai mare decât signal_tf")
     strat = body.get("strategy") or {}
     risk = body.get("risk") or {}
     cost = body.get("cost") or {}
     if not all(isinstance(x, dict) for x in (strat, risk, cost)):
         raise HTTPException(status_code=422, detail="strategy/risk/cost: obiecte JSON")
-    name = str(body.get("strategy_name") or "trend-v1").strip()
-    if name not in eng.strategy_names():
-        raise HTTPException(status_code=422, detail=f"strategy_name: strategie necunoscută {name!r}")
     out["strategy_name"] = name
-    plugin_params = next((c.get("params") or {} for c in eng.strategy_catalog() if c["name"] == name), {})
+    if research:
+        plugin_params = dict(getattr(eng.strategy_registry().get(name), "PARAMS", {}) or {})
+    else:
+        plugin_params = next((c.get("params") or {} for c in eng.strategy_catalog() if c["name"] == name), {})
     out["strategy"] = {}
     for k, v in strat.items():
         if k in BT_STRATEGY_KEYS:
@@ -631,6 +650,12 @@ def validate_backtest_params(body: dict, eng: Engine) -> dict:
                 sp[sym] = _num(f"spread {sym}", pts, float, 0, 10000)
             if sp:
                 out["cost"][k] = sp
+            continue
+        if k == "swap_mode":  # C2: off | table | zero (implicit după strategie)
+            sm = str(v or "").lower()
+            if sm not in ("off", "table", "zero"):
+                raise HTTPException(status_code=422, detail="cost.swap_mode: off|table|zero")
+            out["cost"][k] = sm
             continue
         if k not in BT_COST_NUM:
             raise HTTPException(status_code=422, detail=f"cost: cheie necunoscută {k}")

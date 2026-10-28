@@ -15,6 +15,18 @@ params.exit = {mode, params} an exit policy from app.exits (default base = live 
 fixed spreads per symbol, record_paths/paths_out per-trade bar paths (JSONL). run_cached() keeps phase 1 (and the
 loaded bars) in a caller-owned dict, so a sweep over exit policies only re-runs phase 2.
 
+Stage C2 (higher timeframes, long holds): signal_tf H1/H4/D1, htf_tf a higher TF or 'NONE' (no HTF series is
+loaded; plugins may ignore it). A plugin's RUN_DEFAULTS (backtest-only: timeframes, no session, no time stop, no BE,
+swap on) apply unless the run sets the key; its default_exit(cfg) is the exit policy when params.exit is absent;
+the 'signal_flip' exit asks the plugin's bias() at every closed bar (memoised in the run_cached cache).
+exit.params max_hold_minutes/hours/days (≤ 60 days, 0 = none) override the strategy's time stop.
+Swap/financing: cost.swap_mode 'off' (default for the intraday strategies: nothing computed, results unchanged),
+'table' (cost.swap_pts_per_day {symbol: [long_pts, short_pts]} in points per day, negative = cost; missing symbols
+use SWAP_DEFAULT_PTS = -0.5 pip per side) or 'zero' (sensitivity: swap reported as 0). Charged per broker-midnight
+rollover (17:00 New York = 21:00/22:00 UTC, the D1 bar boundary) strictly inside the holding interval (Mon–Fri,
+Wednesday ×3; an exit at a bar close = broker midnight does not pay that night) on the full volume, converted to USD with the trade's tick value and to R
+with its initial risk; trades carry swap_usd/swap_r/rollovers and the summary the totals.
+
 CLI: python -m app.backtest --symbols EURUSD,GBPUSD --days 90
 """
 from __future__ import annotations
@@ -31,7 +43,8 @@ import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from . import exits
 from . import risk as risk_mod
@@ -52,6 +65,12 @@ DEFAULT_COMMISSION = 7.0
 DEFAULT_SLIPPAGE = 1.0
 DEFAULT_STRATEGY = "trend-v1"
 # USD value of one unit of the quote currency when no loaded pair gives the rate (warned)
+SWAP_MODES = ("off", "table", "zero")
+SWAP_DEFAULT_PTS = (-5.0, -5.0)  # -0.5 pip/day long and short (5 points on 5-digit and 3-digit JPY pairs)
+ROLLOVER_UTC_H = 22  # legacy constant (winter value); rollovers() uses ROLLOVER_TZ / ROLLOVER_LOCAL_H
+ROLLOVER_TZ = ZoneInfo("America/New_York")  # New-York-close broker: rollover at broker midnight = 17:00 NY
+ROLLOVER_LOCAL_H = 17
+INTRABAR_REASONS = ("SL", "TP", "BE", "TRAIL")  # exits somewhere inside the bar (stamped with the bar open)
 APPROX_USD = {"EUR": 1.08, "GBP": 1.27, "JPY": 1 / 150.0, "CHF": 1.12, "CAD": 0.73, "AUD": 0.65, "NZD": 0.59,
               "SEK": 0.095, "NOK": 0.092, "SGD": 0.74, "HKD": 0.128}
 
@@ -168,6 +187,11 @@ def resolve(db, params: dict) -> dict:
             for k, v in (getattr(plugin, "PARAMS", None) or {}).items():
                 strat.setdefault(k, v)
         strat.update(params.get("strategy") or {})
+    run_def = dict(getattr(plugin, "RUN_DEFAULTS", None) or {}) if plugin is not None else {}
+    own = params.get("strategy") or {}
+    for k, v in run_def.items():
+        if k not in ("session", "swap_mode") and k not in own:
+            strat[k] = v
     if params.get("signal_tf"):
         strat["signal_timeframe"] = str(params["signal_tf"]).upper()
     if params.get("htf_tf"):
@@ -178,10 +202,15 @@ def resolve(db, params: dict) -> dict:
     if "session" in params:
         sess = params["session"]
         sched = None if sess is None else {**sched, "enabled": True, **sess}
+    elif "session" in run_def:
+        sess = run_def["session"]
+        sched = None if sess is None else {**sched, "enabled": True, **sess}
     elif not sched.get("enabled", True):
         sched = None
+    if str(strat["htf_timeframe"]).upper() == "NONE":
+        strat["htf_timeframe"] = "NONE"  # no HTF series (plugins that ignore the HTF)
     for tf in (strat["signal_timeframe"], strat["htf_timeframe"]):
-        if tf not in TF_SECONDS:
+        if tf not in TF_SECONDS and (tf != "NONE" or tf == strat["signal_timeframe"]):
             raise ValueError(f"timeframe necunoscut: {tf}")
     symbols = [str(x).upper() for x in (params.get("symbols") or strat.get("symbols") or [])]
     if not symbols:
@@ -197,7 +226,8 @@ def resolve(db, params: dict) -> dict:
         raise ValueError("interval invalid (end_ts <= start_ts)")
     cost = {"mode": "stats", "fixed_spread_pts": None, "commission_per_lot_usd": DEFAULT_COMMISSION,
             "slippage_pts": DEFAULT_SLIPPAGE}
-    cost.update({k: v for k, v in (params.get("cost") or {}).items() if v is not None})
+    raw_cost = params.get("cost") or {}
+    cost.update({k: v for k, v in raw_cost.items() if v is not None and k not in ("swap_mode", "swap_pts_per_day")})
     if cost["mode"] not in ("stats", "bar", "fixed"):
         raise ValueError(f"cost.mode invalid: {cost['mode']}")
     per_sym = {}
@@ -210,9 +240,20 @@ def resolve(db, params: dict) -> dict:
             raise ValueError(f"cost.per_symbol_spread_pts.{k}: între 0 și 1000")
         per_sym[str(k).upper()] = fv
     cost["per_symbol_spread_pts"] = per_sym
+    _resolve_swap(cost, raw_cost, run_def)
     if cost["mode"] == "fixed" and cost.get("fixed_spread_pts") is None and any(s_ not in per_sym for s_ in symbols):
         raise ValueError("cost.fixed_spread_pts lipsește pentru mode=fixed")
-    exit_policy = exits.ExitPolicy.from_spec(params.get("exit"))
+    if params.get("exit") is None and callable(getattr(plugin, "default_exit", None)):
+        exit_policy = exits.ExitPolicy.from_spec(plugin.default_exit(strat))
+    else:
+        exit_policy = exits.ExitPolicy.from_spec(params.get("exit"))
+    if "signal_flip" in exit_policy.modes and not callable(getattr(plugin, "bias", None)):
+        raise ValueError(f"exit signal_flip: strategia {strategy_name} nu oferă bias() (direcția pe fiecare bară)")
+    max_hold_s = None  # None -> strategy max_hold_minutes, exactly as before
+    if exit_policy.hold_minutes is not None:
+        max_hold_s = int(round(exit_policy.hold_minutes * 60))
+    elif not 0 <= float(strat.get("max_hold_minutes") or 0) <= exits.MAX_HOLD_MINUTES:
+        raise ValueError("max_hold_minutes: între 0 și 60 de zile (0 = fără limită)")
     if params.get("record_paths") and not params.get("paths_out"):
         raise ValueError("record_paths necesită paths_out (cale fișier JSONL)")
     return {"strategy": strat, "risk": rsk, "schedule": sched, "symbols": symbols, "start_ts": start, "end_ts": end,
@@ -222,7 +263,58 @@ def resolve(db, params: dict) -> dict:
             "workers": params.get("workers"), "strategy_name": strategy_name,
             "strategy_version": getattr(plugin, "VERSION", None) if plugin is not None else strategy.STRATEGY_VERSION,
             "exit": exit_policy, "record_paths": bool(params.get("record_paths")),
-            "paths_out": params.get("paths_out")}
+            "paths_out": params.get("paths_out"), "max_hold_s": max_hold_s}
+
+
+def _resolve_swap(cost: dict, raw_cost: dict, run_def: dict) -> None:
+    """cost.swap_* in place; nothing is added when swap is off (results identical to the pre-swap backtest)."""
+    mode = raw_cost.get("swap_mode")
+    if mode is None:
+        mode = "table" if raw_cost.get("swap_pts_per_day") else run_def.get("swap_mode", "off")
+    mode = str(mode).lower()
+    if mode not in SWAP_MODES:
+        raise ValueError(f"cost.swap_mode invalid: {mode} (unul din {', '.join(SWAP_MODES)})")
+    if mode == "off":
+        return
+    table = {}
+    for k, v in (raw_cost.get("swap_pts_per_day") or {}).items():
+        try:
+            lo, sh = (float(x) for x in v)
+        except (TypeError, ValueError):
+            raise ValueError(f"cost.swap_pts_per_day.{k}: [puncte long, puncte short]") from None
+        if not (abs(lo) <= 10000 and abs(sh) <= 10000):
+            raise ValueError(f"cost.swap_pts_per_day.{k}: valori prea mari")
+        table[str(k).upper()] = [lo, sh]
+    cost["swap_mode"] = mode
+    cost["swap_pts_per_day"] = table
+    cost["swap_default_pts"] = list(SWAP_DEFAULT_PTS)
+
+
+def rollovers(t_open: float, t_end: float) -> int:
+    """Swap days charged for a position open over the open interval (t_open, t_end): one per broker-midnight rollover
+    (17:00 New York, i.e. 21:00 UTC in summer / 22:00 UTC in winter) from Monday to Friday, three on Wednesday (the
+    weekend), none on Saturday/Sunday. A rollover exactly at the fill or at the exit instant is not charged (a D1
+    bar opens and closes at broker midnight)."""
+    if t_end <= t_open:
+        return 0
+    d = datetime.fromtimestamp(t_open, ROLLOVER_TZ).date()
+    n = 0
+    while True:
+        r = datetime.combine(d, dtime(ROLLOVER_LOCAL_H), tzinfo=ROLLOVER_TZ).timestamp()
+        if r >= t_end:
+            break
+        if r > t_open and d.weekday() < 5:
+            n += 3 if d.weekday() == 2 else 1
+        d += timedelta(days=1)
+    return n
+
+
+def swap_points(cost: dict, symbol: str, side: str) -> float:
+    """Swap per day in points for one side (0 in mode 'zero' or 'off')."""
+    if cost.get("swap_mode") != "table":
+        return 0.0
+    lo, sh = (cost.get("swap_pts_per_day") or {}).get(symbol.upper()) or cost.get("swap_default_pts") or SWAP_DEFAULT_PTS
+    return float(lo if side == "BUY" else sh)
 
 
 class Session:
@@ -282,7 +374,7 @@ def scan_symbol(job: dict) -> dict:
     """Run strategy.analyze on every requested closed bar with a neutral context (process-pool safe).
     Returns {"symbol", "decisions": {i: (side, entry, sl, tp, score, market_blockers)}, "n": analyses run}."""
     symbol, cfg, rsk = job["symbol"], job["strategy"], job["risk"]
-    sec, hsec = TF_SECONDS[cfg["signal_timeframe"]], TF_SECONDS[cfg["htf_timeframe"]]
+    sec, hsec = TF_SECONDS[cfg["signal_timeframe"]], TF_SECONDS.get(cfg["htf_timeframe"], 0)
     point, digits, stops_level = job["point"], job["digits"], job["stops_level"]
     sig = [{"t": t, "o": o, "h": h, "l": l, "c": c} for t, o, h, l, c in job["sig"]]
     htf = [{"t": t, "o": o, "h": h, "l": l, "c": c} for t, o, h, l, c in job["htf"]]
@@ -490,7 +582,7 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
     cfg = resolve(db, params)
     strat, rsk, cost = cfg["strategy"], cfg["risk"], cfg["cost"]
     tf, htf_tf = strat["signal_timeframe"], strat["htf_timeframe"]
-    sec, hsec = TF_SECONDS[tf], TF_SECONDS[htf_tf]
+    sec, hsec = TF_SECONDS[tf], TF_SECONDS.get(htf_tf, 0)  # htf 'NONE' -> no HTF series
     start, end, now = cfg["start_ts"], cfg["end_ts"], cfg["now_ts"]
     warnings: list[str] = []
     sess = Session(cfg["schedule"], cfg["tz"], start - 2 * 86400, end + 2 * 86400)
@@ -506,7 +598,7 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
         htfs: dict[str, list[dict]] = {}
         for sym in cfg["symbols"]:
             series[sym] = load_bars(db, sym, tf, sig_from, end, now)
-            htfs[sym] = load_bars(db, sym, htf_tf, htf_from, end, now)
+            htfs[sym] = load_bars(db, sym, htf_tf, htf_from, end, now) if hsec else []
         data = (series, htfs)
         if cache is not None:
             cache[data_key] = data
@@ -518,7 +610,7 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
         elif len(series[sym]) - n_in < strategy.MIN_SIG_BARS:
             warnings.append(f"{sym}: istoric insuficient înainte de început ({len(series[sym]) - n_in} bare {tf}); "
                             f"primele analize sunt HOLD până la {strategy.MIN_SIG_BARS} bare.")
-        if len(htfs[sym]) < strategy.MIN_HTF_BARS:
+        if hsec and len(htfs[sym]) < strategy.MIN_HTF_BARS:
             warnings.append(f"{sym}: doar {len(htfs[sym])} bare {htf_tf} (minim {strategy.MIN_HTF_BARS}).")
 
     # spreads (points) per bar
@@ -609,7 +701,10 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
     # phase 2
     t2 = time.time()
     prices = _Prices(series, sec)
-    res = _simulate(cfg, series, spreads, specs, scans, sess, prices, warnings)
+    bias = None
+    if "signal_flip" in cfg["exit"].modes:
+        bias = _bias_lookup(cfg, series, htfs, sec, hsec, cache, data_key)
+    res = _simulate(cfg, series, spreads, specs, scans, sess, prices, warnings, bias=bias)
     trades = res["trades"]
     if prices.approx_used:
         warnings.append("Curs USD aproximativ pentru " + ", ".join(sorted(prices.approx_used))
@@ -623,6 +718,16 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
         _write_paths(cfg["paths_out"], res.get("paths") or [])
 
     summary = summarize(trades, ci=True)
+    if cost.get("swap_mode"):
+        summary["swap_r"] = round(math.fsum(t["swap_r"] for t in trades), 3)
+        summary["swap_usd"] = round(math.fsum(t["swap_usd"] for t in trades), 2)
+        summary["swap_days"] = sum(t["rollovers"] for t in trades)
+        dflt = sorted(s_ for s_ in cfg["symbols"] if s_ not in cost["swap_pts_per_day"])
+        if cost["swap_mode"] == "table" and dflt:
+            warnings.append(f"Swap estimat (tabel implicit {SWAP_DEFAULT_PTS[0]:g}/{SWAP_DEFAULT_PTS[1]:g} puncte/zi "
+                            f"long/short) pentru {', '.join(dflt)} — trimite cost.swap_pts_per_day pentru valorile brokerului.")
+        elif cost["swap_mode"] == "zero":
+            warnings.append("Swap setat la zero (swap_mode='zero', test de sensibilitate).")
     first = min((b["t"] + sec for bars in series.values() for b in bars if b["t"] + sec >= start), default=start)
     last = max((b["t"] + sec for bars in series.values() for b in bars), default=end)
     summary["sample_days"] = round(max(0.0, min(last, end) - first) / 86400, 1)
@@ -666,6 +771,27 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
     }
 
 
+def _bias_lookup(cfg: dict, series: dict, htfs: dict, sec: int, hsec: int, cache: dict | None, data_key):
+    """bias(sym, i): the plugin's direction at the close of signal bar i, from the same closed-bar windows as phase 1
+    (memoised; kept in the run_cached cache so an exit sweep computes it once)."""
+    plugin = get_plugin(cfg["strategy_name"])
+    strat = cfg["strategy"]
+    key = ("bias", cfg["strategy_name"], _digest(strat), data_key)
+    memo = cache.setdefault(key, {}) if cache is not None else {}
+    htf_close = {s: [b["t"] + hsec for b in hb] for s, hb in htfs.items()}
+
+    def bias(sym: str, i: int) -> int:
+        v = memo.get((sym, i))
+        if v is None:
+            bars = series[sym]
+            k = bisect.bisect_right(htf_close[sym], bars[i]["t"] + sec)
+            v = int(plugin.bias(sym, bars[max(0, i - SIG_WINDOW + 1): i + 1], htfs[sym][max(0, k - HTF_WINDOW): k],
+                                strat) or 0)
+            memo[(sym, i)] = v
+        return v
+    return bias
+
+
 def _write_paths(path: str, rows: list[dict]) -> None:
     d = os.path.dirname(os.path.abspath(path))
     os.makedirs(d, exist_ok=True)
@@ -675,12 +801,14 @@ def _write_paths(path: str, rows: list[dict]) -> None:
 
 
 def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, sess: Session, prices: _Prices,
-              warnings: list[str]) -> dict:
+              warnings: list[str], bias=None) -> dict:
     strat, rsk, cost = cfg["strategy"], cfg["risk"], cfg["cost"]
     sec = TF_SECONDS[strat["signal_timeframe"]]
     start, end = cfg["start_ts"], cfg["end_ts"]
     corr = int(rsk.get("max_same_currency_direction", 1))
-    max_hold = int(strat.get("max_hold_minutes") or 0) * 60
+    max_hold = int(strat.get("max_hold_minutes") or 0) * 60 if cfg.get("max_hold_s") is None else int(cfg["max_hold_s"])
+    swap_on = bool(cost.get("swap_mode"))
+    t_index: dict[str, dict[int, int]] = {}
     be_r = float(strat.get("break_even_at_r") or 0)
     expiry = int(strat.get("signal_expiry_minutes") or 15) * 60
     session_end_close = bool(strat.get("close_at_session_end"))
@@ -727,6 +855,12 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
             gross = (px - sp.entry) * sp.sign / spec["tick_size"] * tv * vol
         comm = comm_lot * vol
         net = gross - comm
+        if swap_on:
+            # an exit inside a bar may come after a rollover strictly inside that bar: charged (conservative); a
+            # rollover at the bar close (broker midnight) is after the exit and is not
+            n_roll = rollovers(sp.opened_t, t + sec if reason in INTRABAR_REASONS else t)
+            swap_usd = swap_points(cost, sym, sp.side) * spec["point"] / spec["tick_size"] * tv * vol * n_roll
+            net += swap_usd
         r = net / risk_usd if risk_usd > 0 else 0.0
         equity += net
         peak = max(peak, equity)
@@ -749,6 +883,9 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
         })
         if sp.closed_frac:
             trades[-1]["partial_frac"] = round(sp.closed_frac, 4)
+        if swap_on:
+            trades[-1].update(swap_usd=round(swap_usd, 2), swap_r=round(swap_usd / risk_usd, 4) if risk_usd > 0 else 0.0,
+                              rollovers=n_roll)
         if record:
             paths.append({"source": "backtest", "trade_id": f"{sym}-{sp.opened_t}", "symbol": sym, "side": sp.side,
                           "entry_t": sp.opened_t, "exit_t": int(t), "outcome": reason, "r": round(r, 4),
@@ -802,8 +939,13 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
                         frac = _partial_frac(pos["volume"], policy.p["partial_frac"], spec)
                         if frac == 0.0:
                             counts["partial_disabled_min_lot"] += 1
+                    bias_fn = None
+                    if bias is not None and "signal_flip" in policy.modes:
+                        if sym not in t_index:
+                            t_index[sym] = {b_["t"]: n_ for n_, b_ in enumerate(series[sym])}
+                        bias_fn = (lambda bar_, s_=sym: bias(s_, t_index[s_][bar_["t"]]))
                     exits.attach(sim, policy, history=series[sym][max(0, i - exits.WARMUP_BARS):i], bar_sec=sec,
-                                 partial_frac=frac)
+                                 partial_frac=frac, bias_fn=bias_fn)
                 if record:
                     if sim.ind is None:
                         sim.ind = exits.IncIndicators().seed(series[sym][max(0, i - exits.WARMUP_BARS):i])
@@ -968,8 +1110,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--r-only", action="store_true", help="ignoră lotul minim (măsoară doar R)")
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--strategy", default=DEFAULT_STRATEGY, help="numele strategiei (app.strategies)")
-    ap.add_argument("--exit", default="base", help="politica de ieșire (app.exits.MODES)")
+    ap.add_argument("--exit", default="plugin", help="politica de ieșire (app.exits.MODES; 'plugin' = cea a strategiei)")
     ap.add_argument("--exit-params", default="{}", help='parametri JSON, ex. {"trail_start_r": 1.0}')
+    ap.add_argument("--swap-mode", default=None, choices=list(SWAP_MODES),
+                    help="swap/finanțare: off | table (implicit -0.5 pip/zi) | zero; implicit după strategie")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     path = a.db or str(get_settings().db_path)
@@ -977,8 +1121,9 @@ def main(argv: list[str] | None = None) -> int:
     params = {"days": a.days, "signal_tf": a.signal_tf, "htf_tf": a.htf_tf, "initial_equity": a.equity,
               "risk_pct": a.risk_pct, "workers": a.workers, "size_mode": "r_only" if a.r_only else "live",
               "cost": {"mode": a.cost, "fixed_spread_pts": a.spread, "commission_per_lot_usd": a.commission,
-                       "slippage_pts": a.slippage},
-              "strategy_name": a.strategy, "exit": {"mode": a.exit, "params": json.loads(a.exit_params)}}
+                       "slippage_pts": a.slippage, "swap_mode": a.swap_mode},
+              "strategy_name": a.strategy,
+              "exit": {"mode": a.exit, "params": json.loads(a.exit_params)} if a.exit != "plugin" else None}
     if a.symbols:
         params["symbols"] = [x.strip().upper() for x in a.symbols.split(",") if x.strip()]
     if a.no_session:

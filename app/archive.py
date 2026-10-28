@@ -1,8 +1,11 @@
 """Bar history archive (bars_archive) backfilled from the EA (v1.11+, HISTX) + live spread statistics.
 
 The planner asks the EA for one batch at a time (HISTX|sym|tf|end_utc|count), walking backwards from the
-oldest archived bar until ARCHIVE_DAYS are covered or the broker has nothing older. DB writes run on a
-single background thread so the event loop never waits on a 5000-row insert."""
+oldest archived bar until ARCHIVE_DAYS are covered or the broker has nothing older. Once every base pair
+([signal_tf, htf_tf, M15] x active symbols) reached ARCHIVE_DAYS, the extended targets of ARCHIVE_EXTRA (TF:days, e.g.
+H1:1095,H4:1825,D1:3650; off by default, enabled for research in .env) are walked, D1 first, at most one request per
+ARCHIVE_EXTRA_INTERVAL_S counted from the previous extended reply (or its timeout), never while the bot holds MT5
+positions. DB writes run on a single background thread so the event loop never waits on a 5000-row insert."""
 from __future__ import annotations
 
 import logging
@@ -17,7 +20,10 @@ from .config import TF_SECONDS, iso
 ARCHIVE_EA_VERSION = (1, 11)
 ARCHIVE_EXTRA_TF = "M15"
 MAX_BATCH = 5000
+EXTRA_MAX_BATCH = 3000     # extended (multi-year) walks: smaller batches, shorter CopyRates stalls in the EA
+EXTRA_OFF = ("", "0", "off", "none", "false", "no")
 PENDING_TIMEOUT_S = 60.0   # no reply to a HISTX in this time -> retry later
+EXTRA_INTERVAL_DEFAULT_S = 60.0  # pause between the end of one extended HISTX and the next (EA free ≥ ~2/3 of the time)
 ERR_BACKOFF_S = 30.0       # EA series not ready: retry after 30 s, 60 s, ... (max ERR_BACKOFF_MAX_S)
 ERR_BACKOFF_MAX_S = 600.0
 WRITE_CHUNK = 500
@@ -68,17 +74,86 @@ def archive_tfs(rt) -> list[str]:
     return out
 
 
-def target_ts(rt, now: float) -> int:
-    return int(now - max(1, int(rt.settings.ARCHIVE_DAYS)) * 86400)
+def base_days(rt) -> int:
+    return max(1, int(rt.settings.ARCHIVE_DAYS))
+
+
+def extra_targets(settings) -> dict[str, int]:
+    """ARCHIVE_EXTRA "H1:1095,H4:1825,D1:3650" -> {tf: days}; unknown TFs / bad items ignored, "off" -> {}."""
+    raw = str(getattr(settings, "ARCHIVE_EXTRA", "") or "").strip()
+    out: dict[str, int] = {}
+    if raw.lower() in EXTRA_OFF:
+        return out
+    for part in raw.replace(";", ",").split(","):
+        tf, _, d = part.strip().partition(":")
+        tf = tf.strip().upper()
+        try:
+            days = int(float(d))
+        except ValueError:
+            continue
+        if tf in TF_SECONDS and days > 0:
+            out[tf] = max(out.get(tf, 0), days)
+    return out
+
+
+def extra_order(settings) -> list[str]:
+    """Extended TFs, cheapest (fewest bars per day) first: D1, H4, H1, ..."""
+    return sorted(extra_targets(settings), key=lambda tf: -TF_SECONDS[tf])
+
+
+def days_target(rt, tf: str) -> int:
+    """Days of history wanted for a TF: max(ARCHIVE_DAYS if tf is in the base set, ARCHIVE_EXTRA[tf])."""
+    base = base_days(rt) if tf in archive_tfs(rt) else 0
+    return max(base, extra_targets(rt.settings).get(tf, 0)) or base_days(rt)
+
+
+def target_ts(rt, now: float, tf: str | None = None) -> int:
+    """Oldest bar time wanted; without tf: the base ARCHIVE_DAYS target."""
+    days = base_days(rt) if tf is None else days_target(rt, tf)
+    return int(now - days * 86400)
 
 
 def _entry(rt, symbol: str, tf: str, now: float) -> dict:
     e = rt.archive_status.setdefault(symbol, {}).setdefault(
-        tf, {"bars": 0, "oldest_ts": None, "target_ts": target_ts(rt, now), "done": False})
-    e["target_ts"] = target_ts(rt, now)
+        tf, {"bars": 0, "oldest_ts": None, "target_ts": target_ts(rt, now, tf), "done": False})
+    e["target_ts"] = target_ts(rt, now, tf)
     e["done"] = (symbol, tf) in rt.archive_plan["exhausted"] or (
         e["oldest_ts"] is not None and e["oldest_ts"] <= e["target_ts"])
     return e
+
+
+def _base_reached(rt, symbol: str, tf: str, e: dict, now: float) -> bool:
+    return e["done"] or (e["oldest_ts"] is not None and e["oldest_ts"] <= target_ts(rt, now))
+
+
+def status_view(rt, now: float | None = None) -> dict:
+    """GET /api/archive/status payload: per-TF days_target, extended TFs listed even before their walk starts."""
+    now = now or time.time()
+    refresh_status(rt, now)
+    plan = rt.archive_plan
+    extras = extra_targets(rt.settings)
+    base_tfs = archive_tfs(rt)
+    pairs = {(sym, tf): e for sym, tfs in rt.archive_status.items() for tf, e in tfs.items()}
+    for sym in rt.active_symbols():
+        for tf in extras:
+            pairs.setdefault((sym, tf), {"bars": 0, "oldest_ts": None, "target_ts": target_ts(rt, now, tf),
+                                         "done": False})
+    symbols: dict[str, dict] = {}
+    for (sym, tf), info in sorted(pairs.items(), key=lambda kv: (kv[0][0], -TF_SECONDS.get(kv[0][1], 0))):
+        oldest = info.get("oldest_ts")
+        symbols.setdefault(sym, {})[tf] = {
+            **info, "days_target": days_target(rt, tf),
+            "days_loaded": round(max(0.0, now - oldest) / 86400, 1) if oldest else 0.0,
+            "extended": tf in extras, "exhausted": (sym, tf) in plan["exhausted"],
+            "history_start_ts": plan.get("history_start", {}).get((sym, tf)),
+        }
+    base_left = any(not _base_reached(rt, s, tf, _entry(rt, s, tf, now), now)
+                    for s in rt.active_symbols() for tf in base_tfs)
+    extra_left = any(not v["done"] for s in symbols.values() for tf, v in s.items() if v["extended"])
+    return {"enabled": bool(getattr(rt.settings, "ARCHIVE_ENABLED", True)), "days_target": base_days(rt),
+            "extra": extras, "extra_interval_s": float(getattr(rt.settings, "ARCHIVE_EXTRA_INTERVAL_S", EXTRA_INTERVAL_DEFAULT_S) or 0),
+            "phase": "base" if base_left else ("extra" if extra_left else "done"),
+            "ea_version": rt.bridge.get("ea_version"), "symbols": symbols}
 
 
 def rebuild_status(rt, now: float | None = None) -> dict:
@@ -124,23 +199,56 @@ def next_request(rt, now: float, commands_pending: bool = False, hist_pending: b
         if now - pend["sent_ts"] < PENDING_TIMEOUT_S:
             return None
         plan["pending"] = None
+        if pend.get("extended"):
+            plan["extra_last_ts"] = now  # the EA may have been busy until now: the pause starts here
         _note_error(rt, (pend["symbol"], pend["tf"]), now, "fără răspuns de la EA")
     batch = max(1, min(MAX_BATCH, int(s.ARCHIVE_BATCH_BARS or MAX_BATCH)))
+    # 1) base set [signal_tf, htf_tf, M15] up to ARCHIVE_DAYS, every active symbol
     for sym in rt.active_symbols():
         for tf in archive_tfs(rt):
             e = _entry(rt, sym, tf, now)
+            if _base_reached(rt, sym, tf, e, now):
+                continue
+            if plan["retry_at"].get((sym, tf), 0) > now:
+                continue
+            return _request(rt, sym, tf, e, target_ts(rt, now), batch, now, extended=False)
+    # 2) extended targets (ARCHIVE_EXTRA), D1 -> H4 -> H1, at most one request per ARCHIVE_EXTRA_INTERVAL_S counted from
+    # the previous extended reply (a CopyRates download can block the EA for tens of seconds).
+    # A base pair stuck in error backoff does not hold the extended walk back.
+    if not extra_targets(s):
+        return None
+    if _bot_positions_open(rt):
+        return None  # the multi-year walk waits for a quiet moment: no bot position whose SL/trailing is managed
+    interval = max(0.0, float(getattr(s, "ARCHIVE_EXTRA_INTERVAL_S", EXTRA_INTERVAL_DEFAULT_S) or 0))
+    last = plan.get("extra_last_ts")
+    if last is not None and now - last < interval:
+        return None
+    xbatch = max(1, min(batch, EXTRA_MAX_BATCH))
+    for tf in extra_order(s):
+        for sym in rt.active_symbols():
+            e = _entry(rt, sym, tf, now)
             if e["done"] or plan["retry_at"].get((sym, tf), 0) > now:
                 continue
-            sec = TF_SECONDS[tf]
-            end = int(e["oldest_ts"]) if e["oldest_ts"] is not None else int(now // sec * sec)
-            need = math.ceil((end - e["target_ts"]) / sec)
-            count = max(1, min(batch, need))
-            # the EA converts end_utc with its own (possibly skewed) UTC clock and today's server offset
-            ea_end = end + int(rt.bridge.get("clock_skew_s") or 0) + _end_delta(rt, end, now)
-            plan["pending"] = {"symbol": sym, "tf": tf, "end_utc": end, "ea_end": ea_end, "count": count,
-                               "sent_ts": now}
-            return f"HISTX|{sym}|{tf}|{ea_end}|{count}"
+            plan["extra_last_ts"] = now
+            return _request(rt, sym, tf, e, e["target_ts"], xbatch, now, extended=True)
     return None
+
+
+def _bot_positions_open(rt) -> bool:
+    magic = int(rt.settings.MT5_MAGIC)
+    return any(isinstance(p, dict) and int(p.get("magic") or 0) == magic for p in (rt.mt5_positions or []))
+
+
+def _request(rt, sym: str, tf: str, e: dict, target: int, batch: int, now: float, extended: bool) -> str:
+    sec = TF_SECONDS[tf]
+    end = int(e["oldest_ts"]) if e["oldest_ts"] is not None else int(now // sec * sec)
+    need = math.ceil((end - target) / sec)
+    count = max(1, min(batch, need))
+    # the EA converts end_utc with its own (possibly skewed) UTC clock and today's server offset
+    ea_end = end + int(rt.bridge.get("clock_skew_s") or 0) + _end_delta(rt, end, now)
+    rt.archive_plan["pending"] = {"symbol": sym, "tf": tf, "end_utc": end, "ea_end": ea_end, "count": count,
+                                  "sent_ts": now, "extended": extended}
+    return f"HISTX|{sym}|{tf}|{ea_end}|{count}"
 
 
 # ---- broker server time zone (DST) ------------------------------------------
@@ -311,6 +419,8 @@ def ingest_payload(rt, items, now: float | None = None) -> list[Future]:
         if is_reply:
             end = int(pend["end_utc"])
             plan["pending"] = None
+            if pend.get("extended"):
+                plan["extra_last_ts"] = now  # throttle from the reply: a slow EA still gets the full pause
         else:
             end = it_end - skew - _end_delta(rt, it_end - skew, now) if it_end is not None else None
         rows = _clean_bars(it.get("bars"), tf, end, now)
@@ -325,8 +435,9 @@ def ingest_payload(rt, items, now: float | None = None) -> list[Future]:
             if err not in (None, 0, "0", ""):
                 _note_error(rt, key, now, f"eroare {err}")
                 continue
-            # nothing older at the broker: the pair is complete as far as it can go
+            # nothing older at the broker: the pair is complete as far as it can go (oldest_ts = real history start)
             plan["exhausted"].add(key)
+            plan.setdefault("history_start", {})[key] = e["oldest_ts"]
             plan["errors"].pop(key, None)
             _entry(rt, sym, tf, now)
             rt.log("INFO", "archive", f"Arhivă {sym} {tf} completă: brokerul nu are bare mai vechi de "
@@ -338,6 +449,7 @@ def ingest_payload(rt, items, now: float | None = None) -> list[Future]:
         if e["oldest_ts"] is not None and oldest >= e["oldest_ts"]:
             # no progress (the EA keeps answering with bars we already have): stop walking this pair
             plan["exhausted"].add(key)
+            plan.setdefault("history_start", {})[key] = e["oldest_ts"]
         else:
             e["oldest_ts"] = oldest
         e["bars"] = int(e["bars"] or 0) + len(rows)  # approximate until the writer recounts

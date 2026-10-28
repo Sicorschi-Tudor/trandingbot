@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     ARCHIVE_ENABLED: bool = True
     ARCHIVE_DAYS: int = 120
     ARCHIVE_BATCH_BARS: int = 5000
+    # extended higher-TF history (Stage C2 research): "TF:days,..." walked after the base set; off by default (live
+    # unchanged), e.g. ARCHIVE_EXTRA=H1:1095,H4:1825,D1:3650 in .env for the research setup
+    ARCHIVE_EXTRA: str = "off"
+    ARCHIVE_EXTRA_INTERVAL_S: float = 60
     # broker server-time DST rule for archive bars (EA v1.12+): auto | EET | NY | fixed | IANA zone name
     MT5_SERVER_TZ: str = "auto"
 
