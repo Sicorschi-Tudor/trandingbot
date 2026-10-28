@@ -153,3 +153,28 @@ Ce aduce v1.12:
 Pași: la fel ca la v1.11 (înlocuiește fișierul, **F7**, reatașează EA-ul; în pagina web versiunea devine `1.12`).
 Dacă brokerul nu schimbă deloc ora (offset fix tot anul), pune `MT5_SERVER_TZ=fixed` în `.env`.
 Barele arhivate cu v1.11 înainte de ultima schimbare a orei pot rămâne decalate cu 1 oră — pentru un backtest exact pe acea perioadă, golește arhiva perechii și las-o să se descarce din nou.
+
+## 12. Actualizare la v1.13
+
+Ce aduce v1.13:
+- **Simboluri de cercetare** (`RESEARCH_SYMBOLS` în `.env`): serverul cere istoric D1/H4/H1 și pentru simboluri care NU se tranzacționează (aur, indici, petrol, crypto ...), după ce arhiva simbolurilor active este completă. EA-ul le adaugă în Market Watch (`SymbolSelect`) doar pentru a copia barele; nu trimite cotații pentru ele și nu le tranzacționează.
+- Dacă un nume nu există la broker, EA-ul răspunde cu `err="UNKNOWN_SYMBOL"`; serverul încearcă următoarea variantă de nume (ex. `US500` → `SPX500` → `US500.cash` → `SP500`) și, când nu mai are variante, marchează simbolul ca indisponibil și nu îl mai cere.
+
+Pași: la fel ca la v1.11 (înlocuiește fișierul, **F7**, reatașează EA-ul; în pagina web versiunea devine `1.13`).
+Cu EA v1.12 serverul funcționează normal, dar nu cere simbolurile de cercetare.
+
+## 13. Actualizare la v1.14
+
+Ce aduce v1.14:
+- **Istoricul calendarului economic, cu cifre** (doar pentru cercetare): serverul cere EA-ului, pe rând, ferestre din calendarul MT5 (linia `CALHIST`), din 2015 până la +7 zile, cu valorile *actual*, *forecast*, *previous* și *revised*, importanța, moneda și țara fiecărui eveniment. Datele se salvează în baza de date a serverului (`calendar_history`) și sunt folosite doar pentru studii (efectul surprizelor din știri); tranzacționarea live nu le citește.
+- Cererile nu întârzie niciodată tranzacționarea: serverul nu trimite `CALHIST` cât timp are o comandă OPEN/MODIFY/CLOSE în curs, o cerere de istoric (`HIST`/`HISTX`) neterminată sau o poziție deschisă a botului. EA-ul citește calendarul din baza locală a terminalului **după** ce a executat comenzile din răspuns și îl trimite la sincronizarea următoare (cel mult 4000 de valori per fereastră, ≈ 0,9 MB).
+- Pe grafic apare rândul `Istoric calendar: N ferestre trimise`.
+
+Pași:
+1. Înlocuiește fișierul `MQL5/Experts/AIBridgeEA.mq5` cu versiunea nouă din `mt5/` (File > Open Data Folder > MQL5 > Experts).
+2. Deschide-l în MetaEditor și apasă **F7** (Compile) — trebuie să apară `0 errors`.
+3. Scoate EA-ul de pe grafic (click dreapta pe grafic > Expert list > Remove) și atașează-l din nou din Navigator. Parametrii (Inputs) rămân aceiași.
+4. Verifică în tab-ul **Experts**: `AIBridgeEA v1.14 pornit (instanta ...)`. În pagina web, versiunea EA devine `1.14`.
+5. Terminalul trebuie să fie **conectat** la broker ca să aibă calendarul economic. Dacă MT5 răspunde cu eroare, serverul reîncearcă automat (după 30 s, 60 s, ... maxim 10 min) — nu e nevoie de nicio acțiune.
+
+Notă: cu EA v1.13 (sau mai vechi) serverul funcționează normal, dar nu cere istoricul calendarului. Funcția se poate opri din `.env` cu `CALHIST_ENABLED=false`.

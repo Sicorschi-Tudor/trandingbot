@@ -8,7 +8,7 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from . import archive
+from . import archive, calendar_hist
 from .config import TF_SECONDS
 from .executor import EA_EXT_OPEN_VERSION, PENDING_STATES, ea_version_tuple
 
@@ -273,6 +273,11 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
         rt.log("INFO", "bridge", f"EA conectat (v{rt.bridge['ea_version']}), server {acc.get('server')}, "
                                  f"trade_mode={acc.get('trade_mode')} ({'DEMO' if acc.get('trade_mode') == 0 else 'NU este DEMO'})")
 
+    # research-only symbols (RESEARCH_SYMBOLS) are archive-only: never quoted / analysed even if an EA sends them
+    research_only = archive.research_only_names(rt)
+    if research_only:
+        payload["symbols"] = [s for s in payload.get("symbols") or [] if s.get("symbol") not in research_only]
+        payload["bars"] = [b for b in payload.get("bars") or [] if b.get("symbol") not in research_only]
     for s in payload.get("symbols") or []:
         sym = s.get("symbol")
         if not sym:
@@ -367,6 +372,9 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
                                      hist_pending=bool(hist) or bool(rt.hist_force))
         if histx:
             commands = commands + [histx]
+    # EA >= 1.14: economic-calendar history (ingests "calendar_hist", at most one CALHIST in flight; never raises)
+    commands = commands + calendar_hist.on_sync(engine, payload, commands, now,
+                                                hist_pending=bool(hist) or bool(rt.hist_force))
     return build_response(int(now), symbols, tfs, hist, commands)
 
 

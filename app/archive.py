@@ -5,7 +5,9 @@ oldest archived bar until ARCHIVE_DAYS are covered or the broker has nothing old
 ([signal_tf, htf_tf, M15] x active symbols) reached ARCHIVE_DAYS, the extended targets of ARCHIVE_EXTRA (TF:days, e.g.
 H1:1095,H4:1825,D1:3650; off by default, enabled for research in .env) are walked, D1 first, at most one request per
 ARCHIVE_EXTRA_INTERVAL_S counted from the previous extended reply (or its timeout), never while the bot holds MT5
-positions. DB writes run on a single background thread so the event loop never waits on a 5000-row insert."""
+positions. RESEARCH_SYMBOLS (never analysed / quoted / traded) are walked last on D1/H4/H1 with the same targets and
+throttling, trying broker name aliases until one is known (UNKNOWN_SYMBOL -> next alias -> unavailable).
+DB writes run on a single background thread so the event loop never waits on a 5000-row insert."""
 from __future__ import annotations
 
 import logging
@@ -15,9 +17,10 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .config import TF_SECONDS, iso
+from .config import TF_SECONDS, iso, split_csv
 
 ARCHIVE_EA_VERSION = (1, 11)
+RESEARCH_EA_VERSION = (1, 13)  # HISTX answers err "UNKNOWN_SYMBOL" when SymbolSelect fails (alias resolution)
 ARCHIVE_EXTRA_TF = "M15"
 MAX_BATCH = 5000
 EXTRA_MAX_BATCH = 3000     # extended (multi-year) walks: smaller batches, shorter CopyRates stalls in the EA
@@ -35,6 +38,23 @@ SPREAD_MAX_TICK_AGE_S = 60.0  # frozen quotes (weekend, disconnected) would skew
 SERVER_TZ_RULES = {"EET": ("Europe/Athens", 0), "NY": ("America/New_York", 7 * 3600)}  # NY = New York close (GMT+2/+3)
 AUTO_RULE_ORDER = ("NY", "EET")  # tie (both rules give today's offset): NY close, the usual GMT+2/+3 broker clock
 TZ_SETTING_KEY = "archive_server_tz"  # {account server: rule detected while the rules disagreed}
+# research-only symbols (RESEARCH_SYMBOLS): archive only, D1/H4/H1, days from ARCHIVE_EXTRA (fallback below)
+RESEARCH_TFS = ("D1", "H4", "H1")
+RESEARCH_DEFAULT_DAYS = {"D1": 3650, "H4": 1825, "H1": 1095}
+# broker name variants tried in order (the canonical name first)
+RESEARCH_ALIASES = {
+    "US500": ("US500", "SPX500", "US500.cash", "SP500"),
+    "NAS100": ("NAS100", "USTEC", "NDX100"),
+    "US30": ("US30", "DJ30"),
+    "DE40": ("DE40", "GER40", "DAX40"),
+    "UK100": ("UK100", "FTSE100"),
+    "JP225": ("JP225", "JPN225", "NI225"),
+    "XTIUSD": ("XTIUSD", "USOIL", "WTI"),
+    "XBRUSD": ("XBRUSD", "UKOIL", "BRENT"),
+}
+# EA "symbol not at this broker": 'UNKNOWN_SYMBOL' (protocol name) or 4301 (ERR_MARKET_UNKNOWN_SYMBOL, EA 1.11/1.12 when
+# SymbolSelect fails in HISTX)
+UNKNOWN_SYMBOL_ERRS = ("UNKNOWN_SYMBOL", "4301")
 
 log = logging.getLogger("bot")
 
@@ -107,6 +127,78 @@ def days_target(rt, tf: str) -> int:
     return max(base, extra_targets(rt.settings).get(tf, 0)) or base_days(rt)
 
 
+# ---- research symbols ---------------------------------------------------------
+def research_list(rt) -> list[str]:
+    """RESEARCH_SYMBOLS (canonical names) minus the active symbols; "off" -> []. Never analysed or traded."""
+    raw = str(getattr(rt.settings, "RESEARCH_SYMBOLS", "") or "").strip()
+    if raw.lower() in EXTRA_OFF:
+        return []
+    active = set(rt.active_symbols())
+    out: list[str] = []
+    for sym in split_csv(raw):
+        if sym not in active and sym not in out:
+            out.append(sym)
+    return out
+
+
+def research_targets(settings) -> dict[str, int]:
+    """{tf: days} for research symbols: D1/H4/H1 with ARCHIVE_EXTRA's days; {} while ARCHIVE_EXTRA is off."""
+    extras = extra_targets(settings)
+    if not extras:
+        return {}
+    return {tf: int(extras.get(tf) or RESEARCH_DEFAULT_DAYS[tf]) for tf in RESEARCH_TFS}
+
+
+def research_candidates(rt, sym: str) -> list[str]:
+    """Broker names to try for a research symbol, in order; names of active symbols are never used."""
+    active = set(rt.active_symbols())
+    out: list[str] = []
+    for name in (sym,) + tuple(RESEARCH_ALIASES.get(sym, ())):
+        if name and name not in out and (name == sym or name not in active):
+            out.append(name)
+    return out
+
+
+def _research_state(rt, sym: str) -> dict:
+    return rt.archive_plan.setdefault("research", {}).setdefault(
+        sym, {"idx": 0, "broker": None, "available": None, "tried": []})
+
+
+def research_broker(rt, sym: str) -> str | None:
+    """Broker name to ask for (resolved, or the next untried alias); None when the symbol is unavailable."""
+    st = _research_state(rt, sym)
+    if st["available"] is False:
+        return None
+    if st["broker"]:
+        return st["broker"]
+    cands = research_candidates(rt, sym)
+    return cands[st["idx"]] if st["idx"] < len(cands) else None
+
+
+def research_only_names(rt) -> set[str]:
+    """Every name (canonical + aliases already asked for) that belongs to a research symbol and not to trading."""
+    active = set(rt.active_symbols())
+    names = set(research_list(rt))
+    names.update(b for b, c in (rt.archive_plan.get("research_names") or {}).items() if c in names)
+    return names - active
+
+
+def _is_unknown_symbol(err) -> bool:
+    return str(err).strip().upper() in UNKNOWN_SYMBOL_ERRS if err is not None else False
+
+
+def pair_days(rt, sym: str, tf: str) -> int:
+    if sym in research_list(rt):
+        rtg = research_targets(rt.settings)
+        if tf in rtg:
+            return rtg[tf]
+    return days_target(rt, tf)
+
+
+def pair_target_ts(rt, sym: str, tf: str, now: float) -> int:
+    return int(now - pair_days(rt, sym, tf) * 86400)
+
+
 def target_ts(rt, now: float, tf: str | None = None) -> int:
     """Oldest bar time wanted; without tf: the base ARCHIVE_DAYS target."""
     days = base_days(rt) if tf is None else days_target(rt, tf)
@@ -115,8 +207,8 @@ def target_ts(rt, now: float, tf: str | None = None) -> int:
 
 def _entry(rt, symbol: str, tf: str, now: float) -> dict:
     e = rt.archive_status.setdefault(symbol, {}).setdefault(
-        tf, {"bars": 0, "oldest_ts": None, "target_ts": target_ts(rt, now, tf), "done": False})
-    e["target_ts"] = target_ts(rt, now, tf)
+        tf, {"bars": 0, "oldest_ts": None, "target_ts": pair_target_ts(rt, symbol, tf, now), "done": False})
+    e["target_ts"] = pair_target_ts(rt, symbol, tf, now)
     e["done"] = (symbol, tf) in rt.archive_plan["exhausted"] or (
         e["oldest_ts"] is not None and e["oldest_ts"] <= e["target_ts"])
     return e
@@ -126,34 +218,60 @@ def _base_reached(rt, symbol: str, tf: str, e: dict, now: float) -> bool:
     return e["done"] or (e["oldest_ts"] is not None and e["oldest_ts"] <= target_ts(rt, now))
 
 
+def _view_row(rt, sym: str, tf: str, info: dict, now: float, extended: bool) -> dict:
+    plan = rt.archive_plan
+    oldest = info.get("oldest_ts")
+    return {**info, "days_target": pair_days(rt, sym, tf),
+            "days_loaded": round(max(0.0, now - oldest) / 86400, 1) if oldest else 0.0,
+            "extended": extended, "exhausted": (sym, tf) in plan["exhausted"],
+            "history_start_ts": plan.get("history_start", {}).get((sym, tf))}
+
+
 def status_view(rt, now: float | None = None) -> dict:
-    """GET /api/archive/status payload: per-TF days_target, extended TFs listed even before their walk starts."""
+    """GET /api/archive/status payload: per-TF days_target, extended TFs listed even before their walk starts;
+    research symbols under "research" (never in "symbols"), with the resolved broker name and availability."""
     now = now or time.time()
     refresh_status(rt, now)
     plan = rt.archive_plan
     extras = extra_targets(rt.settings)
     base_tfs = archive_tfs(rt)
-    pairs = {(sym, tf): e for sym, tfs in rt.archive_status.items() for tf, e in tfs.items()}
+    rlist = research_list(rt)
+    rset = set(rlist)
+    pairs = {(sym, tf): e for sym, tfs in rt.archive_status.items() if sym not in rset for tf, e in tfs.items()}
     for sym in rt.active_symbols():
         for tf in extras:
             pairs.setdefault((sym, tf), {"bars": 0, "oldest_ts": None, "target_ts": target_ts(rt, now, tf),
                                          "done": False})
     symbols: dict[str, dict] = {}
     for (sym, tf), info in sorted(pairs.items(), key=lambda kv: (kv[0][0], -TF_SECONDS.get(kv[0][1], 0))):
-        oldest = info.get("oldest_ts")
-        symbols.setdefault(sym, {})[tf] = {
-            **info, "days_target": days_target(rt, tf),
-            "days_loaded": round(max(0.0, now - oldest) / 86400, 1) if oldest else 0.0,
-            "extended": tf in extras, "exhausted": (sym, tf) in plan["exhausted"],
-            "history_start_ts": plan.get("history_start", {}).get((sym, tf)),
-        }
+        symbols.setdefault(sym, {})[tf] = _view_row(rt, sym, tf, info, now, tf in extras)
     base_left = any(not _base_reached(rt, s, tf, _entry(rt, s, tf, now), now)
                     for s in rt.active_symbols() for tf in base_tfs)
     extra_left = any(not v["done"] for s in symbols.values() for tf, v in s.items() if v["extended"])
+    rtg = research_targets(rt.settings)
+    research_ea_ok = _version_tuple(rt.bridge.get("ea_version")) >= RESEARCH_EA_VERSION
+    research: dict[str, dict] = {}
+    research_left = False
+    for sym in rlist:
+        st = _research_state(rt, sym)
+        have = rt.archive_status.get(sym, {})
+        tfs: dict[str, dict] = {}
+        for tf in sorted(set(rtg) | set(have), key=lambda t: -TF_SECONDS.get(t, 0)):
+            info = have.get(tf) or {"bars": 0, "oldest_ts": None, "target_ts": pair_target_ts(rt, sym, tf, now),
+                                    "done": False}
+            tfs[tf] = _view_row(rt, sym, tf, info, now, tf in rtg)
+            if tf in rtg and not tfs[tf]["done"] and st["available"] is not False and research_ea_ok:
+                research_left = True
+        research[sym] = {"broker_symbol": st["broker"], "available": st["available"],
+                         "trying": research_broker(rt, sym) if not st["broker"] else None,
+                         "candidates": research_candidates(rt, sym), "tried": list(st["tried"]), "tfs": tfs}
+    phase = "base" if base_left else ("extra" if extra_left else ("research" if research_left else "done"))
     return {"enabled": bool(getattr(rt.settings, "ARCHIVE_ENABLED", True)), "days_target": base_days(rt),
             "extra": extras, "extra_interval_s": float(getattr(rt.settings, "ARCHIVE_EXTRA_INTERVAL_S", EXTRA_INTERVAL_DEFAULT_S) or 0),
-            "phase": "base" if base_left else ("extra" if extra_left else "done"),
-            "ea_version": rt.bridge.get("ea_version"), "symbols": symbols}
+            "phase": phase, "ea_version": rt.bridge.get("ea_version"), "symbols": symbols,
+            "research_enabled": bool(rtg and rlist),
+            "research_ea_ok": research_ea_ok,
+            "research_targets": rtg, "research": research}
 
 
 def rebuild_status(rt, now: float | None = None) -> dict:
@@ -216,7 +334,7 @@ def next_request(rt, now: float, commands_pending: bool = False, hist_pending: b
     # the previous extended reply (a CopyRates download can block the EA for tens of seconds).
     # A base pair stuck in error backoff does not hold the extended walk back.
     if not extra_targets(s):
-        return None
+        return None  # research symbols use the ARCHIVE_EXTRA targets too: nothing extended to do
     if _bot_positions_open(rt) and not getattr(s, "ARCHIVE_EXTRA_WITH_POSITIONS", False):
         return None  # the multi-year walk waits for a quiet moment: no bot position whose SL/trailing is managed
     interval = max(0.0, float(getattr(s, "ARCHIVE_EXTRA_INTERVAL_S", EXTRA_INTERVAL_DEFAULT_S) or 0))
@@ -231,6 +349,21 @@ def next_request(rt, now: float, commands_pending: bool = False, hist_pending: b
                 continue
             plan["extra_last_ts"] = now
             return _request(rt, sym, tf, e, e["target_ts"], xbatch, now, extended=True)
+    # 3) research symbols (RESEARCH_SYMBOLS), only once no active pair can be asked for: D1 -> H4 -> H1, same batch
+    # size / interval / position gating as (2); the HISTX carries the broker name (resolved or next alias to try)
+    rtg = research_targets(s)
+    if _version_tuple(rt.bridge.get("ea_version")) < RESEARCH_EA_VERSION:
+        return None  # older EAs: no explicit UNKNOWN_SYMBOL, no probing of broker names
+    for tf in sorted(rtg, key=lambda t: -TF_SECONDS[t]):
+        for sym in research_list(rt):
+            broker = research_broker(rt, sym)
+            if broker is None:
+                continue  # unavailable at this broker
+            e = _entry(rt, sym, tf, now)
+            if e["done"] or plan["retry_at"].get((sym, tf), 0) > now:
+                continue
+            plan["extra_last_ts"] = now
+            return _request(rt, sym, tf, e, e["target_ts"], xbatch, now, extended=True, broker=broker)
     return None
 
 
@@ -239,7 +372,8 @@ def _bot_positions_open(rt) -> bool:
     return any(isinstance(p, dict) and int(p.get("magic") or 0) == magic for p in (rt.mt5_positions or []))
 
 
-def _request(rt, sym: str, tf: str, e: dict, target: int, batch: int, now: float, extended: bool) -> str:
+def _request(rt, sym: str, tf: str, e: dict, target: int, batch: int, now: float, extended: bool,
+             broker: str | None = None) -> str:
     sec = TF_SECONDS[tf]
     end = int(e["oldest_ts"]) if e["oldest_ts"] is not None else int(now // sec * sec)
     need = math.ceil((end - target) / sec)
@@ -248,6 +382,11 @@ def _request(rt, sym: str, tf: str, e: dict, target: int, batch: int, now: float
     ea_end = end + int(rt.bridge.get("clock_skew_s") or 0) + _end_delta(rt, end, now)
     rt.archive_plan["pending"] = {"symbol": sym, "tf": tf, "end_utc": end, "ea_end": ea_end, "count": count,
                                   "sent_ts": now, "extended": extended}
+    if broker is not None:
+        # research symbol: archived under its canonical name, asked for under the broker's name
+        rt.archive_plan["pending"].update({"broker": broker, "research": True})
+        rt.archive_plan.setdefault("research_names", {})[broker] = sym
+        return f"HISTX|{broker}|{tf}|{ea_end}|{count}"
     return f"HISTX|{sym}|{tf}|{ea_end}|{count}"
 
 
@@ -407,6 +546,10 @@ def ingest_payload(rt, items, now: float | None = None) -> list[Future]:
         tf = str(it.get("tf") or "")
         if not sym or tf not in TF_SECONDS:
             continue
+        raw_sym = sym
+        canon = (plan.get("research_names") or {}).get(sym)
+        if canon and sym not in rt.active_symbols() and canon in research_list(rt):
+            sym = canon  # research symbol replied under its broker name: archive under the canonical name
         key = (sym, tf)
         pend = plan.get("pending")
         skew = int(rt.bridge.get("clock_skew_s") or 0)
@@ -414,6 +557,7 @@ def ingest_payload(rt, items, now: float | None = None) -> list[Future]:
         # a reply answers the outstanding HISTX only when it echoes that request's end; a batch resent after a
         # lost HTTP 200 (or a late reply) carries an older end and must not count as "nothing older"
         is_reply = (pend is not None and (pend["symbol"], pend["tf"]) == key and it_end is not None
+                    and pend.get("broker", pend["symbol"]) == raw_sym
                     and it_end in (pend.get("ea_end"), int(pend["end_utc"]) + skew))
         _dst_fix_bars(rt, it, now)
         if is_reply:
@@ -430,6 +574,14 @@ def ingest_payload(rt, items, now: float | None = None) -> list[Future]:
                 futures.append(submit(_write_rows, rt, sym, tf, rows))
             continue
         err = it.get("err")
+        if pend.get("research"):
+            if not rows and _is_unknown_symbol(err):
+                _research_unknown(rt, sym, raw_sym, tf)
+                continue
+            st = _research_state(rt, sym)
+            if st["broker"] != raw_sym and (rows or err in (None, 0, "0", "")):
+                st["broker"], st["available"] = raw_sym, True
+                rt.log("INFO", "archive", f"Arhivă cercetare {sym}: simbolul brokerului este {raw_sym}")
         e = _entry(rt, sym, tf, now)
         if not rows:
             if err not in (None, 0, "0", ""):
@@ -459,6 +611,26 @@ def ingest_payload(rt, items, now: float | None = None) -> list[Future]:
             rt.log("INFO", "archive", f"Arhivă {sym} {tf} completă până la {iso(e['oldest_ts'])}")
         futures.append(submit(_write_rows, rt, sym, tf, rows))
     return futures
+
+
+def _research_unknown(rt, sym: str, broker: str, tf: str) -> None:
+    """EA: `broker` is not a symbol at this broker -> try the next alias, or mark the research symbol unavailable."""
+    st = _research_state(rt, sym)
+    plan = rt.archive_plan
+    if broker not in st["tried"]:
+        st["tried"].append(broker)
+    cands = research_candidates(rt, sym)
+    st["broker"] = None
+    st["idx"] = max(st["idx"], cands.index(broker) + 1 if broker in cands else st["idx"] + 1)
+    for t in RESEARCH_TFS + (tf,):
+        plan["errors"].pop((sym, t), None)
+        plan["retry_at"].pop((sym, t), None)
+    if st["idx"] >= len(cands):
+        st["available"] = False
+        rt.log("WARN", "archive", f"Arhivă cercetare {sym}: simbol indisponibil la broker (încercat: "
+                                  f"{', '.join(st['tried'])}) — nu mai este cerut")
+    else:
+        rt.log("INFO", "archive", f"Arhivă cercetare {sym}: {broker} nu există la broker, încerc {cands[st['idx']]}")
 
 
 def _write_rows(rt, symbol: str, tf: str, rows: list[tuple]) -> int:

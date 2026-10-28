@@ -81,7 +81,9 @@ class Runtime:
         # bar archive backfill (EA v1.11+): {symbol: {tf: {"bars","oldest_ts","target_ts","done"}}}
         self.archive_status: dict[str, dict[str, dict]] = {}
         # planner bookkeeping: outstanding HISTX, pairs with no older history, error backoff
-        self.archive_plan: dict = {"pending": None, "exhausted": set(), "retry_at": {}, "errors": {}}
+        # research: {canonical: {"idx", "broker", "available", "tried"}}, research_names: {broker name: canonical}
+        self.archive_plan: dict = {"pending": None, "exhausted": set(), "retry_at": {}, "errors": {},
+                                   "research": {}, "research_names": {}}
         # live spread samples waiting to be flushed into spread_stats
         self.spread_agg: dict = {"acc": {}, "last": {}, "flush_ts": time.time()}
         # runtime config

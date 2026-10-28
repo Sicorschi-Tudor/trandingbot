@@ -106,6 +106,14 @@ class Settings(BaseSettings):
     ARCHIVE_EXTRA: str = "off"
     ARCHIVE_EXTRA_INTERVAL_S: float = 60
     ARCHIVE_EXTRA_WITH_POSITIONS: bool = False
+    # research-only symbols: archived (D1/H4/H1, ARCHIVE_EXTRA days, same throttling) after the active symbols are
+    # complete; NEVER analysed, quoted or traded. Comma list; "off" disables; needs ARCHIVE_EXTRA on.
+    RESEARCH_SYMBOLS: str = ("XAUUSD,XAGUSD,US500,US30,NAS100,UK100,DE40,JP225,XTIUSD,XBRUSD,BTCUSD,ETHUSD,"
+                             "USDCHF,USDMXN,USDZAR,USDTRY")
+    # economic-calendar history with numbers (CALHIST, EA v1.14+, research only: app/calendar_hist.py)
+    CALHIST_ENABLED: bool = True
+    CALHIST_INTERVAL_S: float = 30
+    CALHIST_MIN_IMP: int = 1
     # broker server-time DST rule for archive bars (EA v1.12+): auto | EET | NY | fixed | IANA zone name
     MT5_SERVER_TZ: str = "auto"
     # forward tests (PAPER, simulated only — never send orders): JSON list of

@@ -6,14 +6,14 @@
 //+------------------------------------------------------------------+
 #property copyright "AI Trading Bot v1"
 #property link      "http://127.0.0.1:8787"
-#property version   "1.12"
+#property version   "1.14"
 #property description "Punte MT5 <-> server AI Trading Bot (v1)."
 #property description "Trimite cotatii, bare, cont, pozitii si deal-uri catre server"
 #property description "si executa DOAR comenzile primite de la server (OPEN/MODIFY/CLOSE)."
 
 #include <Trade\Trade.mqh>
 
-#define EA_VERSION        "1.12"
+#define EA_VERSION        "1.14"
 #define MAX_DONE_IDS      500
 #define MAX_RESULTS       200
 #define MAX_HIST          64
@@ -25,6 +25,7 @@
 #define CAL_RETRY_S       60
 #define CAL_MAX_ITEMS     200
 #define HISTX_MAX_BARS    5000
+#define CALHIST_MAX_ITEMS 4000           // CALHIST reply cap (server EA_MAX_ITEMS)
 #define AB_ERR_HIST_NOT_READY 4401     // ERR_HISTORY_NOT_FOUND: series still loading
 
 //--- inputs (names fixed by CONTRACT §3)
@@ -79,6 +80,15 @@ bool     g_hx_in_req     = false;  // the request being sent carries the archive
 string   g_hx_json       = "";
 long     g_hx_served     = 0;
 bool     g_hx_maxbars_logged = false;
+//--- calendar history (CALHIST, v1.14): one request at a time, answered in the NEXT sync
+bool     g_ch_new        = false;  // CALHIST received in the last response, not prepared yet
+long     g_ch_from       = 0;      // UTC (EA clock), echoed back
+long     g_ch_to         = 0;
+int      g_ch_min_imp    = 1;
+bool     g_ch_ready      = false;  // g_ch_json prepared, waiting to be delivered (HTTP 200)
+bool     g_ch_in_req     = false;  // the request being sent carries the calendar history
+string   g_ch_json       = "";
+long     g_ch_served     = 0;
 
 //+------------------------------------------------------------------+
 //| Small helpers                                                    |
@@ -579,17 +589,22 @@ void SetHistx(const string sym, const string tf, const string end_s, const strin
    g_hx_new   = true;
   }
 
-string ArchiveReply(const string bars, const int err)
+string ArchiveReplyErr(const string bars, const string err_json)
   {
    string j = "{\"symbol\":" + JStr(g_hx_sym);
    j += ",\"tf\":" + JStr(g_hx_tf);
    j += ",\"end_utc\":" + FmtL(g_hx_end);
    j += ",\"srv_off\":" + FmtL(g_offset);    // offset used for every bar "t" of this batch
    j += ",\"bars\":[" + bars + "]";
-   if(err != 0)
-      j += ",\"err\":" + IntegerToString(err);
+   if(err_json != "")
+      j += ",\"err\":" + err_json;
    j += "}";
    return(j);
+  }
+
+string ArchiveReply(const string bars, const int err)
+  {
+   return(ArchiveReplyErr(bars, (err != 0 ? IntegerToString(err) : "")));
   }
 
 // Runs after the response was handled (commands already executed), so a slow history
@@ -606,7 +621,8 @@ void PrepareArchive()
      }
    if(!SymbolSelect(g_hx_sym, true))
      {
-      g_hx_json = ArchiveReply("", 4301);
+      //--- v1.13: name not known at this broker -> the server tries the next alias / marks it unavailable
+      g_hx_json = ArchiveReplyErr("", JStr("UNKNOWN_SYMBOL"));
       return;
      }
    UpdateOffset();
@@ -701,6 +717,136 @@ void PrepareArchive()
    out += chunk;
    g_hx_json = ArchiveReply(out, 0);
    g_hx_served++;
+  }
+
+//+------------------------------------------------------------------+
+//| Calendar history (CALHIST|from_utc|to_utc|min_imp), v1.14        |
+//+------------------------------------------------------------------+
+void SetCalHist(const string from_s, const string to_s, const string imp_s)
+  {
+   long f = StringToInteger(from_s);
+   long t = StringToInteger(to_s);
+   int  m = (imp_s == "" ? 1 : (int)StringToInteger(imp_s));
+   if(f <= 0 || t <= f)
+     {
+      Print("Linie CALHIST invalida ignorata: ", from_s, "|", to_s, "|", imp_s);
+      return;
+     }
+   g_ch_from    = f;
+   g_ch_to      = t;
+   g_ch_min_imp = (m < 0 ? 0 : (m > 3 ? 3 : m));
+   g_ch_new     = true;
+  }
+
+// Raw MqlCalendarValue long (value x 10^6); LONG_MIN = not set -> null
+string CalRaw(const long v)
+  {
+   if(v == LONG_MIN)
+      return("null");
+   return(FmtL(v));
+  }
+
+string CalHistReply(const string items, const bool ok, const int err, const int total, const bool truncated)
+  {
+   string j = "{\"from_utc\":" + FmtL(g_ch_from);
+   j += ",\"to_utc\":" + FmtL(g_ch_to);
+   j += ",\"srv_off\":" + FmtL(g_offset);
+   j += ",\"ok\":" + BoolStr(ok);
+   j += ",\"err\":" + IntegerToString(err);
+   j += ",\"total\":" + IntegerToString(total);
+   j += ",\"truncated\":" + BoolStr(truncated);
+   j += ",\"items\":[" + items + "]}";
+   return(j);
+  }
+
+// Runs after the response was handled (commands already executed), like PrepareArchive(), so it never
+// delays quotes, positions or command results. CalendarValueHistory reads the terminal's local calendar
+// database (no broker download, no waiting); the reply goes out with the NEXT sync.
+void PrepareCalHist()
+  {
+   g_ch_new   = false;
+   g_ch_ready = true;
+   UpdateOffset();
+   datetime from_srv = (datetime)(g_ch_from + g_offset);
+   datetime to_srv   = (datetime)(g_ch_to + g_offset);
+   MqlCalendarValue values[];
+   ResetLastError();
+   bool got = CalendarValueHistory(values, from_srv, to_srv);   // no country/currency filter
+   int  err = GetLastError();
+   if(!got && err != 0)
+     {
+      g_ch_json = CalHistReply("", false, err, 0, false);
+      return;
+     }
+   int n = ArraySize(values);
+   //--- values come back in time order: keep the first CALHIST_MAX_ITEMS matches, count all of them
+   string out    = "";
+   string chunk  = "";
+   int    added  = 0;
+   int    total  = 0;
+   ulong  last_eid = 0;
+   bool   have_ev  = false;
+   bool   ev_ok    = false;
+   ulong  last_cid = 0;
+   bool   have_c   = false;
+   bool   c_ok     = false;
+   MqlCalendarEvent   ev;
+   MqlCalendarCountry c;
+   for(int i = 0; i < n; i++)
+     {
+      if(!have_ev || values[i].event_id != last_eid)
+        {
+         ev_ok    = CalendarEventById(values[i].event_id, ev);
+         last_eid = values[i].event_id;
+         have_ev  = true;
+         //--- country 0 (Worldwide) is a valid id: track "loaded" separately from the id itself
+         if(ev_ok && (!have_c || ev.country_id != last_cid))
+           {
+            c_ok     = CalendarCountryById(ev.country_id, c);
+            last_cid = ev.country_id;
+            have_c   = true;
+           }
+        }
+      if(!ev_ok || !c_ok)
+         continue;
+      int imp = CalImportance(ev.importance);
+      if(imp < g_ch_min_imp)
+         continue;
+      total++;
+      if(added >= CALHIST_MAX_ITEMS)
+         continue;
+      string j = "{\"id\":" + FmtL((long)values[i].id);
+      j += ",\"eid\":" + FmtL((long)values[i].event_id);
+      j += ",\"t\":" + FmtL(ToUtc(values[i].time));
+      j += ",\"ccy\":" + JStr(c.currency);
+      j += ",\"cc\":" + JStr(c.code);
+      j += ",\"imp\":" + IntegerToString(imp);
+      j += ",\"name\":" + JStr(ev.name);
+      j += ",\"tm\":" + IntegerToString((int)ev.time_mode);
+      j += ",\"unit\":" + IntegerToString((int)ev.unit);
+      j += ",\"mult\":" + IntegerToString((int)ev.multiplier);
+      j += ",\"dig\":" + IntegerToString((int)ev.digits);
+      j += ",\"a\":" + CalRaw(values[i].actual_value);
+      j += ",\"f\":" + CalRaw(values[i].forecast_value);
+      j += ",\"p\":" + CalRaw(values[i].prev_value);
+      j += ",\"r\":" + CalRaw(values[i].revised_prev_value);
+      j += ",\"imx\":" + IntegerToString((int)values[i].impact_type);
+      j += ",\"rev\":" + IntegerToString((int)values[i].revision);
+      j += ",\"per\":" + FmtL((long)values[i].period);
+      j += "}";
+      if(added > 0)
+         chunk += ",";
+      chunk += j;
+      added++;
+      if(StringLen(chunk) > 16000)
+        {
+         out += chunk;   // append in blocks: far fewer reallocations of the big string
+         chunk = "";
+        }
+     }
+   out += chunk;
+   g_ch_json = CalHistReply(out, true, 0, total, total > added);
+   g_ch_served++;
   }
 
 //+------------------------------------------------------------------+
@@ -1004,6 +1150,11 @@ string BuildRequest(int &n_results)
    g_hx_in_req = g_hx_ready;
    if(g_hx_ready)
       j += ",\"archive\":[" + g_hx_json + "]";
+
+   //--- calendar history requested by the previous response (CALHIST, v1.14), until delivered
+   g_ch_in_req = g_ch_ready;
+   if(g_ch_ready)
+      j += ",\"calendar_hist\":" + g_ch_json;
    j += "}";
    return(j);
   }
@@ -1420,6 +1571,12 @@ void HandleResponse(const string body_in)
             SetHistx(p[1], p[2], p[3], p[4]);
          continue;
         }
+      if(cmd == "CALHIST")
+        {
+         if(k >= 3)
+            SetCalHist(p[1], p[2], (k >= 4 ? p[3] : "1"));
+         continue;
+        }
       if(cmd == "HIST")
         {
          if(k >= 3)
@@ -1484,6 +1641,7 @@ void UpdateChartStatus()
    s += "\nRezultate in asteptare: " + IntegerToString(ArraySize(g_results)) + "   Magic: " + FmtL(InpMagic);
    s += "\nCalendar economic: " + (g_cal_ok ? IntegerToString(g_cal_count) + " evenimente (24 h)" : "indisponibil");
    s += "\nArhiva istoric: " + FmtL(g_hx_served) + " loturi trimise";
+   s += "\nIstoric calendar: " + FmtL(g_ch_served) + " ferestre trimise";
    s += "\nEA-ul executa DOAR comenzile serverului.";
    if(s != g_last_status)
      {
@@ -1554,6 +1712,11 @@ void DoSync()
       g_hx_ready = false;
       g_hx_json  = "";
      }
+   if(g_ch_in_req)
+     {
+      g_ch_ready = false;
+      g_ch_json  = "";
+     }
 
    int hmin = (InpHistoryBars < HIST_MIN_OK ? InpHistoryBars : HIST_MIN_OK);
    if(hmin < 1)
@@ -1571,6 +1734,8 @@ void DoSync()
    HandleResponse(resp);
    if(g_hx_new)
       PrepareArchive();
+   if(g_ch_new)
+      PrepareCalHist();
   }
 
 //+------------------------------------------------------------------+
@@ -1611,6 +1776,10 @@ int OnInit()
    g_hx_ready        = false;
    g_hx_in_req       = false;
    g_hx_json         = "";
+   g_ch_new          = false;
+   g_ch_ready        = false;
+   g_ch_in_req       = false;
+   g_ch_json         = "";
    RefreshCalendar();
 
    g_trade.SetExpertMagicNumber((ulong)InpMagic);

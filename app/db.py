@@ -302,6 +302,7 @@ class DB:
             self.conn.execute("PRAGMA synchronous=NORMAL")
             self.conn.executescript(SCHEMA)
             self.migrated = migrate(self.conn)
+            from .calendar_hist import migrate as calhist_migrate; calhist_migrate(self.conn)  # noqa: E702
 
     def execute(self, sql: str, params: tuple | list = ()) -> sqlite3.Cursor:
         with self.lock:
