@@ -229,6 +229,39 @@ CREATE TABLE IF NOT EXISTS forward_trades (
     data_json TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_forward_trades_name ON forward_trades(name, closed_ts);
+CREATE TABLE IF NOT EXISTS ml_models (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT,
+    feature_schema TEXT NOT NULL,
+    dataset_version TEXT,
+    params_json TEXT,
+    metrics_json TEXT,
+    trained_until_utc TEXT,
+    artifact_path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'candidate',
+    created_at TEXT NOT NULL,
+    approved_by TEXT,
+    approved_at TEXT,
+    notes TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_ml_models_status ON ml_models(kind, status);
+CREATE TABLE IF NOT EXISTS ml_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id TEXT NOT NULL,
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,
+    symbol TEXT,
+    ref_id TEXT,
+    features_hash TEXT,
+    score REAL,
+    would_action TEXT,
+    actual_action TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_ml_decisions_model ON ml_decisions(model_id, ts);
+CREATE INDEX IF NOT EXISTS ix_ml_decisions_ref ON ml_decisions(kind, ref_id);
 """
 
 # additive columns on tables that already exist in older databases: (table, column, type)

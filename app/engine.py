@@ -20,6 +20,7 @@ from .config import STRATEGY_VERSION, TF_SECONDS, VERSION, Settings, iso, parse_
 from .db import DB
 from .executor import Executor
 from .forward import ForwardRunner
+from .ml_live import MLLive
 from .paper import PaperBroker
 from .position_manager import PositionManager
 from .simfeed import SimFeed
@@ -93,6 +94,8 @@ class Engine:
         self.rt.quote_hooks.append(self._on_quote)
         # forward tests (PAPER, simulated only): own book, never intents/bridge commands
         self.forward = ForwardRunner(self)
+        # ML (spec §6.4): shadow logging always harmless; only an explicitly approved model may gate/close
+        self.ml = MLLive(self)
 
     # ---- lifecycle -------------------------------------------------------
     def startup(self) -> None:
@@ -115,6 +118,10 @@ class Engine:
             self.forward.startup()
         except Exception as e:
             self.rt.log("ERROR", "forward", f"teste forward neîncărcate: {e!r}")
+        try:
+            self.ml.startup()
+        except Exception as e:
+            self.rt.log("ERROR", "ml", f"ML neinițializat: {e!r}")
 
     async def start(self) -> None:
         if self.sim:
@@ -134,6 +141,10 @@ class Engine:
                 pass
         self.rt.flush_bars()
         self._save_paper()
+        try:
+            self.ml.stop()
+        except Exception:
+            pass
         await self.telegram.aclose()
 
     # ---- helpers ---------------------------------------------------------
@@ -489,7 +500,7 @@ class Engine:
 
     # ---- risk ------------------------------------------------------------
     def risk_check(self, symbol: str, side: str, entry: float, sl: float, tp: float, test_order: bool = False,
-                   mode: str | None = None) -> dict:
+                   mode: str | None = None, size_factor: float = 1.0) -> dict:
         mode = mode or self.mode()
         self.update_equity_marks()
         key, acc = self.risk_account(mode)
@@ -512,6 +523,7 @@ class Engine:
             peak_equity=marks.get("peak_equity"), consecutive_losses=streak, loss_pause_until=pause_until,
             open_risk_money=self.open_risk_money(mode), news_block=news_block, news_note=news_note, test_order=test_order,
             account_settling=mode == "DEMO" and self.account_settling(),
+            size_factor=size_factor, size_cap_pct=float(self.settings.ML_MAX_RISK_PCT),
         )
         return risk_mod.evaluate(ctx)
 
@@ -886,6 +898,10 @@ class Engine:
         if name != DEFAULT_STRATEGY:
             a["strategy_version"] = name
         self.record_analysis(a)
+        try:
+            self.ml.on_analysis(a)  # shadow logging in the ML thread; never changes `a` or the decision
+        except Exception as e:
+            self._perf_warn_once("ml_analysis", f"ML umbră (analiză): {e!r}")
         rt.last_analysis[symbol] = a
         rt.engine_info["last_analysis_utc"] = a["time_utc"]
         rt.bus.publish("analysis", a)
@@ -994,11 +1010,30 @@ class Engine:
             self.save_signal(sig)
             self.add_signal_event(sig["id"], "NO_TRADE", sig["status_reason"])
             return
-        rc = self.risk_check(sym, side, entry, sl, tp)
+        # approved ML entry model only (none by default -> no change): veto below its threshold or scale the risk
+        gate = None
+        try:
+            gate = self.ml.entry_gate(sig)
+        except Exception as e:
+            self._perf_warn_once("ml_gate", f"ML gate eșuat — intrarea continuă fără ML: {e!r}")
+        if gate and gate["veto"]:
+            sig["status"] = "NO_TRADE"
+            sig["status_reason"] = (f"ML: P(câștig)={gate['p']:.2f} sub pragul aprobat {gate['threshold']:.2f} "
+                                    f"(model {gate['model_id']})")
+            sig["ml"] = gate
+            self.save_signal(sig)
+            self.add_signal_event(sig["id"], "ML_VETO", sig["status_reason"])
+            return
+        size_factor = float(gate["size_factor"]) if gate else 1.0
+        rc = self.risk_check(sym, side, entry, sl, tp, size_factor=size_factor)
         it = self.executor.submit_open(mode, sym, side, rc["volume"], sl, tp, q, rc, signal_id=sig["id"])
         sig = self.get_signal(sig["id"]) or sig
         sig["intent_id"] = it["id"]
         sig["mode"] = mode
+        if gate:
+            sig["ml"] = gate
+            self.add_signal_event(sig["id"], "ML_SIZE", f"P(câștig)={gate['p']:.2f}, factor risc {gate['size_factor']:g} "
+                                                        f"(model {gate['model_id']})")
         if it["state"] == "REJECTED_RISK":
             sig["status"] = "NO_TRADE"
             sig["status_reason"] = "Risk Engine: " + risk_mod.failed_summary(rc)
@@ -1708,6 +1743,10 @@ class Engine:
             self.forward.tick(now)
         except Exception as e:
             self._perf_warn_once("forward", f"teste forward: {e!r}")
+        try:
+            self.ml.tick(now)
+        except Exception as e:
+            self._perf_warn_once("ml_tick", f"ML tick: {e!r}")
 
     async def _loop(self) -> None:
         while True:

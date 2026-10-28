@@ -98,6 +98,19 @@ class Settings(BaseSettings):
     # forward tests (PAPER, simulated only — never send orders): JSON list of
     # {name, strategy, signal_tf, htf_tf, symbols, risk_pct, equity, criteria}; settings key 'forward_tests' overrides
     FORWARD_TESTS: str = "[]"
+    # ML (spec §6.4): shadow logging is on by default and never changes trading; a model acts only after explicit
+    # manual approval. Approved entry model: veto + risk factor in [ML_SIZE_MIN, ML_SIZE_MAX] (max 2.0), every Risk
+    # Engine cap still applies; a scaled-up trade never risks more than ML_MAX_RISK_PCT % of equity.
+    ML_ENABLED: bool = True
+    ML_SIZE_MIN: float = 0.5
+    ML_SIZE_MAX: float = 1.0
+    ML_MAX_RISK_PCT: float = 0.5
+    ML_RETRAIN_ENABLED: bool = True
+    ML_RETRAIN_AT: str = "22:30"  # local time in DEFAULT_TIMEZONE
+    ML_RETRAIN_TIMEOUT_MIN: float = 120
+    ML_RETRAIN_ARGS: str = "train --db {db} --out {models_dir} --registry-db {db}"  # python -m app.ml ...
+    ML_MODELS_DIR: str = "data/models"
+    ML_DECISIONS_MAX_ROWS: int = 200000
 
     @property
     def db_path(self) -> Path:

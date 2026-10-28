@@ -1727,6 +1727,239 @@ async function loadArchiveStatus() {
 }
 
 /* ---------------- symbols ---------------- */
+/* ---------------- ML models (shadow by default, manual approval only) ---------------- */
+const ML = { data: null, detail: null, timer: 0 };
+const ML_STATUS = { candidate: ['', 'CANDIDAT'], shadow: ['violet', 'UMBRĂ'], approved: ['ok', 'APROBAT'], archived: ['', 'ARHIVAT'] };
+function mlStatusBadge(s) { const [c, t] = ML_STATUS[s] || ['', s || '—']; return `<span class="badge ${c}">${esc(t)}</span>`; }
+function mlKind(k) { return k === 'entry' ? 'Intrare' : k === 'exit' ? 'Ieșire' : esc(k || '—'); }
+function mlNum(v, dec = 3) { return isNum(v) ? fmtNum(v, dec) : '—'; }
+function mlChkVal(v) {
+  if (v && typeof v === 'object') return isNum(v.n) || isNum(v.days) ? `${v.n ?? 0} dec. / ${fmtNum(v.days, 1)} z` : JSON.stringify(v);
+  return isNum(v) ? fmtNum(v, 3) : (v ?? '—');
+}
+function mlCi(ci) { return Array.isArray(ci) && ci.length === 2 && ci.every(isNum) ? `[${fmtSigned(ci[0], 3)}; ${fmtSigned(ci[1], 3)}]` : '—'; }
+
+async function enterModels() {
+  clearInterval(ML.timer);
+  ML.timer = setInterval(() => { if (S.route.page === 'models') loadModels(); }, 15000);
+  await loadModels();
+  if (S.route.arg) showModel(S.route.arg); else { ML.detail = null; $('#ml-detail').innerHTML = ''; }
+}
+function leaveModels() { clearInterval(ML.timer); ML.timer = 0; }
+
+async function loadModels() {
+  let d;
+  try { d = await api('/models'); } catch (e) {
+    $('#ml-list').innerHTML = emptyState('Lista modelelor indisponibilă', ' ' + (e.detail || e.message));
+    return;
+  }
+  ML.data = d;
+  renderMlState(d);
+  renderMlRetrain(d.retrain || {});
+  renderMlList(d.models || []);
+}
+
+function renderMlState(d) {
+  const st = d.settings || {}, act = d.active || {};
+  $('#ml-state-sub').innerHTML = st.enabled ? '<span class="badge ok">ACTIV</span>' : '<span class="badge">OPRIT</span>';
+  $('#ml-state').innerHTML = `<dl class="kv">
+      <dt>Model intrare aprobat</dt><dd>${act.entry ? `<a href="#models/${enc(act.entry)}" class="mono">${esc(act.entry)}</a>` : '<span class="dim">niciunul — comportament de bază</span>'}</dd>
+      <dt>Model ieșire aprobat</dt><dd>${act.exit ? `<a href="#models/${enc(act.exit)}" class="mono">${esc(act.exit)}</a>` : '<span class="dim">niciunul — ieșiri de bază</span>'}</dd>
+      <dt>Factor risc ML</dt><dd>${mlNum(st.size_min, 2)} – ${mlNum(st.size_max, 2)} <span class="faint">(max ${mlNum(st.size_max_limit, 1)}; risc/tranzacție mărită ≤ ${mlNum(st.max_risk_pct_cap, 2)}%)</span></dd>
+      <dt>Pachet ML</dt><dd>${st.ml_package ? 'instalat' : '<span class="warn-text">lipsește (app.ml)</span>'}</dd>
+    </dl>
+    <form id="ml-settings" class="ml-settings">
+      <label class="check-field"><input type="checkbox" name="enabled" ${st.enabled ? 'checked' : ''}> Înregistrare în umbră + modele aprobate active</label>
+      <label class="field">Factor maxim de risc (0.5–2.0)<input type="number" name="size_max" min="0.5" max="2" step="0.05" value="${isNum(st.size_max) ? st.size_max : 1}"></label>
+      <div class="form-actions" style="margin-top:6px"><button type="submit" class="btn sm">Salvează</button></div>
+    </form>`;
+}
+
+function renderMlRetrain(r) {
+  const last = r.last;
+  $('#ml-rt-sub').textContent = r.enabled ? `zilnic la ${r.at || '—'} (${S.status && S.status.session ? (S.status.session.tz || TZ) : TZ})` : 'reantrenare nocturnă oprită';
+  const btn = $('#ml-retrain');
+  if (btn) { btn.disabled = !!r.running || r.available === false; btn.textContent = r.running ? 'Se antrenează…' : 'Antrenează acum'; }
+  if (!last) {
+    $('#ml-retrain-box').innerHTML = emptyState('Nicio reantrenare încă', r.available === false ? ' Modulul app.ml.train lipsește.' : ' Rulează automat noaptea sau apasă „Antrenează acum”.');
+    return;
+  }
+  const cls = last.status === 'OK' ? 'ok' : last.status === 'RUNNING' ? 'info' : 'bad';
+  $('#ml-retrain-box').innerHTML = `<dl class="kv">
+      <dt>Stare</dt><dd><span class="badge ${cls}">${esc(last.status)}</span> <span class="faint">${esc(last.trigger || '')}</span></dd>
+      <dt>Pornită</dt><dd>${fmtDTs(last.started_utc)}</dd>
+      <dt>Terminată</dt><dd>${last.finished_utc ? fmtDTs(last.finished_utc) : '—'}</dd>
+      <dt>Modele noi</dt><dd>${(last.imported || []).length ? (last.imported || []).map((x) => `<span class="mono">${esc(x)}</span>`).join('<br>') : '—'}</dd>
+    </dl>
+    ${last.status !== 'OK' && last.log_tail ? `<pre class="ml-log">${esc(String(last.log_tail).slice(-800))}</pre>` : ''}
+    <p class="faint" style="font-size:12px;margin:8px 0 0">Reantrenarea creează doar candidați; cel mai nou trece în umbră. Nu aprobă niciodată automat.</p>`;
+}
+
+function renderMlList(models) {
+  if (!models.length) {
+    $('#ml-list').innerHTML = emptyState('Niciun model încă', ' Primul model apare după o reantrenare (nocturnă sau manuală).');
+    return;
+  }
+  const rows = models.map((m) => {
+    const o = m.oos || {}, sh = m.shadow;
+    const ci = o.ci90;
+    return `<tr class="clickable" data-href="#models/${enc(m.id)}"><td><span class="mono">${esc(m.id)}</span></td><td>${mlKind(m.kind)}</td>
+      <td>${mlStatusBadge(m.status)}${m.status !== 'archived' && m.status !== 'candidate' && !m.loaded ? ' <span class="badge bad" title="Artefact neîncărcat / neverificat">!</span>' : ''}</td>
+      <td class="num">${fmtDTs(m.trained_until_utc)}</td>
+      <td class="num ${pnlCls(o.avg_r)}">${fmtR(o.avg_r, 3)}</td><td class="num">${fmtR(o.baseline_avg_r, 3)}</td>
+      <td class="num ci-txt ${Array.isArray(ci) && isNum(ci[0]) && ci[0] <= -0.02 ? 'down' : ''}">${mlCi(ci)}</td>
+      <td class="num">${mlNum(o.pf, 2)}</td><td class="num">${isNum(o.n) ? o.n : '—'}</td>
+      <td class="num">${m.kind === 'entry' ? mlNum(o.brier, 4) : '—'}</td><td class="num">${m.kind === 'entry' ? mlNum(o.ece, 3) : mlNum(o.calib_mae, 3)}</td>
+      <td class="num">${sh ? `${sh.n_decisions} / ${fmtNum(sh.days, 1)} z` : '—'}</td></tr>`;
+  }).join('');
+  $('#ml-list').innerHTML = table(['Model', 'Tip', 'Stare', { t: 'Antrenat până la', cls: 'num' }, { t: 'OOS R mediu', cls: 'num' },
+    { t: 'Baseline', cls: 'num' }, { t: 'IC90%', cls: 'num' }, { t: 'PF', cls: 'num' }, { t: 'n', cls: 'num' },
+    { t: 'Brier', cls: 'num' }, { t: 'ECE / calib.', cls: 'num' }, { t: 'Umbră (decizii / zile)', cls: 'num' }], rows);
+}
+
+function calibrationSvg(bins, kind) {
+  const pts = (bins || []).filter((b) => isNum(b.p) && isNum(b.obs));
+  if (pts.length < 2) return emptyState('Fără date de calibrare', '');
+  const W = 320, H = 220, P = 34;
+  let lo = 0, hi = 1;
+  if (kind !== 'entry') {
+    const all = pts.flatMap((b) => [b.p, b.obs]);
+    lo = Math.min(...all); hi = Math.max(...all);
+    const pad = (hi - lo) * 0.08 || 0.1; lo -= pad; hi += pad;
+  }
+  const x = (v) => P + (v - lo) / (hi - lo) * (W - P - 10);
+  const y = (v) => H - P - (v - lo) / (hi - lo) * (H - P - 10);
+  const nMax = Math.max(...pts.map((b) => (isNum(b.n) ? b.n : 1)));
+  const line = pts.map((b, i) => `${i ? 'L' : 'M'}${x(b.p).toFixed(1)},${y(b.obs).toFixed(1)}`).join(' ');
+  const dots = pts.map((b) => `<circle cx="${x(b.p).toFixed(1)}" cy="${y(b.obs).toFixed(1)}" r="${(3 + 4 * Math.sqrt((isNum(b.n) ? b.n : 1) / nMax)).toFixed(1)}"
+      style="fill:var(--accent);fill-opacity:.85"><title>prezis ${fmtNum(b.p, 3)} · observat ${fmtNum(b.obs, 3)} · n=${isNum(b.n) ? b.n : '—'}</title></circle>`).join('');
+  const ticks = [lo, (lo + hi) / 2, hi].map((t) => `<text x="${x(t).toFixed(1)}" y="${H - P + 16}" text-anchor="middle">${fmtNum(t, 2)}</text>
+      <text x="${P - 6}" y="${(y(t) + 4).toFixed(1)}" text-anchor="end">${fmtNum(t, 2)}</text>`).join('');
+  const xl = kind === 'entry' ? 'P prezis' : 'R rămas prezis', yl = kind === 'entry' ? 'frecvență reală câștig' : 'R rămas real';
+  return `<svg class="ml-calib" viewBox="0 0 ${W} ${H}" role="img" aria-label="Curbă de calibrare">
+      <rect x="${P}" y="10" width="${W - P - 10}" height="${H - P - 10}" style="fill:none;stroke:var(--border)"/>
+      <line x1="${x(lo)}" y1="${y(lo)}" x2="${x(hi)}" y2="${y(hi)}" style="stroke:var(--text-faint);stroke-dasharray:4 4"/>
+      <path d="${line}" style="fill:none;stroke:var(--accent);stroke-width:2"/>${dots}
+      <g style="fill:var(--text-dim);font-size:10px">${ticks}
+      <text x="${(W + P) / 2}" y="${H - 4}" text-anchor="middle">${xl}</text>
+      <text x="10" y="${(H - P) / 2}" text-anchor="middle" transform="rotate(-90 10 ${(H - P) / 2})">${yl}</text></g></svg>`;
+}
+
+async function showModel(id) {
+  const box = $('#ml-detail');
+  box.innerHTML = '<div class="card"><div class="loading">Se încarcă modelul…</div></div>';
+  let d;
+  try { d = await api('/models/' + enc(id)); } catch (e) { box.innerHTML = `<div class="card">${emptyState('Model indisponibil', ' ' + (e.detail || e.message))}</div>`; return; }
+  ML.detail = d;
+  renderModelDetail(d);
+}
+
+function renderModelDetail(d) {
+  const o = d.oos || {}, sh = d.shadow || {}, chk = d.checklist || { items: [] };
+  const entry = d.kind === 'entry';
+  const tiles = [
+    kpiTile('OOS R mediu (politică)', fmtR(o.avg_r, 3), `IC90% ${mlCi(o.ci90)}`, pnlCls(o.avg_r)),
+    kpiTile(entry ? 'Baseline (ia tot)' : 'Baseline (ieșiri de bază)', fmtR(o.baseline_avg_r, 3), `IC90% ${mlCi(o.baseline_ci90)} · n=${isNum(o.baseline_n) ? o.baseline_n : '—'}`),
+    kpiTile('Profit factor', mlNum(o.pf, 2), `baseline ${mlNum(o.baseline_pf, 2)} · n=${isNum(o.n) ? o.n : '—'}`),
+    entry ? kpiTile('Brier / AUC', `${mlNum(o.brier, 4)}`, `climatologie ${mlNum(o.brier_climatology, 4)} · AUC ${mlNum(o.auc, 3)}`)
+      : kpiTile('Eroare calibrare', mlNum(o.calib_mae, 3) + 'R', 'medie pe intervale de predicție'),
+    entry ? kpiTile('ECE (calibrare)', mlNum(o.ece, 3), `prag P ${mlNum(o.threshold, 3)} · acoperire ${fmtPct(o.coverage, 0)}`)
+      : kpiTile('Marjă ieșire', isNum(o.exit_margin) ? fmtNum(o.exit_margin, 2) + 'R' : 'niciuna', 'închide când R rămas prezis < −marjă'),
+  ];
+  const shadowKv = entry
+    ? `<dt>Decizii în umbră</dt><dd>${sh.n_decisions ?? 0} în ${fmtNum(sh.days, 1)} zile${sh.first_utc ? ` <span class="faint">(din ${fmtDTs(sh.first_utc)})</span>` : ''}</dd>
+       <dt>Etichetate (rezultat real)</dt><dd>${sh.n_labeled ?? 0}</dd>
+       <dt>Ar fi luat</dt><dd>${sh.take ? `${sh.take.n} · ${fmtR(sh.take.avg_r, 3)}` : '—'}</dd>
+       <dt>Ar fi sărit</dt><dd>${sh.skip ? `${sh.skip.n} · ${fmtR(sh.skip.avg_r, 3)}` : '—'}</dd>
+       <dt>Toți candidații</dt><dd>${sh.all ? `${sh.all.n} · ${fmtR(sh.all.avg_r, 3)}` : '—'}</dd>
+       <dt>Avantaj live</dt><dd class="${pnlCls(sh.edge_r)}">${fmtR(sh.edge_r, 3)}</dd>`
+    : `<dt>Decizii în umbră</dt><dd>${sh.n_decisions ?? 0} în ${fmtNum(sh.days, 1)} zile</dd>
+       <dt>Tranzacții de închis devreme</dt><dd>${sh.would_close_trades ?? 0} (încheiate: ${sh.n_trades ?? 0})</dd>
+       <dt>Câștig mediu vs. ieșirea reală</dt><dd class="${pnlCls(sh.avg_gain_r)}">${fmtR(sh.avg_gain_r, 3)}</dd>`;
+  const chkRows = (chk.items || []).map((i) => `<li class="${i.ok ? 'ok' : 'bad'}"><span class="mark">${i.ok ? '✓' : '✗'}</span>
+      <span>${esc(i.label)}</span><span class="mono faint">${esc(mlChkVal(i.value))}</span></li>`).join('');
+  const hist = (d.approvals || []).map((a) => `<tr><td class="num">${fmtDTs(a.ts_utc)}</td><td>${esc(a.action === 'approve' ? 'aprobare' : 'retragere')}</td>
+      <td>${esc(a.actor || '—')}</td><td>${a.override ? '<span class="badge bad">OVERRIDE</span>' : ''}</td><td class="mono">${esc(a.prev_model_id || '')}</td></tr>`).join('');
+  const canApprove = d.status === 'shadow', canRetire = d.status !== 'archived';
+  $('#ml-detail').innerHTML = `<div class="card">
+      <div class="card-head"><div><h2>${mlKind(d.kind)} · <span class="mono">${esc(d.id)}</span> ${mlStatusBadge(d.status)}</h2>
+        <div class="sub" style="margin-top:2px">schemă ${esc(d.feature_schema || '—')} · dataset ${esc(d.dataset_version || '—')} · antrenat până la ${fmtDTs(d.trained_until_utc)}
+        ${d.approved_by ? ` · aprobat de ${esc(d.approved_by)} la ${fmtDTs(d.approved_at)}` : ''}</div></div>
+        <div class="page-actions">
+          ${canApprove ? '<button type="button" class="btn success" id="ml-approve">Aprobă pentru DEMO</button>' : ''}
+          ${canRetire ? '<button type="button" class="btn danger" id="ml-retire">Retrage</button>' : ''}
+        </div></div>
+      ${d.status === 'approved' ? `<div class="banner">Model ACTIV pe tranzacționare: ${entry ? 'poate refuza intrări și ajusta riscul în limitele setate' : 'poate închide poziții mai devreme (ML_EXIT)'}. Limitele Risk Engine rămân active.</div>` : ''}
+      ${d.status === 'shadow' ? '<div class="banner">În umbră: scorurile sunt doar înregistrate, nu influențează nicio tranzacție.</div>' : ''}
+      <div class="grid g-5">${tiles.join('')}</div>
+    </div>
+    <div class="grid g-3">
+      <div class="card"><div class="card-head"><h2>Calibrare (OOS)</h2><span class="sub">${entry ? 'diagonala = perfect calibrat' : 'R rămas prezis vs. real'}</span></div>${calibrationSvg(o.calibration, d.kind)}</div>
+      <div class="card"><div class="card-head"><h2>Rezultate în umbră (live)</h2><span class="sub">din jurnalul ml_decisions</span></div><dl class="kv">${shadowKv}</dl></div>
+      <div class="card"><div class="card-head"><h2>Checklist promovare</h2>${chk.passed ? '<span class="badge ok">PROMOVAT</span>' : '<span class="badge bad">NEPROMOVAT</span>'}</div><ul class="ml-check">${chkRows}</ul></div>
+    </div>
+    ${hist ? `<div class="card flush"><div class="card-head"><h2>Istoric aprobări</h2></div><div class="tbl-box">${table(['Data', 'Acțiune', 'De către', '', 'Model anterior/restaurat'], hist)}</div></div>` : ''}`;
+  const ab = $('#ml-approve'); if (ab) ab.addEventListener('click', (ev) => approveModel(d, ev.currentTarget));
+  const rb = $('#ml-retire'); if (rb) rb.addEventListener('click', (ev) => retireModel(d, ev.currentTarget));
+}
+
+async function approveModel(d, btn) {
+  const chk = d.checklist || { items: [] };
+  const failed = (chk.items || []).filter((i) => !i.ok).map((i) => '• ' + i.label);
+  const what = d.kind === 'entry'
+    ? 'va putea REFUZA intrări sub pragul său și va ajusta riscul în limitele setate'
+    : 'va putea ÎNCHIDE poziții mai devreme (ML_EXIT)';
+  if (!confirm(`Aprobi modelul ${d.id} pentru DEMO?\n\nDupă aprobare ${what}. Limitele Risk Engine rămân active. Poți retrage oricând.`)) return;
+  const body = { confirm: 'APROB' };
+  if (!chk.passed) {
+    if (!confirm(`ATENȚIE: checklist-ul de promovare NU este îndeplinit:\n${failed.join('\n')}\n\nAprobarea forțată este riscantă. Continui?`)) return;
+    const t2 = prompt('Pentru aprobare forțată scrie exact: ȘTIU RISCUL');
+    if (t2 === null) return;
+    if (t2.trim() !== 'ȘTIU RISCUL') { toast('Text de confirmare incorect — modelul nu a fost aprobat', 'warn'); return; }
+    body.override = true; body.confirm_risk = 'ȘTIU RISCUL';
+  }
+  const typed = prompt('Pentru confirmare scrie exact: APROB');
+  if (typed === null) return;
+  if (typed.trim() !== 'APROB') { toast('Text de confirmare incorect — modelul nu a fost aprobat', 'warn'); return; }
+  const r = await act('/models/' + enc(d.id) + '/approve', body, `Modelul ${d.id} a fost aprobat`, btn);
+  if (r) { await loadModels(); showModel(d.id); }
+}
+
+async function retireModel(d, btn) {
+  const msg = d.status === 'approved'
+    ? `Retragi modelul aprobat ${d.id}? Se revine la modelul aprobat anterior (dacă există) sau la comportamentul de bază.`
+    : `Retragi (arhivezi) modelul ${d.id}?`;
+  if (!confirm(msg)) return;
+  const r = await act('/models/' + enc(d.id) + '/retire', {}, null, btn);
+  if (r) {
+    toast(r.restored ? `Model retras; restaurat ${r.restored}` : 'Model retras', 'ok');
+    await loadModels(); showModel(d.id);
+  }
+}
+
+function initModels() {
+  $('#ml-retrain').addEventListener('click', async (ev) => {
+    if (!confirm('Pornești o reantrenare acum? Rulează separat, cu prioritate redusă, pe o copie a bazei de date. Rezultatul: modele candidat / în umbră — nimic nu tranzacționează fără aprobare.')) return;
+    const r = await act('/models/retrain', {}, 'Reantrenare pornită', ev.currentTarget);
+    if (r) loadModels();
+  });
+  $('#ml-state').addEventListener('submit', async (ev) => {
+    if (ev.target.id !== 'ml-settings') return;
+    ev.preventDefault();
+    const f = ev.target;
+    const st = (ML.data && ML.data.settings) || {};
+    const body = {};
+    if (f.enabled.checked !== !!st.enabled) body.enabled = f.enabled.checked;
+    const sm = Number(f.size_max.value);
+    if (Number.isFinite(sm) && sm !== st.size_max) {
+      if (sm > 1 && !confirm(`Factor maxim ${sm}: un model aprobat va putea mări riscul unei tranzacții până la ${sm}× (plafonat de Risk Engine). Continui?`)) return;
+      body.size_max = sm;
+    }
+    const r = await putSettings('/models/settings', body, 'Setări ML salvate');
+    if (r) loadModels();
+  });
+}
+
 async function refreshSymbols() {
   try {
     const list = await api('/symbols');
@@ -1846,7 +2079,7 @@ async function resync() {
 }
 
 /* ---------------- router ---------------- */
-const PAGES = ['overview', 'chart', 'signals', 'signal', 'positions', 'performance', 'backtest', 'control', 'integrations', 'system'];
+const PAGES = ['overview', 'chart', 'signals', 'signal', 'positions', 'performance', 'backtest', 'models', 'control', 'integrations', 'system'];
 function route() {
   const raw = decodeURIComponent((location.hash || '#overview').slice(1));
   let [page, ...rest] = raw.split('/');
@@ -1856,6 +2089,7 @@ function route() {
   if (prev === 'chart' && page !== 'chart') leaveChart();
   if (prev === 'system' && page !== 'system') leaveSystem();
   if (prev === 'backtest' && page !== 'backtest') leaveBacktest();
+  if (prev === 'models' && page !== 'models') leaveModels();
   if (prev === 'signal' && page !== 'signal' && SD.chart) { try { SD.chart.remove(); } catch (e) { /* ignore */ } SD.chart = null; }
   S.route = { page, arg };
   $$('.page').forEach((s) => { s.hidden = s.id !== 'page-' + page; });
@@ -1872,6 +2106,7 @@ function route() {
     case 'positions': enterPositions(); break;
     case 'performance': enterPerformance(); break;
     case 'backtest': enterBacktest(); break;
+    case 'models': enterModels(); break;
     case 'control': enterControl(); break;
     case 'integrations': enterIntegrations(); break;
     case 'system': enterSystem(); break;
@@ -1896,6 +2131,7 @@ function applyChartThemes() {
 function init() {
   initAdminModal();
   initControl();
+  initModels();
   $('#theme-btn').addEventListener('click', toggleTheme);
   if (window.matchMedia) {
     const mq = window.matchMedia('(prefers-color-scheme: light)');

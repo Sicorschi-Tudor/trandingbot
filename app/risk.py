@@ -101,7 +101,32 @@ class RiskContext:
     news_note: str = ""  # detail when not blocked (e.g. calendar unavailable)
     test_order: bool = False
     account_settling: bool = False  # MT5 login switched moments ago: balance/equity may be the old account's
+    # approved ML entry model only (app.ml_live): risk multiplier, bounded here to [ML_FACTOR_MIN, ML_FACTOR_MAX]; a
+    # scaled-up trade is also capped at size_cap_pct % of equity. 1.0 = unchanged behaviour. Every other cap applies.
+    size_factor: float = 1.0
+    size_cap_pct: float | None = None
     checks: list = field(default_factory=list)
+
+
+ML_FACTOR_MIN = 0.1
+ML_FACTOR_MAX = 2.0
+
+
+def effective_risk_pct(max_risk_pct: float, factor: float, cap_pct: float | None) -> float:
+    """Per-trade risk target after the ML factor. factor <= 1 only ever lowers it; factor > 1 is capped at
+    min(2 x max_risk_pct, max(max_risk_pct, cap_pct))."""
+    try:
+        f = float(factor)
+    except (TypeError, ValueError):
+        f = 1.0
+    if not math.isfinite(f) or f == 1.0:
+        return max_risk_pct
+    f = min(max(f, ML_FACTOR_MIN), ML_FACTOR_MAX)
+    pct = max_risk_pct * f
+    if f > 1.0:
+        cap = max_risk_pct if cap_pct is None else max(max_risk_pct, float(cap_pct))
+        pct = min(pct, cap, ML_FACTOR_MAX * max_risk_pct)
+    return pct
 
 
 def floor_to_step(vol: float, step: float) -> float:
@@ -208,7 +233,11 @@ def evaluate(ctx: RiskContext) -> dict:
             add("volume_ok", sl_dist > 0 and equity > 0 and rm <= limit,
                 f"test: volum minim {vmin} → risc {rm:.2f} (limită 2×{max_risk_pct:g}% = {limit:.2f})")
     else:
-        volume = calc_volume(equity, max_risk_pct, sl_dist, info) if equity > 0 else 0.0
+        target_pct = effective_risk_pct(max_risk_pct, ctx.size_factor, ctx.size_cap_pct)
+        if target_pct != max_risk_pct:
+            add("ml_size_factor", True, f"factor ML {ctx.size_factor:g} → țintă risc {target_pct:.3f}% "
+                                        f"(bază {max_risk_pct:g}%; limitele de risc rămân active)")
+        volume = calc_volume(equity, target_pct, sl_dist, info) if equity > 0 else 0.0
         vcap = float(r.get("max_volume_lots") or 0)
         if vcap and volume > vcap:
             volume = floor_to_step(vcap, float(info.get("volume_step") or 0.01))
@@ -218,7 +247,7 @@ def evaluate(ctx: RiskContext) -> dict:
             rm = risk_money(volume, sl_dist, tick_size, tick_value)
             new_risk = rm
             add("volume_ok", True, f"volum {volume} → risc {rm:.2f} ({rm / equity * 100:.2f}% din {equity:.2f}, "
-                                   f"țintă {max_risk_pct:g}%)")
+                                   f"țintă {target_pct:g}%)")
 
     max_open = int(r.get("max_open_positions", 1))
     add("max_open_positions", ctx.open_bot_positions < max_open, f"{ctx.open_bot_positions}/{max_open} poziții deschise")

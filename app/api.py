@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import re
 import secrets
 from typing import Any
@@ -715,3 +716,95 @@ async def forward_reset(request: Request):
     if body.get("confirm") != "RESET":
         raise HTTPException(status_code=400, detail='Confirmare necesară: {"name":"...","confirm":"RESET"}')
     return fwd.reset(name)
+
+
+# ---- ML models (spec §6.4): shadow by default, explicit manual approval only ----------------------
+def _ml(request: Request):
+    ml = getattr(get_engine(request), "ml", None)
+    if ml is None:
+        raise HTTPException(status_code=503, detail="Modulul ML nu este inițializat")
+    return ml
+
+
+@router.get("/models")
+def get_models(request: Request):
+    return _ml(request).list_payload()
+
+
+@router.put("/models/settings", dependencies=[Depends(require_admin)])
+async def put_models_settings(request: Request):
+    ml = _ml(request)
+    body = await _json(request)
+    upd: dict[str, Any] = {}
+    for k, v in body.items():
+        if k == "enabled":
+            upd[k] = _bool(k, v)
+        elif k == "size_max":
+            upd[k] = _num(k, v, float, 0.5, 2.0)
+        else:
+            raise HTTPException(status_code=422, detail=f"Cheie necunoscută: {k}")
+    out = ml.update_settings(upd)
+    get_engine(request).rt.log("WARN", "control", f"Setări ML actualizate: {upd}")
+    return out
+
+
+@router.post("/models/retrain", dependencies=[Depends(require_admin)])
+async def models_retrain(request: Request):
+    res = _ml(request).start_retrain("manual")
+    if not res.get("started"):
+        raise HTTPException(status_code=409, detail=res.get("reason") or "Reantrenarea nu a pornit")
+    return res
+
+
+@router.get("/models/{model_id}")
+def get_model(request: Request, model_id: str):
+    d = _ml(request).detail_payload(model_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Model inexistent")
+    return d
+
+
+@router.post("/models/{model_id}/approve", dependencies=[Depends(require_admin)])
+async def model_approve(request: Request, model_id: str):
+    ml = _ml(request)
+    body = await _json(request)
+    if body.get("confirm") != "APROB":
+        raise HTTPException(status_code=400, detail='Confirmare necesară: {"confirm":"APROB"}')
+    override = body.get("override") is True
+    if override and body.get("confirm_risk") != "ȘTIU RISCUL":
+        raise HTTPException(status_code=400, detail='Override necesită și {"confirm_risk":"ȘTIU RISCUL"}')
+    notes = str(body.get("notes") or "")[:500]
+    try:
+        res = await asyncio.to_thread(ml.approve, model_id, "admin", override, notes)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError as e:
+        try:
+            chk = json.loads(str(e))
+            bad = ", ".join(i["label"] for i in chk.get("items", []) if not i.get("ok"))
+            hard = list(chk.get("hard_labels") or [])
+            if chk.get("strategy") and not chk["strategy"].get("ok"):
+                bad = ", ".join(x for x in (bad, chk["strategy"].get("label")) if x)
+        except ValueError:
+            bad, hard = str(e), []
+        if hard:
+            raise HTTPException(status_code=409, detail="Checklist de promovare nepromovat; criterii care nu pot fi forțate: "
+                                                        + ", ".join(hard))
+        raise HTTPException(status_code=409, detail=f"Checklist de promovare nepromovat: {bad}. Aprobarea forțată cere "
+                                                    '{"override":true,"confirm_risk":"ȘTIU RISCUL"}')
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if override and not res["checklist"]["passed"]:
+        get_engine(request).rt.log("WARN", "control", f"Model ML {model_id} aprobat cu OVERRIDE — checklist nepromovat")
+    return res
+
+
+@router.post("/models/{model_id}/retire", dependencies=[Depends(require_admin)])
+async def model_retire(request: Request, model_id: str):
+    ml = _ml(request)
+    try:
+        return await asyncio.to_thread(ml.retire, model_id, "admin")
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))

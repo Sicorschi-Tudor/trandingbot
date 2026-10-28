@@ -30,6 +30,7 @@
       <a href="#positions" data-page="positions">Poziții &amp; Ordine</a>
       <a href="#performance" data-page="performance">Performanță</a>
       <a href="#backtest" data-page="backtest">Backtest</a>
+      <a href="#models" data-page="models">Modele ML</a>
       <a href="#control" data-page="control">Control &amp; Risc</a>
       <a href="#integrations" data-page="integrations">Telegram &amp; AI</a>
       <a href="#system" data-page="system">Sistem &amp; Loguri</a>
@@ -214,6 +215,32 @@
       <div class="card-head"><h2>Rulări anterioare</h2><span class="sub">Apasă pe un rând pentru rezultate</span></div>
       <div id="bt-runs" class="tbl-box"></div>
     </div>
+  </section>
+
+  <!-- ============ MODELE ML ============ -->
+  <section class="page" id="page-models" hidden>
+    <div class="page-head">
+      <div><h1>Modele ML <span class="badge violet" style="vertical-align:middle;margin-left:6px">UMBRĂ</span></h1>
+        <p>Învățarea rulează separat de tranzacționare. Modelele noi stau în <b>umbră</b>: doar notează ce ar fi făcut, nu tranzacționează.
+          Un model acționează numai după aprobare manuală: cel de intrare poate doar refuza intrări sau ajusta riscul în limitele setate,
+          cel de ieșire poate doar închide mai devreme. Limitele Risk Engine rămân mereu active.</p></div>
+      <div class="page-actions"><button type="button" class="btn primary" id="ml-retrain">Antrenează acum</button></div>
+    </div>
+    <div class="grid g-2">
+      <div class="card">
+        <div class="card-head"><h2>Stare ML</h2><span class="sub" id="ml-state-sub"></span></div>
+        <div id="ml-state"><div class="loading">Se încarcă…</div></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Ultima reantrenare</h2><span class="sub" id="ml-rt-sub"></span></div>
+        <div id="ml-retrain-box"><div class="loading">Se încarcă…</div></div>
+      </div>
+    </div>
+    <div class="card flush">
+      <div class="card-head"><h2>Modele</h2><span class="sub">Rezultate OOS (walk-forward, după costuri). Apasă pe un rând pentru detalii.</span></div>
+      <div id="ml-list" class="tbl-box"><div class="loading">Se încarcă…</div></div>
+    </div>
+    <div id="ml-detail"></div>
   </section>
 
   <!-- ============ CONTROL ============ -->

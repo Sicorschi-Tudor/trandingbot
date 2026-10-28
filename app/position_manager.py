@@ -109,6 +109,21 @@ class PositionManager:
             return None
         return ind.last(ind.atr([b["h"] for b in bars], [b["l"] for b in bars], [b["c"] for b in bars], 14))
 
+    def _ml_exit(self, source: str, pos: dict, now_ts: float) -> dict | None:
+        """Approved ML exit model only (none by default): an early CLOSE with reason ML_EXIT, nothing else — it can
+        never move SL/TP or add to a position. Any error = no action."""
+        ml = getattr(self.engine, "ml", None)
+        if ml is None:
+            return None
+        try:
+            a = ml.exit_action(source, pos, now_ts)
+        except Exception as e:
+            self.engine.rt.log("WARN", "ml", f"ML exit pe ticket {pos.get('ticket')}: {e!r}")
+            return None
+        if isinstance(a, dict) and a.get("type") == "CLOSE":
+            return {"type": "CLOSE", "reason": "ML_EXIT"}
+        return None
+
     def run(self, now_ts: float | None = None) -> None:
         eng = self.engine
         rt = eng.rt
@@ -142,6 +157,12 @@ class PositionManager:
             atr = self._atr(pos["symbol"]) if cfg.get("trailing_enabled") and not stale else None
             news_ev = eng.news_event_near(pos["symbol"], now_ts) if hasattr(eng, "news_event_near") else None
             actions = plan(pos, info, cfg, now_ts, session_open, init_sl, atr, news_ev)
+            if not stale and not any(a["type"] == "CLOSE" for a in actions) and (ticket, "CLOSE") not in self.gave_up:
+                ml_a = self._ml_exit(source, pos, now_ts)
+                # an early close supersedes this round's SL move only when it can actually be sent: while a failed
+                # CLOSE is backing off (or was abandoned) the break-even / trailing / NEWS_BE MODIFY still goes out
+                if ml_a is not None and not self._backing_off(ticket, ml_a, now_ts):
+                    actions = [ml_a]
             if stale:
                 # no SL moves on stale prices, but session-end / time-stop closes still go out (EA closes at market)
                 actions = [a for a in actions if a["type"] == "CLOSE" and a.get("reason") in FORCED_CLOSE_REASONS]
