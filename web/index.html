@@ -28,6 +28,8 @@
       <a href="#chart" data-page="chart">Grafic live</a>
       <a href="#signals" data-page="signals">Semnale</a>
       <a href="#positions" data-page="positions">Poziții &amp; Ordine</a>
+      <a href="#performance" data-page="performance">Performanță</a>
+      <a href="#backtest" data-page="backtest">Backtest</a>
       <a href="#control" data-page="control">Control &amp; Risc</a>
       <a href="#integrations" data-page="integrations">Telegram &amp; AI</a>
       <a href="#system" data-page="system">Sistem &amp; Loguri</a>
@@ -149,6 +151,61 @@
     <div class="card flush"><div class="card-head"><h2>Comenzi în așteptare (către EA)</h2></div><div id="pos-pending" style="padding:4px 4px 8px"></div></div>
     <div class="card flush"><div class="card-head"><h2>Intenții de execuție</h2><span class="sub">Apasă pe un rând pentru verificările de risc</span></div><div id="pos-intents" style="padding:4px 4px 8px"></div></div>
     <div class="card flush"><div class="card-head"><h2>Tranzacții închise</h2></div><div id="pos-trades" style="padding:4px 4px 8px"></div></div>
+  </section>
+
+  <!-- ============ PERFORMANCE ============ -->
+  <section class="page" id="page-performance" hidden>
+    <div class="page-head">
+      <div><h1>Performanță</h1><p>Rezultatele reale ale botului pe cont, în R și USD. Orele sunt afișate în ora Chișinăului.</p></div>
+      <div class="page-actions">
+        <label class="field">Cont<select id="pf-account" aria-label="Cont"></select></label>
+        <div class="seg" id="pf-days" role="group" aria-label="Perioadă">
+          <button data-days="1">1 zi</button><button data-days="7">7 zile</button><button data-days="30">30 zile</button><button data-days="0">Tot</button>
+        </div>
+        <button class="btn" id="pf-refresh">Reîncarcă</button>
+      </div>
+    </div>
+    <div id="pf-warn"></div>
+    <div class="grid g-4" id="pf-kpis"></div>
+    <div class="card flush">
+      <div class="card-head"><h2>Curba de equity</h2><span class="sub" id="pf-eq-sub">USD, din instantanee la 60 s</span></div>
+      <div class="chart-box mini" id="pf-chart"><div class="chart-overlay hidden" id="pf-chart-overlay"></div></div>
+    </div>
+    <div class="grid g-2">
+      <div class="card flush"><div class="card-head"><h2>Pe simbol</h2></div><div id="pf-by-symbol" class="tbl-box"></div></div>
+      <div class="card flush"><div class="card-head"><h2>Pe oră (Chișinău, ora intrării)</h2></div><div id="pf-by-hour" class="tbl-box"></div></div>
+    </div>
+    <div class="card flush"><div class="card-head"><h2>Pe verdict AI</h2><span class="sub">Verdictul Claude al semnalului care a deschis poziția</span></div><div id="pf-by-ai" class="tbl-box"></div></div>
+    <div class="card flush">
+      <div class="card-head">
+        <div><h2>Analiza în umbră</h2><div class="sub" style="margin-top:2px">Ce ar fi făcut candidații blocați de filtre, HOLD sau VETO dacă ar fi fost tranzacționați (SL/TP/BE/timp, net de spread).</div></div>
+        <span class="sub" id="sh-count"></span>
+      </div>
+      <div id="sh-body" class="tbl-box"><div class="loading">Se încarcă…</div></div>
+    </div>
+  </section>
+
+  <!-- ============ BACKTEST ============ -->
+  <section class="page" id="page-backtest" hidden>
+    <div class="page-head">
+      <div><h1>Backtest <span class="badge sim" style="vertical-align:middle;margin-left:6px">BACKTEST</span></h1>
+        <p>Rezultate SIMULATE pe istoricul arhivat: aceeași strategie ca live, cu costuri estimate. Nu garantează rezultate viitoare.</p></div>
+    </div>
+    <div class="bt-layout">
+      <div class="card">
+        <div class="card-head"><h2>Parametri</h2><span class="sub">Pornirea cere token de administrator</span></div>
+        <form id="bt-form"><div class="loading">Se încarcă…</div></form>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Arhivă istoric</h2><span class="sub" id="ar-sub"></span></div>
+        <div id="ar-body"><div class="loading">Se încarcă…</div></div>
+      </div>
+    </div>
+    <div id="bt-result"></div>
+    <div class="card flush">
+      <div class="card-head"><h2>Rulări anterioare</h2><span class="sub">Apasă pe un rând pentru rezultate</span></div>
+      <div id="bt-runs" class="tbl-box"></div>
+    </div>
   </section>
 
   <!-- ============ CONTROL ============ -->

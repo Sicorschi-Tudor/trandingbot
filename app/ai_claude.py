@@ -4,10 +4,57 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
+from typing import Callable
 
 from .config import Settings, iso, redact, utcnow
 
 log = logging.getLogger("bot.ai")
+
+# USD per million tokens: (input, output, cache read)
+PRICES_PER_MTOK: dict[str, tuple[float, float, float]] = {
+    "claude-opus-5-5": (4.00, 20.00, 0.20),
+    "claude-sonnet-5-5": (2.00, 10.00, 0.20),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01),
+}
+
+
+def model_prices(model: str | None) -> tuple[float, float, float] | None:
+    m = (model or "").strip().lower()
+    if m in PRICES_PER_MTOK:
+        return PRICES_PER_MTOK[m]
+    for k, v in PRICES_PER_MTOK.items():  # dated ids, e.g. claude-opus-5-5-20260101
+        if m.startswith(k + "-"):
+            return v
+    return None
+
+
+def usage_cost(model: str | None, input_tokens: int, output_tokens: int, cache_read_tokens: int = 0) -> float | None:
+    """USD cost of one call; None for an unknown model."""
+    p = model_prices(model)
+    if p is None:
+        return None
+    pin, pout, pcache = p
+    return round((input_tokens * pin + output_tokens * pout + cache_read_tokens * pcache) / 1_000_000, 6)
+
+
+def usage_record(resp, default_model: str, signal_id: str | None) -> dict | None:
+    u = getattr(resp, "usage", None)
+    if u is None:
+        return None
+
+    def n(name: str) -> int:
+        try:
+            return int(getattr(u, name, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    model = getattr(resp, "model", None) or default_model
+    if not isinstance(model, str):
+        model = default_model
+    tin, tout, tcache = n("input_tokens"), n("output_tokens"), n("cache_read_input_tokens")
+    return {"ts": time.time(), "signal_id": signal_id, "model": model, "input_tokens": tin, "output_tokens": tout,
+            "cache_read_tokens": tcache, "cost_usd": usage_cost(model, tin, tout, tcache)}
 
 REVIEW_SCHEMA = {
     "type": "object",
@@ -38,6 +85,8 @@ class ClaudeReviewer:
         self.last_ok_utc: str | None = None
         self.last_error: str | None = None
         self._client = None
+        # called with a usage record (see usage_record) after every API response
+        self.on_usage: Callable[[dict], None] | None = None
 
     @property
     def key_set(self) -> bool:
@@ -150,7 +199,18 @@ class ClaudeReviewer:
                 resp = await client.messages.create(**common)
             else:
                 raise
+        self._record_usage(resp, signal.get("id"))
         return self.parse_response(resp)
+
+    def _record_usage(self, resp, signal_id: str | None) -> None:
+        if not self.on_usage:
+            return
+        try:
+            rec = usage_record(resp, self.settings.CLAUDE_MODEL, signal_id)
+            if rec:
+                self.on_usage(rec)
+        except Exception as e:  # accounting must never break the review
+            log.warning("Claude usage not recorded: %r", e)
 
     @staticmethod
     def parse_response(resp) -> dict:

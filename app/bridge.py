@@ -8,8 +8,9 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from . import archive
 from .config import TF_SECONDS
-from .executor import EA_EXT_OPEN_VERSION, ea_version_tuple
+from .executor import EA_EXT_OPEN_VERSION, PENDING_STATES, ea_version_tuple
 
 router = APIRouter()
 
@@ -210,7 +211,26 @@ def normalize_clock(rt, payload: dict, now: float) -> int:
         # calendar times go through the same ToUtc() in the EA
         if isinstance(ev, dict) and isinstance(ev.get("t"), (int, float)):
             ev["t"] = int(ev["t"]) - skew
+    for item in payload.get("archive") or []:
+        # archive bars (v1.11) too; end_utc stays in the EA frame (archive.ingest_payload removes the skew)
+        if isinstance(item, dict) and isinstance(item.get("bars"), list):
+            for b in item["bars"]:
+                if isinstance(b, dict) and isinstance(b.get("t"), (int, float)):
+                    b["t"] = int(b["t"]) - skew
     return skew
+
+
+def archive_commands_pending(engine, commands: list[str]) -> bool:
+    """OPEN/MODIFY/CLOSE in this response or still waiting for the EA's result -> no HISTX this sync."""
+    if any(c.split("|", 1)[0] in ("OPEN", "MODIFY", "CLOSE") for c in commands):
+        return True
+    try:
+        # UNKNOWN too: delivered, no result after 30 s -> the EA may still be busy with it, reconcile in progress
+        row = engine.db.query_one("SELECT 1 AS x FROM intents WHERE mode='DEMO' AND state IN (%s) LIMIT 1"
+                                  % ",".join("'%s'" % st for st in PENDING_STATES))
+    except Exception:
+        return True
+    return row is not None
 
 
 def process_sync(engine, payload: dict, now: float | None = None) -> str:
@@ -220,6 +240,9 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
     first = rt.bridge.get("last_sync_ts") is None or (now - (rt.bridge.get("last_sync_ts") or 0)) > 30
     rt.bridge["last_sync_ts"] = now
     rt.bridge["ea_version"] = str(payload.get("ea_version") or "")
+    # EA >= 1.12: its TimeTradeServer()-TimeGMT() (s), lets the archive undo the broker's DST changes per bar
+    srv_off = payload.get("srv_offset")
+    rt.bridge["srv_offset"] = int(srv_off) if isinstance(srv_off, (int, float)) and not isinstance(srv_off, bool) else None
     rt.bridge["terminal"] = payload.get("terminal") or {}
     rt.bridge["sync_count"] = int(rt.bridge.get("sync_count") or 0) + 1
     rt.bridge["magic"] = payload.get("magic")
@@ -256,6 +279,8 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
             continue
         info = {k: v for k, v in s.items() if k != "symbol"}
         rt.ingest_quote(sym, info)
+    archive.sample_spreads(rt, [s.get("symbol") for s in payload.get("symbols") or [] if s.get("symbol")], now)
+    archive.flush_spreads(rt, now)
 
     groups: dict[tuple[str, str], list[dict]] = {}
     for b in payload.get("bars") or []:
@@ -299,6 +324,8 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
                 rt.ingest_bar(sym, tf, b)
 
     ingest_calendar(rt, payload, now)
+    if "archive" in payload:
+        archive.ingest_payload(rt, payload.get("archive"), now)
 
     if "positions" in payload:
         engine.set_mt5_positions(payload.get("positions") or [])
@@ -335,6 +362,11 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
         engine.fail_queued_commands("Contul MT5 nu este DEMO (trade_mode != 0) — comenzile nu sunt livrate")
     if calendar_request_needed(rt, now):
         commands = ["CALENDAR"] + commands
+    if archive.ARCHIVE_EA_VERSION <= ea_version_tuple(rt.bridge.get("ea_version")) and engine.settings.ARCHIVE_ENABLED:
+        histx = archive.next_request(rt, now, commands_pending=archive_commands_pending(engine, commands),
+                                     hist_pending=bool(hist) or bool(rt.hist_force))
+        if histx:
+            commands = commands + [histx]
     return build_response(int(now), symbols, tfs, hist, commands)
 
 

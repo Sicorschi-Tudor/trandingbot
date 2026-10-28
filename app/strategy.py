@@ -42,6 +42,25 @@ def _r(x, nd=6):
     return None if x is None else round(float(x), nd)
 
 
+def context_blockers(symbol: str, side: str, ctx: AnalysisContext, risk: dict) -> list[str]:
+    """Blockers that depend on the bot's state (session, book, exposures, news, signal count), not on the market.
+    Shared with the backtest so simulated decisions use exactly the live rules."""
+    out: list[str] = []
+    if not ctx.session_open:
+        out.append("Sesiunea de tranzacționare este închisă.")
+    if ctx.has_bot_position:
+        out.append("Există deja o poziție a botului pe acest simbol.")
+    conflict = currency_conflict(symbol, side, ctx.open_exposures, ctx.corr_limit)
+    if conflict:
+        out.append(f"Expunere corelată: {conflict} (max {ctx.corr_limit} pe monedă și direcție).")
+    if ctx.news_block:
+        out.append(ctx.news_block + ".")
+    max_sig = int(risk.get("max_signals_per_symbol_per_session", 5))
+    if ctx.signals_this_session >= max_sig:
+        out.append(f"Limita de semnale pe sesiune atinsă ({ctx.signals_this_session}/{max_sig}).")
+    return out
+
+
 def analyze(symbol: str, sig_bars: list[dict], htf_bars: list[dict], quote: dict | None,
             cfg: dict, risk: dict, ctx: AnalysisContext) -> dict:
     """sig_bars/htf_bars: CLOSED bars only (keys t,o,h,l,c). cfg = strategy settings, risk = risk settings."""
@@ -55,6 +74,8 @@ def analyze(symbol: str, sig_bars: list[dict], htf_bars: list[dict], quote: dict
         "probabilities": probabilities(0.0), "probability_method": PROB_METHOD,
         "reasons": [], "indicators": {}, "regime": "RANGE",
         "spread_points": spread_points, "entry": None, "stop_loss": None, "take_profit": None, "rr": None,
+        # setup levels even when filters block it (shadow labels / backtest); None when there is no setup
+        "candidate": None,
     }
     reasons: list[str] = a["reasons"]
     if not quote or not quote.get("bid") or not quote.get("ask"):
@@ -191,18 +212,9 @@ def analyze(symbol: str, sig_bars: list[dict], htf_bars: list[dict], quote: dict
     min_dist = (stops_level + 5) * point
     if sl_dist < min_dist or tp_dist < min_dist:
         blockers.append(f"Distanța SL/TP sub nivelul minim al brokerului ({stops_level:g}+5 puncte).")
-    if not ctx.session_open:
-        blockers.append("Sesiunea de tranzacționare este închisă.")
-    if ctx.has_bot_position:
-        blockers.append("Există deja o poziție a botului pe acest simbol.")
-    conflict = currency_conflict(symbol, candidate, ctx.open_exposures, ctx.corr_limit)
-    if conflict:
-        blockers.append(f"Expunere corelată: {conflict} (max {ctx.corr_limit} pe monedă și direcție).")
-    if ctx.news_block:
-        blockers.append(ctx.news_block + ".")
-    max_sig = int(risk.get("max_signals_per_symbol_per_session", 5))
-    if ctx.signals_this_session >= max_sig:
-        blockers.append(f"Limita de semnale pe sesiune atinsă ({ctx.signals_this_session}/{max_sig}).")
+    blockers.extend(context_blockers(symbol, candidate, ctx, risk))
+    a["candidate"] = {"side": candidate, "entry": round(entry, digits), "stop_loss": round(sl, digits),
+                      "take_profit": round(tp, digits), "score": a["score"], "blockers": list(blockers)}
 
     if blockers:
         reasons.append(f"Setup {candidate} detectat, dar blocat de filtre:")
@@ -238,4 +250,4 @@ def dedup_key(symbol: str, timeframe: str, bar_time: int, direction: str) -> str
     return f"{symbol}|{timeframe}|{bar_time}|{direction}"
 
 
-__all__ = ["analyze", "AnalysisContext", "probabilities", "dedup_key", "invalidation_text", "STRATEGY_VERSION"]
+__all__ = ["analyze", "context_blockers", "AnalysisContext", "probabilities", "dedup_key", "invalidation_text", "STRATEGY_VERSION"]

@@ -126,3 +126,30 @@ Pași:
 5. Calendarul economic MT5 funcționează doar cu terminalul **conectat** la server-ul brokerului. Dacă apare `ATENTIE: calendarul economic MT5 nu este disponibil`, verifică conexiunea (colțul dreapta-jos) — EA-ul reîncearcă automat la fiecare minut.
 
 Notă: serverul funcționează și cu EA v1.00 (fără calendar și fără verificările noi la OPEN), dar se recomandă actualizarea.
+
+## 10. Actualizare la v1.11
+
+Ce aduce v1.11:
+- **Arhivă de istoric pentru backtest**: serverul cere EA-ului, pe rând, loturi de câte cel mult 5000 de bare închise mai vechi (linia `HISTX`), până acoperă ultimele `ARCHIVE_DAYS` zile (implicit 120) pentru fiecare simbol activ pe timeframe-ul semnalelor, pe cel superior și pe M15. Barele se salvează în baza de date a serverului (`bars_archive`) și sunt folosite pentru backtest și pentru evaluarea semnalelor.
+- Cererile de arhivă nu întârzie niciodată tranzacționarea: serverul nu trimite `HISTX` cât timp are o comandă OPEN/MODIFY/CLOSE în curs, iar EA-ul citește istoricul **după** ce a executat comenzile din răspuns și îl trimite la sincronizarea următoare (≈0,5 MB per lot).
+- Pe grafic apare rândul `Arhiva istoric: N loturi trimise`.
+
+Pași:
+1. Înlocuiește fișierul `MQL5/Experts/AIBridgeEA.mq5` cu versiunea nouă din `mt5/`.
+2. Deschide-l în MetaEditor și apasă **F7** (Compile) — trebuie să apară `0 errors`.
+3. Scoate EA-ul de pe grafic și atașează-l din nou (parametrii rămân aceiași).
+4. Verifică în tab-ul **Experts**: `AIBridgeEA v1.11 pornit (instanta ...)`. În pagina web, versiunea EA devine `1.11`.
+5. Prima umplere a arhivei durează câteva minute (MT5 poate descărca istoricul de la broker). Dacă brokerul nu are încă seria pregătită, serverul reîncearcă automat (după 30 s, 60 s, ... maxim 10 min) — nu e nevoie de nicio acțiune.
+6. Pentru istoric lung pe M5 (120 de zile ≈ 35.000 de bare), setarea **Tools > Options > Charts > Max bars in chart** trebuie să fie cel puțin `100000` (valoarea implicită). Dacă e mai mică, EA-ul afișează `Arhiva: limita 'Max bars in chart' ... atinsa` și arhiva se oprește acolo.
+
+Notă: serverul funcționează în continuare cu EA v1.10 / v1.00 (fără arhivă — acestor versiuni nu li se trimite `HISTX`). Arhiva se poate opri din `.env` cu `ARCHIVE_ENABLED=false`.
+
+## 11. Actualizare la v1.12
+
+Ce aduce v1.12:
+- **Ora de vară/iarnă a brokerului în arhivă**: EA-ul trimite și offset-ul curent al serverului (`srv_offset`, `srv_off`). Serverul reconvertește fiecare bară din arhivă cu offset-ul valabil la data barei (regula din `MT5_SERVER_TZ`, implicit `auto`: EET = schimbarea orei în UE, NY = închiderea New York GMT+2/+3). Fără asta, barele mai vechi de ultima schimbare a orei erau decalate cu 1 oră.
+- **Arhiva nu mai blochează sincronizarea**: când istoricul cerut există deja în terminal, EA-ul îl copiază doar local (fără așteptarea descărcării de la broker); descărcarea pornește doar când în terminal nu există nimic mai vechi.
+
+Pași: la fel ca la v1.11 (înlocuiește fișierul, **F7**, reatașează EA-ul; în pagina web versiunea devine `1.12`).
+Dacă brokerul nu schimbă deloc ora (offset fix tot anul), pune `MT5_SERVER_TZ=fixed` în `.env`.
+Barele arhivate cu v1.11 înainte de ultima schimbare a orei pot rămâne decalate cu 1 oră — pentru un backtest exact pe acea perioadă, golește arhiva perechii și las-o să se descarce din nou.

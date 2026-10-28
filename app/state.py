@@ -78,6 +78,12 @@ class Runtime:
         # economic calendar from the EA (v1.10+): [{"t": utc_s, "ccy": "USD", "imp": 1..3, "name": str}]
         self.calendar: list[dict] = []
         self.calendar_ts: float | None = None
+        # bar archive backfill (EA v1.11+): {symbol: {tf: {"bars","oldest_ts","target_ts","done"}}}
+        self.archive_status: dict[str, dict[str, dict]] = {}
+        # planner bookkeeping: outstanding HISTX, pairs with no older history, error backoff
+        self.archive_plan: dict = {"pending": None, "exhausted": set(), "retry_at": {}, "errors": {}}
+        # live spread samples waiting to be flushed into spread_stats
+        self.spread_agg: dict = {"acc": {}, "last": {}, "flush_ts": time.time()}
         # runtime config
         self.risk = settings.default_risk()
         self.schedule = settings.default_schedule()
@@ -243,6 +249,10 @@ class Runtime:
             self.db.executemany(
                 "INSERT OR REPLACE INTO bars(symbol, tf, t, o, h, l, c, tv, sp) VALUES(?,?,?,?,?,?,?,?,?)", rows
             )
+            # `bars` is trimmed at startup; the archive keeps the live bars too so it stays gap-free
+            self.db.executemany(
+                "INSERT OR REPLACE INTO bars_archive(symbol, tf, t, o, h, l, c, tv, sp) VALUES(?,?,?,?,?,?,?,?,?)", rows
+            )
         except Exception as e:
             self.log("ERROR", "db", f"flush bars failed: {e!r}")
 
@@ -252,7 +262,15 @@ class Runtime:
                 return b
         return None
 
+    def load_archive_status(self) -> None:
+        from . import archive
+        try:
+            archive.rebuild_status(self)
+        except Exception as e:
+            self.log("ERROR", "archive", f"archive status rebuild failed: {e!r}")
+
     def load_bars_from_db(self) -> None:
+        self.load_archive_status()
         if not self.persist_bars:
             return
         rows = self.db.query("SELECT DISTINCT symbol, tf FROM bars")

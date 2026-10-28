@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
+import math
+import re
 import sqlite3
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -31,6 +35,8 @@ NEWS_BE_MIN_R = 0.3
 NEUTRAL_R = 0.1  # |net| below this many R counts as break-even (neither loss nor win)
 NEUTRAL_EQUITY_FRAC = 0.0005  # fallback when the initial risk is unknown: 0.05% of equity
 DEAL_REASON = {4: "SL", 5: "TP", 3: "BOT", 0: "MANUAL", 1: "MANUAL", 2: "MANUAL", 6: "SO"}
+EQUITY_SNAPSHOT_S = 60.0
+LABEL_EVERY_S = 60.0
 
 
 class EngineError(Exception):
@@ -69,6 +75,14 @@ class Engine:
         self._equity_cache: dict[str, dict] = {}
         self._warmup_done = False
         self._cal_warn_ts = 0.0
+        # performance tracking (analyses / equity snapshots / labeler / backtests)
+        self._last_equity_snap = 0.0
+        self._last_label_ts = 0.0
+        self._labeler_busy = False
+        self._perf_warned: set[str] = set()
+        self.backtests: dict[str, dict] = {}  # run id -> {"progress": 0..1}
+        self._bt_lock = threading.Lock()
+        self.ai.on_usage = self.record_claude_usage
         self.rt.quote_hooks.append(self._on_quote)
 
     # ---- lifecycle -------------------------------------------------------
@@ -86,6 +100,7 @@ class Engine:
                     f"Telegram={'activ' if self.telegram.active else 'inactiv'}")
         if not s.ADMIN_TOKEN:
             self.rt.log("WARN", "engine", "ADMIN_TOKEN nu este setat — acțiunile de administrare sunt blocate")
+        self._perf_startup()
 
     async def start(self) -> None:
         if self.sim:
@@ -221,7 +236,7 @@ class Engine:
                 self.known_mt5_positions.pop(k, None)
 
     # ---- trades ----------------------------------------------------------
-    def _insert_trade(self, deal_key: str, tr: dict) -> bool:
+    def _insert_trade(self, deal_key: str, tr: dict, open_intent: dict | None = None, initial_sl: float | None = None) -> bool:
         try:
             cur = self.db.execute(
                 "INSERT OR IGNORE INTO trades(deal_key, ticket, symbol, side, volume, price_open, price_close, profit, "
@@ -233,13 +248,49 @@ class Engine:
             )
             if cur.rowcount:
                 tr["id"] = cur.lastrowid
+                self._trade_perf_fields(tr, open_intent, initial_sl)
                 return True
         except sqlite3.Error as e:
             self.rt.log("ERROR", "db", f"insert trade failed: {e!r}")
         return False
 
+    def _trade_perf_fields(self, tr: dict, oi: dict | None, initial_sl: float | None) -> None:
+        """account_key / signal entry / initial SL / money at risk / R multiple of a recorded trade (best effort)."""
+        try:
+            mode = tr.get("mode")
+            if mode == "PAPER":
+                key = "PAPER"
+            else:
+                login = (self.rt.mt5_account or {}).get("login")  # deals always come from the connected account
+                if login is None and oi:
+                    login = oi.get("account_login")
+                key = f"DEMO:{login}" if login is not None else None
+            if oi is None and tr.get("ticket") is not None:
+                oi = self._open_intent(int(tr["ticket"]), mode)
+            sl0 = initial_sl if initial_sl is not None else (oi or {}).get("sl")
+            sig = self.get_signal(tr["signal_id"]) if tr.get("signal_id") else None
+            sig_entry = (sig or {}).get("entry")
+            rm = None
+            if sl0 and tr.get("price_open") and tr.get("volume"):
+                rm = risk_mod.position_risk_money(tr.get("side") or "BUY", float(tr["price_open"]), float(sl0),
+                                                  float(tr["volume"]), self.rt.quotes.get(tr.get("symbol") or "") or {})
+            net = (tr.get("profit") or 0) + (tr.get("commission") or 0) + (tr.get("swap") or 0)
+            r_mult = round(net / rm, 3) if rm else None
+            tr.update({"account_key": key, "signal_entry": sig_entry, "initial_sl": sl0,
+                       "risk_money": round(rm, 4) if rm is not None else None, "r_multiple": r_mult})
+            self.db.execute("UPDATE trades SET account_key=?, signal_entry=?, initial_sl=?, risk_money=?, r_multiple=? "
+                            "WHERE id=?", (key, sig_entry, sl0, tr["risk_money"], r_mult, tr["id"]))
+        except (sqlite3.Error, TypeError, ValueError) as e:
+            self._perf_warn_once("trade_fields", f"câmpuri de performanță pentru tranzacție nesalvate: {e!r}")
+
+    def _open_intent(self, ticket: int, mode: str | None) -> dict | None:
+        row = self.db.query_one("SELECT data_json FROM intents WHERE kind='OPEN' AND ticket=? AND mode=? "
+                                "ORDER BY created_at_utc DESC LIMIT 1", (int(ticket), mode or "DEMO"))
+        return json.loads(row["data_json"]) if row else None
+
     def _on_paper_close(self, trade: dict, pos: dict) -> None:
-        if self._insert_trade(f"PAPER:{trade['ticket']}", trade):
+        oi = self.executor.get(pos["intent_id"]) if pos.get("intent_id") else None
+        if self._insert_trade(f"PAPER:{trade['ticket']}", trade, open_intent=oi, initial_sl=pos.get("initial_sl")):
             self._announce_trade(trade)
 
     def _announce_trade(self, trade: dict, notify: bool = True) -> None:
@@ -288,7 +339,7 @@ class Engine:
                     "close_reason": DEAL_REASON.get(int(d.get("reason", -1)), "UNKNOWN"), "mode": "DEMO",
                     "signal_id": (oi or {}).get("signal_id"),
                 }
-                if self._insert_trade(f"MT5:{int(d['ticket'])}", tr):
+                if self._insert_trade(f"MT5:{int(d['ticket'])}", tr, open_intent=oi):
                     recent = (d.get("time") or 0) >= self.rt.started_ts - 120
                     self._announce_trade(tr, notify=recent)
             except (KeyError, ValueError, TypeError) as e:
@@ -505,6 +556,7 @@ class Engine:
             # execution context at creation: a signal never executes after a later arm/mode change
             "created_ts": time.time(), "created_mode": self.mode(),
             "created_armed": bool(self.rt.trading["execution_enabled"]),
+            "account_key": self.account_key(),
         }
         key = strategy.dedup_key(a["symbol"], a["timeframe"], a["bar_time"], a["direction"])
         try:
@@ -515,6 +567,7 @@ class Engine:
                  sig["status"], key, json.dumps(sig)))
         except sqlite3.IntegrityError:
             return None
+        self._perf_exec("UPDATE signals SET account_key=? WHERE id=?", (sig["account_key"], sig["id"]), "signal_account")
         self.add_signal_event(sig["id"], "CREATED", f"{sig['direction']} {sig['symbol']} @ {sig['entry']} SL {sig['stop_loss']} TP {sig['take_profit']}")
         self.rt.log("INFO", "strategy", f"Semnal nou {sig['direction']} {sig['symbol']} {sig['timeframe']} "
                                         f"entry {sig['entry']} SL {sig['stop_loss']} TP {sig['take_profit']} ({sig['feed_label']})")
@@ -636,6 +689,7 @@ class Engine:
             news_block=news_block,
         )
         a = strategy.analyze(symbol, sig_bars, htf_bars, rt.quotes.get(symbol), rt.strategy, rt.risk, ctx)
+        self.record_analysis(a)
         rt.last_analysis[symbol] = a
         rt.engine_info["last_analysis_utc"] = a["time_utc"]
         rt.bus.publish("analysis", a)
@@ -646,6 +700,8 @@ class Engine:
             elif allow_signal:
                 sig = self.create_signal(a)
                 if sig:
+                    self._perf_exec("UPDATE analyses SET signal_id=? WHERE symbol=? AND tf=? AND bar_time=? AND signal_id IS NULL",
+                                    (sig["id"], a["symbol"], a["timeframe"], a["bar_time"]), "analysis_signal")
                     try:
                         loop = asyncio.get_running_loop()
                     except RuntimeError:
@@ -666,6 +722,8 @@ class Engine:
                 ai = await self.ai.review(sig, self._ai_context(sig["symbol"]))
                 sig = self.get_signal(sig["id"]) or sig
                 sig["ai"] = ai
+                self._perf_exec("UPDATE analyses SET ai_verdict=? WHERE signal_id=?",
+                                (ai.get("verdict") or ai.get("status"), sig["id"]), "analysis_verdict")
                 self.add_signal_event(sig["id"], "AI_" + ai["status"], f"{ai.get('verdict')}: {ai.get('explanation', '')[:300]}")
                 if ai["status"] == "ERROR":
                     self.rt.log("WARN", "ai", f"Claude indisponibil pentru semnalul {sig['id'][:8]}: {self.ai.last_error}")
@@ -760,6 +818,10 @@ class Engine:
     # ---- intents → signals / notifications -------------------------------
     def _on_intent_update(self, it: dict, prev: str | None) -> None:
         st = it["state"]
+        if prev is None:
+            key = "PAPER" if it.get("mode") == "PAPER" else (
+                f"DEMO:{it['account_login']}" if it.get("account_login") is not None else self.account_key("DEMO"))
+            self._perf_exec("UPDATE intents SET account_key=? WHERE id=? AND account_key IS NULL", (key, it["id"]), "intent_account")
         if it["kind"] == "OPEN":
             if it.get("signal_id") and prev is not None:
                 sig = self.get_signal(it["signal_id"])
@@ -966,6 +1028,435 @@ class Engine:
             })
         return out
 
+    # ---- performance: analyses / equity / Claude usage / labeler ----------
+    def account_key(self, mode: str | None = None) -> str | None:
+        mode = mode or self.mode()
+        if mode == "DEMO":
+            login = (self.rt.mt5_account or {}).get("login")
+            return f"DEMO:{login}" if login is not None else None
+        return "PAPER"
+
+    def _perf_warn_once(self, key: str, msg: str) -> None:
+        if key not in self._perf_warned:
+            self._perf_warned.add(key)
+            self.rt.log("WARN", "perf", msg)
+
+    def _perf_exec(self, sql: str, params: tuple, key: str) -> int:
+        """Write for analytics only: a failure is logged once and never breaks trading."""
+        try:
+            return self.db.execute(sql, params).rowcount
+        except sqlite3.Error as e:
+            self._perf_warn_once(key, f"scriere analitică eșuată ({key}): {e!r}")
+            return 0
+
+    def record_analysis(self, a: dict) -> None:
+        if a.get("bar_time") is None or not a.get("indicators"):
+            return  # no data / incomplete indicators: nothing to evaluate
+        cand = a.get("candidate")
+        if cand is None and a.get("direction") in ("BUY", "SELL") and a.get("entry") is not None:
+            cand = {"side": a["direction"], "entry": a["entry"], "stop_loss": a["stop_loss"],
+                    "take_profit": a["take_profit"], "score": a.get("score"), "blockers": []}
+        cand = cand or {}
+        self._perf_exec(
+            "INSERT OR IGNORE INTO analyses(symbol, tf, bar_time, created_ts, account_key, direction, candidate_side, "
+            "entry, sl, tp, score, blockers_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (a["symbol"], a.get("timeframe"), int(a["bar_time"]), time.time(), self.account_key(), a.get("direction"),
+             cand.get("side"), cand.get("entry"), cand.get("stop_loss"), cand.get("take_profit"),
+             cand.get("score", a.get("score")), json.dumps(cand.get("blockers") or [], ensure_ascii=False)),
+            "analysis_insert")
+
+    def record_claude_usage(self, rec: dict) -> None:
+        self._perf_exec(
+            "INSERT INTO claude_usage(ts, signal_id, model, input_tokens, output_tokens, cache_read_tokens, cost_usd) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (rec["ts"], rec.get("signal_id"), rec.get("model"), rec.get("input_tokens"), rec.get("output_tokens"),
+             rec.get("cache_read_tokens"), rec.get("cost_usd")), "claude_usage")
+
+    def snapshot_accounts(self) -> list[tuple[str, dict]]:
+        out = []
+        if self.mode() == "PAPER" or self.paper.positions:
+            out.append(("PAPER", self.paper.account()))
+        a = self.rt.mt5_account
+        if a and a.get("login") is not None and self.rt.bridge_connected() and not self.account_settling():
+            out.append((f"DEMO:{a['login']}", a))
+        return out
+
+    def snapshot_equity(self, now: float) -> int:
+        ts = int(now // 60 * 60)
+        n = 0
+        for key, acc in self.snapshot_accounts():
+            if not acc or acc.get("equity") is None:
+                continue
+            n += self._perf_exec("INSERT OR IGNORE INTO equity_snapshots(account_key, ts, balance, equity) VALUES(?,?,?,?)",
+                                 (key, ts, acc.get("balance"), acc.get("equity")), "equity_snapshot")
+        return n
+
+    def labeler_cfg(self) -> dict:
+        st = self.rt.strategy
+        cfg = {"break_even_at_r": float(st.get("break_even_at_r", 1.0) or 0),
+               # 0 = no time stop (as live); the labeler then uses its own 24 h HORIZON cap
+               "max_hold_minutes": int(st.get("max_hold_minutes", 240) or 0),
+               "label_tf": "M1" if "M1" in self.rt.needed_tfs() else st["signal_timeframe"]}
+        points = self.symbol_points()
+        if points:
+            cfg["points"] = points  # broker point size instead of the labeler's guess from the symbol name
+        return cfg
+
+    def symbol_points(self) -> dict:
+        return {s: float(q["point"]) for s, q in list(self.rt.quotes.items()) if q and q.get("point")}
+
+    def symbol_specs(self) -> dict:
+        """Broker symbol specs from the live quotes (backtest sizing); missing ones are estimated there."""
+        keys = ("point", "digits", "tick_size", "tick_value", "contract_size", "volume_min", "volume_step",
+                "volume_max", "stops_level")
+        return {s: {k: q[k] for k in keys if q.get(k) is not None}
+                for s, q in list(self.rt.quotes.items()) if q and q.get("point")}
+
+    def get_closed_bars(self, symbol: str, tf: str, from_ts: float, to_ts: float) -> list[dict]:
+        """Closed bars from bars_archive + bars (live rows win), ascending. Safe to call from a worker thread."""
+        sec = TF_SECONDS.get(tf, 60)
+        now = time.time()
+        rows: dict[int, dict] = {}
+        for table in ("bars_archive", "bars"):
+            try:
+                for r in self.db.query(f"SELECT t,o,h,l,c,sp FROM {table} WHERE symbol=? AND tf=? AND t>=? AND t<=? ORDER BY t",
+                                       (symbol, tf, int(from_ts), int(to_ts))):
+                    rows[int(r["t"])] = r
+            except sqlite3.Error:
+                continue
+        return [rows[t] for t in sorted(rows) if t + sec <= now]
+
+    def run_labeler(self, now: float) -> int:
+        try:
+            labeler = importlib.import_module("app.labeler")
+        except ImportError:
+            self._perf_warn_once("labeler_missing", "modulul labeler lipsește — analizele nu sunt etichetate")
+            return 0
+        return int(labeler.label_pending(self.db, self.get_closed_bars, self.labeler_cfg(), now) or 0)
+
+    def _labeler_job(self, now: float) -> None:
+        try:
+            self.run_labeler(now)
+        except Exception as e:
+            self._perf_warn_once("labeler_error", f"etichetare analize eșuată: {e!r}")
+        finally:
+            self._labeler_busy = False
+
+    def perf_tick(self, now: float) -> None:
+        """Called every loop second from the async loop: 60 s equity snapshots + labeler in a worker thread."""
+        if now - self._last_equity_snap >= EQUITY_SNAPSHOT_S:
+            self._last_equity_snap = now
+            self.snapshot_equity(now)
+        if now - self._last_label_ts >= LABEL_EVERY_S and not self._labeler_busy:
+            self._last_label_ts = now
+            self._labeler_busy = True
+            try:
+                asyncio.get_running_loop().run_in_executor(None, self._labeler_job, now)
+            except RuntimeError:
+                self._labeler_busy = False
+
+    def _perf_startup(self) -> None:
+        # backtests interrupted by a restart
+        self._perf_exec("UPDATE backtest_runs SET status='ERROR', error=? WHERE status IN ('RUNNING','QUEUED')",
+                        ("Întrerupt de repornirea serverului",), "backtest_cleanup")
+        # trades recorded before the account columns existed
+        try:
+            rows = self.db.query("SELECT id, ticket, mode FROM trades WHERE account_key IS NULL ORDER BY id DESC LIMIT 5000")
+        except sqlite3.Error:
+            return
+        for r in rows:
+            key = None
+            if r["mode"] == "PAPER":
+                key = "PAPER"
+            elif r["ticket"] is not None:
+                oi = self._open_intent(int(r["ticket"]), "DEMO") or {}
+                if oi.get("account_login") is not None:
+                    key = f"DEMO:{oi['account_login']}"
+                if oi.get("sl") is not None:
+                    self._perf_exec("UPDATE trades SET initial_sl=? WHERE id=? AND initial_sl IS NULL",
+                                    (oi["sl"], r["id"]), "trade_backfill")
+            if key:
+                self._perf_exec("UPDATE trades SET account_key=? WHERE id=? AND account_key IS NULL", (key, r["id"]),
+                                "trade_backfill")
+
+    # ---- performance: read side (API) -----------------------------------
+    def perf_accounts(self) -> list[str]:
+        keys: set[str] = set()
+        for sql in ("SELECT DISTINCT account_key AS k FROM trades WHERE account_key IS NOT NULL",
+                    "SELECT DISTINCT account_key AS k FROM equity_snapshots"):
+            try:
+                keys.update(r["k"] for r in self.db.query(sql) if r["k"])
+            except sqlite3.Error:
+                pass
+        cur = self.account_key()
+        return sorted(keys, key=lambda k: (k != cur, k))
+
+    def claude_cost(self) -> dict:
+        day0 = scheduler.local_day_start_utc(self.now_utc(), self.settings.DEFAULT_TIMEZONE).timestamp()
+        out = {"today_usd": 0.0, "total_usd": 0.0, "calls_today": 0, "calls_total": 0, "unpriced_calls": 0,
+               "input_tokens": 0, "output_tokens": 0}
+        try:
+            r = self.db.query_one(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(cost_usd),0) AS c, SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS u, "
+                "COALESCE(SUM(input_tokens),0) AS i, COALESCE(SUM(output_tokens),0) AS o, "
+                "COALESCE(SUM(CASE WHEN ts>=? THEN cost_usd END),0) AS ct, SUM(CASE WHEN ts>=? THEN 1 ELSE 0 END) AS nt "
+                "FROM claude_usage", (day0, day0))
+        except sqlite3.Error:
+            return out
+        if r:
+            out.update({"today_usd": round(r["ct"] or 0, 4), "total_usd": round(r["c"] or 0, 4),
+                        "calls_today": int(r["nt"] or 0), "calls_total": int(r["n"] or 0), "unpriced_calls": int(r["u"] or 0),
+                        "input_tokens": int(r["i"] or 0), "output_tokens": int(r["o"] or 0)})
+        return out
+
+    def perf_stats(self, account_key: str | None = None, days: int = 30, now: float | None = None) -> dict:
+        now = now or time.time()
+        since = now - days * 86400 if days and days > 0 else None
+        sql = ("SELECT t.id, t.ticket, t.symbol, t.side, t.volume, t.profit, t.commission, t.swap, t.opened_at_utc, "
+               "t.closed_at_utc, t.close_reason, t.mode, t.signal_id, t.account_key, t.r_multiple, t.risk_money, "
+               "t.signal_entry, t.price_open, s.data_json AS sig_json FROM trades t LEFT JOIN signals s ON s.id = t.signal_id WHERE 1=1")
+        params: list = []
+        if account_key:
+            sql += " AND t.account_key=?"
+            params.append(account_key)
+        if since is not None:
+            sql += " AND t.closed_at_utc >= ?"
+            params.append(iso(since))
+        sql += " ORDER BY t.closed_at_utc, t.id"
+        try:
+            rows = self.db.query(sql, params)
+        except sqlite3.Error as e:
+            raise EngineError(503, f"Statistici indisponibile (schema bazei de date): {e}")
+        tz = scheduler._tz(self.settings.DEFAULT_TIMEZONE)
+        trades = []
+        for r in rows:
+            verdict = None
+            if r["sig_json"]:
+                try:
+                    ai = (json.loads(r["sig_json"]) or {}).get("ai") or {}
+                    verdict = ai.get("verdict") or ai.get("status")
+                except (TypeError, ValueError):
+                    pass
+            opened, closed = _ts(r["opened_at_utc"]), _ts(r["closed_at_utc"])
+            ref = opened if opened is not None else closed
+            net = (r["profit"] or 0) + (r["commission"] or 0) + (r["swap"] or 0)
+            slip = None
+            if r["signal_entry"] and r["price_open"]:
+                q = self.rt.quotes.get(r["symbol"]) or {}
+                pt = q.get("point")
+                if pt:
+                    sign = 1 if r["side"] == "BUY" else -1
+                    slip = round((float(r["price_open"]) - float(r["signal_entry"])) * sign / float(pt), 1)
+            trades.append({
+                "t": int(closed) if closed is not None else None, "symbol": r["symbol"], "side": r["side"],
+                "net": round(net, 2), "r": r["r_multiple"], "reason": r["close_reason"], "mode": r["mode"],
+                "account_key": r["account_key"], "ai_verdict": verdict or "FĂRĂ SEMNAL",
+                "hour": datetime.fromtimestamp(ref, tz).hour if ref is not None else None, "slippage_pts": slip,
+                "opened_at_utc": r["opened_at_utc"], "closed_at_utc": r["closed_at_utc"], "signal_id": r["signal_id"],
+            })
+        out = {
+            "account_key": account_key, "days": days, "accounts": self.perf_accounts(),
+            "summary": trade_summary(trades), "by_symbol": group_summary(trades, "symbol"),
+            "by_hour": group_summary(trades, "hour"), "by_ai_verdict": group_summary(trades, "ai_verdict"),
+            "equity": [], "pnl_curve": [], "claude": self.claude_cost(), "warnings": [],
+            "trades": [{k: v for k, v in t.items() if k != "hour"} for t in trades[-100:]][::-1],
+            "hour_tz": self.settings.DEFAULT_TIMEZONE,
+        }
+        cum = 0.0
+        for t in trades:
+            if t["t"] is not None:
+                cum += t["net"]
+                out["pnl_curve"].append([t["t"], round(cum, 2)])
+        slips = [t["slippage_pts"] for t in trades if t["slippage_pts"] is not None]
+        out["summary"]["avg_slippage_pts"] = round(sum(slips) / len(slips), 2) if slips else None
+        if account_key:
+            esql = "SELECT ts, balance, equity FROM equity_snapshots WHERE account_key=?"
+            eparams: list = [account_key]
+            if since is not None:
+                esql += " AND ts >= ?"
+                eparams.append(int(since))
+            try:
+                snaps = self.db.query(esql + " ORDER BY ts", eparams)
+            except sqlite3.Error:
+                snaps = []
+            step = max(1, math.ceil(len(snaps) / 1000))
+            pts = snaps[::step]
+            if snaps and pts[-1] is not snaps[-1]:
+                pts.append(snaps[-1])
+            out["equity"] = [[int(s["ts"]), s["equity"]] for s in pts if s["equity"] is not None]
+            eq = [s["equity"] for s in snaps if s["equity"] is not None]
+            if eq:
+                peak, dd, dd_pct = eq[0], 0.0, 0.0
+                for v in eq:
+                    peak = max(peak, v)
+                    if peak - v > dd:
+                        dd, dd_pct = peak - v, (peak - v) / peak * 100 if peak > 0 else 0.0
+                out["summary"]["max_dd_usd"] = round(dd, 2)
+                out["summary"]["max_dd_pct"] = round(dd_pct, 2)
+        else:
+            out["warnings"].append("Toate conturile combinate — alege un cont pentru curba de equity.")
+        n_r = sum(1 for t in trades if t["r"] is not None)
+        if trades and n_r < len(trades):
+            out["warnings"].append(f"{len(trades) - n_r} tranzacții fără R (risc inițial necunoscut) — excluse din mediile R.")
+        if 0 < len(trades) < 30:
+            out["warnings"].append(f"Eșantion mic: {len(trades)} tranzacții (< 30) — rezultatele nu sunt concludente.")
+        return out
+
+    def shadow_stats(self, days: int = 30, now: float | None = None) -> dict:
+        now = now or time.time()
+        sql = ("SELECT a.symbol, a.direction, a.candidate_side, a.blockers_json, a.signal_id, a.ai_verdict, a.outcome, "
+               "a.outcome_r, a.mfe_r, a.mae_r, s.status AS sig_status FROM analyses a LEFT JOIN signals s ON s.id = a.signal_id "
+               "WHERE a.candidate_side IN ('BUY','SELL')")
+        params: list = []
+        if days and days > 0:
+            sql += " AND a.bar_time >= ?"
+            params.append(int(now - days * 86400))
+        try:
+            rows = self.db.query(sql, params)
+        except sqlite3.Error as e:
+            raise EngineError(503, f"Analiza în umbră indisponibilă (schema bazei de date): {e}")
+        total = len(rows)
+        labeled = [r for r in rows if r["outcome"]]
+        by_cat: dict[str, list] = {}
+        by_blocker: dict[str, list] = {}
+        by_verdict: dict[str, list] = {}
+        by_symbol: dict[str, list] = {}
+        for r in labeled:
+            try:
+                blockers = json.loads(r["blockers_json"] or "[]") or []
+            except (TypeError, ValueError):
+                blockers = []
+            by_cat.setdefault(shadow_category(r, blockers), []).append(r)
+            for b in {blocker_type(x) for x in blockers}:
+                by_blocker.setdefault(b, []).append(r)
+            if r["signal_id"]:
+                by_verdict.setdefault(r["ai_verdict"] or "PENDING", []).append(r)
+            by_symbol.setdefault(r["symbol"], []).append(r)
+        agg = lambda d: {k: shadow_group(v) for k, v in sorted(d.items(), key=lambda kv: -len(kv[1]))}  # noqa: E731
+        out = {
+            "days": days, "candidates": total, "labeled": len(labeled), "pending": total - len(labeled),
+            "all": shadow_group(labeled), "by_category": agg(by_cat), "by_blocker": agg(by_blocker),
+            "by_ai_verdict": agg(by_verdict), "by_symbol": agg(by_symbol), "min_sample": SHADOW_MIN_N, "warnings": [],
+        }
+        if len(labeled) < SHADOW_MIN_N:
+            out["warnings"].append(f"Eșantion mic: {len(labeled)} candidați etichetați (< {SHADOW_MIN_N}) — nu trage concluzii.")
+        return out
+
+    def archive_status(self) -> dict:
+        st = getattr(self.rt, "archive_status", None) or {}
+        days = int(getattr(self.settings, "ARCHIVE_DAYS", 120) or 120)
+        now = time.time()
+        symbols = {}
+        for sym, tfs in st.items():
+            symbols[sym] = {}
+            for tf, info in (tfs or {}).items():
+                oldest = info.get("oldest_ts")
+                loaded = round(max(0.0, now - oldest) / 86400, 1) if oldest else 0.0
+                symbols[sym][tf] = {**info, "days_loaded": loaded, "days_target": days}
+        return {"enabled": bool(getattr(self.settings, "ARCHIVE_ENABLED", True)), "days_target": days,
+                "ea_version": self.rt.bridge.get("ea_version"), "symbols": symbols}
+
+    # ---- backtests --------------------------------------------------------
+    def backtest_running(self) -> bool:
+        with self._bt_lock:
+            return any(not b.get("done") for b in self.backtests.values())
+
+    def start_backtest(self, params: dict) -> dict:
+        with self._bt_lock:
+            if any(not b.get("done") for b in self.backtests.values()):
+                raise EngineError(409, "Un backtest rulează deja — așteaptă să se termine")
+            run_id = str(uuid.uuid4())
+            self.backtests[run_id] = {"progress": 0.0, "done": False}
+        created = time.time()
+        try:
+            self.db.execute("INSERT INTO backtest_runs(id, created_ts, status, params_json) VALUES(?,?,?,?)",
+                            (run_id, created, "RUNNING", json.dumps(params)))
+        except sqlite3.Error as e:
+            with self._bt_lock:
+                self.backtests.pop(run_id, None)
+            raise EngineError(503, f"Backtest indisponibil (schema bazei de date): {e}")
+        th = threading.Thread(target=self._backtest_job, args=(run_id, params), name=f"backtest-{run_id[:8]}", daemon=True)
+        th.start()
+        self.rt.log("INFO", "backtest", f"Backtest {run_id[:8]} pornit: {','.join(params.get('symbols') or [])} "
+                                        f"{params.get('days')} zile")
+        return {"id": run_id, "status": "RUNNING", "created_ts": created}
+
+    def _backtest_job(self, run_id: str, params: dict) -> None:
+        def progress(p) -> None:
+            try:
+                self.backtests[run_id]["progress"] = max(0.0, min(1.0, float(p)))
+            except (KeyError, TypeError, ValueError):
+                pass
+        status, metrics, err = "ERROR", None, None
+        try:
+            bt = importlib.import_module("app.backtest")
+            run_params = dict(params)
+            if not run_params.get("specs"):
+                run_params["specs"] = self.symbol_specs()
+            # own read-only connection: the bar loads never hold the shared DB.lock the event loop uses
+            ro = None
+            ro_cls = getattr(bt, "ReadOnlyDB", None)
+            if ro_cls is not None and str(self.settings.DATABASE_PATH) != ":memory:":
+                try:
+                    ro = ro_cls(str(self.settings.db_path))
+                except sqlite3.Error:
+                    ro = None
+            try:
+                res = bt.run(ro or self.db, run_params, progress=progress)
+            finally:
+                if ro is not None:
+                    ro.close()
+            metrics, status = json.dumps(res, default=str), "DONE"
+        except Exception as e:
+            err = repr(e)[:500]
+        try:
+            self.db.execute("UPDATE backtest_runs SET status=?, metrics_json=?, error=? WHERE id=?", (status, metrics, err, run_id))
+        except sqlite3.Error as e:
+            err = f"{err or ''} | salvare eșuată: {e!r}"
+        with self._bt_lock:
+            b = self.backtests.get(run_id)
+            if b is not None:
+                b["done"] = True
+                if status == "DONE":
+                    b["progress"] = 1.0
+        if status == "DONE":
+            self.rt.log("INFO", "backtest", f"Backtest {run_id[:8]} terminat")
+        else:
+            self.rt.log("WARN", "backtest", f"Backtest {run_id[:8]} eșuat: {err}")
+
+    def _backtest_row(self, r: dict, full: bool) -> dict:
+        try:
+            params = json.loads(r["params_json"]) if r.get("params_json") else None
+        except ValueError:
+            params = None
+        metrics = None
+        if r.get("metrics_json"):
+            try:
+                metrics = json.loads(r["metrics_json"])
+            except ValueError:
+                metrics = None
+        out = {"id": r["id"], "created_ts": r["created_ts"], "status": r["status"], "params": params, "error": r.get("error"),
+               "progress": (self.backtests.get(r["id"]) or {}).get("progress", 1.0 if r["status"] == "DONE" else None)}
+        if full:
+            out["metrics"] = metrics
+        else:
+            out["summary"] = (metrics or {}).get("summary") if isinstance(metrics, dict) else None
+        return out
+
+    def list_backtests(self, limit: int = 30) -> list[dict]:
+        try:
+            rows = self.db.query("SELECT * FROM backtest_runs ORDER BY created_ts DESC LIMIT ?", (limit,))
+        except sqlite3.Error:
+            return []
+        return [self._backtest_row(r, full=False) for r in rows]
+
+    def get_backtest(self, run_id: str) -> dict | None:
+        try:
+            r = self.db.query_one("SELECT * FROM backtest_runs WHERE id=?", (run_id,))
+        except sqlite3.Error:
+            return None
+        return self._backtest_row(r, full=True) if r else None
+
     # ---- loops -----------------------------------------------------------
     def _on_quote(self, symbol: str) -> None:
         if self.paper.positions:
@@ -1032,6 +1523,10 @@ class Engine:
                 raise
             except Exception as e:
                 self.rt.log("ERROR", "engine", f"loop error: {e!r}")
+            try:
+                self.perf_tick(time.time())
+            except Exception as e:
+                self._perf_warn_once("perf_tick", f"perf tick: {e!r}")
             await asyncio.sleep(1.0)
 
     async def _broadcaster(self) -> None:
@@ -1049,6 +1544,109 @@ class Engine:
                 self.rt.log("ERROR", "engine", f"broadcaster: {e!r}")
             await asyncio.sleep(2.0)
 
+
+
+# ---- performance math (shared by /stats and /shadow) ------------------------
+SHADOW_MIN_N = 30
+Z90 = 1.645
+
+
+def mean_ci90(xs: list[float]) -> tuple[float | None, list[float] | None]:
+    n = len(xs)
+    if not n:
+        return None, None
+    m = sum(xs) / n
+    if n < 2:
+        return m, None
+    sd = math.sqrt(sum((x - m) ** 2 for x in xs) / (n - 1))
+    h = Z90 * sd / math.sqrt(n)
+    return m, [round(m - h, 3), round(m + h, 3)]
+
+
+def trade_summary(trades: list[dict]) -> dict:
+    """trades: dicts with net (USD), r (R multiple | None), t (close ts)."""
+    n = len(trades)
+    nets = [t["net"] for t in trades]
+    rs = [t["r"] for t in trades if t.get("r") is not None]
+    wins = sum(1 for x in nets if x > 0)
+    gross_win = sum(x for x in nets if x > 0)
+    gross_loss = -sum(x for x in nets if x < 0)
+    avg_r, ci = mean_ci90(rs)
+    cum = peak = dd = 0.0
+    for r in rs:
+        cum += r
+        peak = max(peak, cum)
+        dd = max(dd, peak - cum)
+    streak = best = 0
+    for x in nets:
+        streak = streak + 1 if x < 0 else 0
+        best = max(best, streak)
+    ts = [t["t"] for t in trades if t.get("t") is not None]
+    return {
+        "trades": n, "wins": wins, "losses": sum(1 for x in nets if x < 0),
+        "win_rate": round(wins / n, 4) if n else None,
+        "avg_r": round(avg_r, 3) if avg_r is not None else None,
+        "expectancy_r": round(avg_r, 3) if avg_r is not None else None,
+        "trades_with_r": len(rs),
+        "profit_factor": round(gross_win / gross_loss, 3) if gross_loss > 0 else None,  # None = no losing trade
+        "max_dd_r": round(dd, 3), "max_consec_losses": best, "net_usd": round(sum(nets), 2),
+        "gross_win_usd": round(gross_win, 2), "gross_loss_usd": round(gross_loss, 2),
+        "sample_days": round((max(ts) - min(ts)) / 86400, 1) if len(ts) >= 2 else 0.0,
+        "ci90_avg_r": ci,
+    }
+
+
+def group_summary(trades: list[dict], key: str) -> dict:
+    groups: dict = {}
+    for t in trades:
+        k = t.get(key)
+        groups.setdefault("—" if k is None else k, []).append(t)
+    out = {}
+    for k in sorted(groups, key=lambda x: (isinstance(x, str), x)):
+        s = trade_summary(groups[k])
+        out[str(k)] = {f: s[f] for f in ("trades", "wins", "win_rate", "avg_r", "net_usd", "profit_factor", "ci90_avg_r")}
+    return out
+
+
+def blocker_type(text: str) -> str:
+    """Stable group name of a free-text blocker: text up to the first ':', '(' or digit."""
+    m = re.match(r"[^:(0-9]*", str(text or ""))
+    head = (m.group(0) if m else "").strip(" .,;-—>")
+    return (head or str(text or "?").strip())[:60]
+
+
+def shadow_category(r: dict, blockers: list) -> str:
+    if r.get("signal_id"):
+        if r.get("ai_verdict") == "VETO":
+            return "Semnal → VETO Claude"
+        st = r.get("sig_status")
+        if st in ("EXECUTED", "INTENT_CREATED"):
+            return "Semnal → executat"
+        if st in ("NO_TRADE", "REJECTED"):
+            return "Semnal → respins (risc/execuție)"
+        return "Semnal → neexecutat (doar semnal/expirat)"
+    if blockers:
+        return "Candidat blocat de filtre"
+    if r.get("direction") in ("BUY", "SELL"):
+        return "Fără semnal (încălzire/bară veche)"
+    return "HOLD fără blocaj explicit"
+
+
+def shadow_group(rows: list[dict]) -> dict:
+    rs = [float(r["outcome_r"]) for r in rows if r.get("outcome_r") is not None]
+    avg, ci = mean_ci90(rs)
+    outcomes: dict[str, int] = {}
+    for r in rows:
+        outcomes[r.get("outcome") or "?"] = outcomes.get(r.get("outcome") or "?", 0) + 1
+    mfe = [float(r["mfe_r"]) for r in rows if r.get("mfe_r") is not None]
+    mae = [float(r["mae_r"]) for r in rows if r.get("mae_r") is not None]
+    n = len(rows)
+    return {
+        "n": n, "win_rate": round(sum(1 for x in rs if x > 0) / len(rs), 4) if rs else None,
+        "avg_r": round(avg, 3) if avg is not None else None, "sum_r": round(sum(rs), 2), "ci90_avg_r": ci,
+        "avg_mfe_r": round(sum(mfe) / len(mfe), 3) if mfe else None, "avg_mae_r": round(sum(mae) / len(mae), 3) if mae else None,
+        "outcomes": outcomes, "small_sample": n < SHADOW_MIN_N,
+    }
 
 
 def _ts(s: str | None) -> float | None:

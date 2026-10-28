@@ -6,14 +6,14 @@
 //+------------------------------------------------------------------+
 #property copyright "AI Trading Bot v1"
 #property link      "http://127.0.0.1:8787"
-#property version   "1.10"
+#property version   "1.12"
 #property description "Punte MT5 <-> server AI Trading Bot (v1)."
 #property description "Trimite cotatii, bare, cont, pozitii si deal-uri catre server"
 #property description "si executa DOAR comenzile primite de la server (OPEN/MODIFY/CLOSE)."
 
 #include <Trade\Trade.mqh>
 
-#define EA_VERSION        "1.10"
+#define EA_VERSION        "1.12"
 #define MAX_DONE_IDS      500
 #define MAX_RESULTS       200
 #define MAX_HIST          64
@@ -24,6 +24,8 @@
 #define CAL_REFRESH_S     600
 #define CAL_RETRY_S       60
 #define CAL_MAX_ITEMS     200
+#define HISTX_MAX_BARS    5000
+#define AB_ERR_HIST_NOT_READY 4401     // ERR_HISTORY_NOT_FOUND: series still loading
 
 //--- inputs (names fixed by CONTRACT §3)
 input string InpServerUrl        = "http://127.0.0.1:8787"; // URL server (fara / la final)
@@ -66,6 +68,17 @@ int      g_cal_count     = 0;
 bool     g_cal_pending   = false;  // refreshed calendar not yet delivered (HTTP 200)
 bool     g_cal_in_req    = false;  // the request being sent carries the calendar
 bool     g_cal_fail_logged = false;
+//--- archive backfill (HISTX, v1.11): one request at a time, answered in the NEXT sync
+bool     g_hx_new        = false;  // HISTX received in the last response, not prepared yet
+string   g_hx_sym        = "";
+string   g_hx_tf         = "";
+long     g_hx_end        = 0;      // UTC (EA clock) - only bars strictly older are sent
+int      g_hx_count      = 0;
+bool     g_hx_ready      = false;  // g_hx_json prepared, waiting to be delivered (HTTP 200)
+bool     g_hx_in_req     = false;  // the request being sent carries the archive
+string   g_hx_json       = "";
+long     g_hx_served     = 0;
+bool     g_hx_maxbars_logged = false;
 
 //+------------------------------------------------------------------+
 //| Small helpers                                                    |
@@ -545,6 +558,152 @@ void MaybeRefreshCalendar()
   }
 
 //+------------------------------------------------------------------+
+//| Archive backfill (HISTX|sym|tf|end_utc|count)                    |
+//+------------------------------------------------------------------+
+void SetHistx(const string sym, const string tf, const string end_s, const string count_s)
+  {
+   ENUM_TIMEFRAMES t = PERIOD_CURRENT;
+   long end_utc = StringToInteger(end_s);
+   int  cnt     = (int)StringToInteger(count_s);
+   if(sym == "" || !TfFromString(tf, t) || end_utc <= 0 || cnt <= 0)
+     {
+      Print("Linie HISTX invalida ignorata: ", sym, "|", tf, "|", end_s, "|", count_s);
+      return;
+     }
+   if(cnt > HISTX_MAX_BARS)
+      cnt = HISTX_MAX_BARS;   // 5000 bars x ~100 bytes keeps the sync body well under 1.5 MB
+   g_hx_sym   = sym;
+   g_hx_tf    = tf;
+   g_hx_end   = end_utc;
+   g_hx_count = cnt;
+   g_hx_new   = true;
+  }
+
+string ArchiveReply(const string bars, const int err)
+  {
+   string j = "{\"symbol\":" + JStr(g_hx_sym);
+   j += ",\"tf\":" + JStr(g_hx_tf);
+   j += ",\"end_utc\":" + FmtL(g_hx_end);
+   j += ",\"srv_off\":" + FmtL(g_offset);    // offset used for every bar "t" of this batch
+   j += ",\"bars\":[" + bars + "]";
+   if(err != 0)
+      j += ",\"err\":" + IntegerToString(err);
+   j += "}";
+   return(j);
+  }
+
+// Runs after the response was handled (commands already executed), so a slow history
+// download never delays quotes, positions or command results of the current sync.
+void PrepareArchive()
+  {
+   g_hx_new   = false;
+   g_hx_ready = true;
+   ENUM_TIMEFRAMES tf = PERIOD_CURRENT;
+   if(!TfFromString(g_hx_tf, tf))
+     {
+      g_hx_json = ArchiveReply("", 4003);
+      return;
+     }
+   if(!SymbolSelect(g_hx_sym, true))
+     {
+      g_hx_json = ArchiveReply("", 4301);
+      return;
+     }
+   UpdateOffset();
+   long     end_srv  = g_hx_end + g_offset;
+   datetime from_srv = (datetime)(end_srv - 1);
+   long     psec     = (long)PeriodSeconds(tf);
+   MqlRates rates[];
+   ArraySetAsSeries(rates, false);   // index 0 = oldest
+   //--- history already in the terminal: range copy over local data only (no server download, never waits);
+   //--- only when nothing local is older than end_utc does CopyRates start (and wait for) a download
+   long term_first = SeriesInfoInteger(g_hx_sym, tf, SERIES_TERMINAL_FIRSTDATE);
+   int  n   = 0;
+   int  err = 0;
+   if(term_first > 0 && term_first < (long)from_srv)
+     {
+      long span = (long)g_hx_count * psec * 2 + 4 * 86400;   // weekends/holidays: a partial batch is fine
+      long start_srv = (long)from_srv - span;
+      if(start_srv < term_first)
+         start_srv = term_first;
+      ResetLastError();
+      n   = CopyRates(g_hx_sym, tf, (datetime)start_srv, from_srv, rates);
+      err = GetLastError();
+      if(n > g_hx_count)
+        {
+         ArrayRemove(rates, 0, (uint)(n - g_hx_count));   // keep the newest g_hx_count bars
+         n = g_hx_count;
+        }
+     }
+   if(n <= 0)
+     {
+      ResetLastError();
+      n   = CopyRates(g_hx_sym, tf, from_srv, g_hx_count, rates);
+      err = GetLastError();
+     }
+   if(n < 0)
+     {
+      g_hx_json = ArchiveReply("", (err != 0 ? err : AB_ERR_HIST_NOT_READY));
+      return;
+     }
+   if(n == 0)
+     {
+      //--- nothing older at the broker -> empty list (server marks the pair done); still loading -> err
+      long first_srv = SeriesInfoInteger(g_hx_sym, tf, SERIES_SERVER_FIRSTDATE);
+      long synced    = SeriesInfoInteger(g_hx_sym, tf, SERIES_SYNCHRONIZED);
+      long maxbars   = (long)TerminalInfoInteger(TERMINAL_MAXBARS);
+      long local_bars = (long)Bars(g_hx_sym, tf);
+      if(maxbars > 0 && local_bars >= maxbars)
+        {
+         if(!g_hx_maxbars_logged)
+           {
+            Print("Arhiva: limita 'Max bars in chart' (", maxbars, ") atinsa pentru ", g_hx_sym, " ", g_hx_tf,
+                  " - mareste-o in Tools > Options > Charts pentru mai mult istoric");
+            g_hx_maxbars_logged = true;
+           }
+         g_hx_json = ArchiveReply("", 0);
+         return;
+        }
+      if(synced == 0 || first_srv <= 0 || first_srv < (long)from_srv - PeriodSeconds(tf))
+         g_hx_json = ArchiveReply("", AB_ERR_HIST_NOT_READY);
+      else
+         g_hx_json = ArchiveReply("", 0);
+      return;
+     }
+   int    digits  = SymDigits(g_hx_sym);
+   long   now_srv = (long)TimeTradeServer();
+   string out     = "";
+   string chunk   = "";
+   int    added   = 0;
+   for(int i = 0; i < n; i++)
+     {
+      long t_srv = (long)rates[i].time;
+      if(t_srv >= end_srv || t_srv + psec > now_srv)
+         continue;   // only CLOSED bars strictly older than end_utc
+      string b = "{\"t\":" + FmtL(t_srv - g_offset);
+      b += ",\"o\":" + FmtD(rates[i].open, digits);
+      b += ",\"h\":" + FmtD(rates[i].high, digits);
+      b += ",\"l\":" + FmtD(rates[i].low, digits);
+      b += ",\"c\":" + FmtD(rates[i].close, digits);
+      b += ",\"tv\":" + FmtL(rates[i].tick_volume);
+      b += ",\"sp\":" + FmtL((long)rates[i].spread);
+      b += "}";
+      if(added > 0)
+         chunk += ",";
+      chunk += b;
+      added++;
+      if(StringLen(chunk) > 16000)
+        {
+         out += chunk;   // append in blocks: far fewer reallocations of the big string
+         chunk = "";
+        }
+     }
+   out += chunk;
+   g_hx_json = ArchiveReply(out, 0);
+   g_hx_served++;
+  }
+
+//+------------------------------------------------------------------+
 //| JSON builders                                                    |
 //+------------------------------------------------------------------+
 string TerminalJson()
@@ -766,6 +925,7 @@ string BuildRequest(int &n_results)
    j += ",\"magic\":" + FmtL(InpMagic);
    j += ",\"instance_id\":" + JStr(g_instance_id);
    j += ",\"time_utc\":" + FmtL((long)TimeGMT());
+   j += ",\"srv_offset\":" + FmtL(g_offset);   // v1.12: lets the server undo broker DST changes in old bars
    j += ",\"terminal\":" + TerminalJson();
    j += ",\"account\":" + AccountJson();
 
@@ -839,6 +999,11 @@ string BuildRequest(int &n_results)
       j += ",\"calendar\":[" + g_cal_json + "]";
       j += ",\"calendar_ok\":" + BoolStr(g_cal_ok);
      }
+
+   //--- archive batch requested by the previous response (HISTX), until delivered
+   g_hx_in_req = g_hx_ready;
+   if(g_hx_ready)
+      j += ",\"archive\":[" + g_hx_json + "]";
    j += "}";
    return(j);
   }
@@ -1249,6 +1414,12 @@ void HandleResponse(const string body_in)
          g_cal_last = 0;   // server asks for a fresh calendar (e.g. after its restart)
          continue;
         }
+      if(cmd == "HISTX")
+        {
+         if(k >= 5)
+            SetHistx(p[1], p[2], p[3], p[4]);
+         continue;
+        }
       if(cmd == "HIST")
         {
          if(k >= 3)
@@ -1312,6 +1483,7 @@ void UpdateChartStatus()
    s += "\nSimboluri: " + (g_symbols_csv != "" ? g_symbols_csv : _Symbol) + "   TF: " + (g_tfs_csv != "" ? g_tfs_csv : "M1,M5,H1");
    s += "\nRezultate in asteptare: " + IntegerToString(ArraySize(g_results)) + "   Magic: " + FmtL(InpMagic);
    s += "\nCalendar economic: " + (g_cal_ok ? IntegerToString(g_cal_count) + " evenimente (24 h)" : "indisponibil");
+   s += "\nArhiva istoric: " + FmtL(g_hx_served) + " loturi trimise";
    s += "\nEA-ul executa DOAR comenzile serverului.";
    if(s != g_last_status)
      {
@@ -1377,6 +1549,11 @@ void DoSync()
    DropFirstResults(n_res);
    if(g_cal_in_req)
       g_cal_pending = false;
+   if(g_hx_in_req)
+     {
+      g_hx_ready = false;
+      g_hx_json  = "";
+     }
 
    int hmin = (InpHistoryBars < HIST_MIN_OK ? InpHistoryBars : HIST_MIN_OK);
    if(hmin < 1)
@@ -1392,6 +1569,8 @@ void DoSync()
      }
 
    HandleResponse(resp);
+   if(g_hx_new)
+      PrepareArchive();
   }
 
 //+------------------------------------------------------------------+
@@ -1428,6 +1607,10 @@ int OnInit()
    g_cal_last        = 0;
    g_cal_pending     = false;
    g_cal_fail_logged = false;
+   g_hx_new          = false;
+   g_hx_ready        = false;
+   g_hx_in_req       = false;
+   g_hx_json         = "";
    RefreshCalendar();
 
    g_trade.SetExpertMagicNumber((ulong)InpMagic);

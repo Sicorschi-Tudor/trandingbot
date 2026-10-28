@@ -1243,6 +1243,321 @@ function enterSystem() {
 }
 function leaveSystem() { clearInterval(S.logsTimer); }
 
+/* ---------------- performance page ---------------- */
+const PF = { chart: null, line: null, days: [0, 1, 7, 30].includes(Number(lsGet('mt5bot.pfDays') ?? 30)) ? Number(lsGet('mt5bot.pfDays') ?? 30) : 30, account: lsGet('mt5bot.pfAccount') || '', data: null, seq: 0 };
+const SHADOW_MIN_N = 30;
+function fmtR(v, dec = 2) { return isNum(v) ? fmtSigned(v, dec) + 'R' : '—'; }
+function fmtCi(ci) { return Array.isArray(ci) && ci.length === 2 && ci.every(isNum) ? `IC90% [${fmtSigned(ci[0], 2)}; ${fmtSigned(ci[1], 2)}]` : 'IC90% —'; }
+function fmtPf(v, s) { return isNum(v) ? fmtNum(v, 2) : (s && s.gross_win_usd > 0 && !s.gross_loss_usd ? '∞' : '—'); }
+function fmtUsd(v, dec = 2) { return isNum(v) ? '$' + fmtNum(v, dec) : '—'; }
+function kpiTile(label, value, meta, cls = '') {
+  return `<div class="card kpi"><div class="label">${esc(label)}</div><div class="value ${cls}">${value}</div><div class="meta">${meta || '&nbsp;'}</div></div>`;
+}
+function nCell(n) { return `<td class="num ${isNum(n) && n < SHADOW_MIN_N ? 'n-warn' : ''}" title="${isNum(n) && n < SHADOW_MIN_N ? 'Eșantion mic (< 30)' : ''}">${isNum(n) ? n : '—'}</td>`; }
+function groupTable(obj, keyHead, keyFmt = (k) => esc(k)) {
+  const entries = Object.entries(obj || {});
+  if (!entries.length) return emptyState('Nicio tranzacție în perioadă', '');
+  const rows = entries.map(([k, g]) => `<tr><td>${keyFmt(k)}</td>${nCell(g.trades)}<td class="num">${fmtPct(g.win_rate)}</td>
+    <td class="num ${pnlCls(g.avg_r)}">${fmtR(g.avg_r)}</td><td class="num">${fmtPf(g.profit_factor, null)}</td>
+    <td class="num ${pnlCls(g.net_usd)}">${fmtSigned(g.net_usd)}</td></tr>`).join('');
+  return table([keyHead, { t: 'Tranz.', cls: 'num' }, { t: 'Câștig', cls: 'num' }, { t: 'R mediu', cls: 'num' }, { t: 'PF', cls: 'num' }, { t: 'Net USD', cls: 'num' }], rows);
+}
+function verdictKey(k) {
+  const c = k === 'AGREE' ? 'ok' : k === 'CAUTION' ? 'warn' : k === 'VETO' || k === 'ERROR' ? 'bad' : '';
+  return `<span class="badge ${c}">${esc(k)}</span>`;
+}
+function ensureLineChart(holder, elId) {
+  if (holder.chart || !window.LightweightCharts) return;
+  holder.chart = makeChart(document.getElementById(elId));
+  if (!holder.chart) return;
+  holder.line = holder.chart.addLineSeries({ color: cssVar('--accent'), lineWidth: 2, priceLineVisible: false });
+}
+function setLine(holder, overlayId, pts, emptyT, emptyM, fmt) {
+  const ov = document.getElementById(overlayId);
+  const data = cleanLine((pts || []).map((p) => ({ time: p[0], value: p[1] })));
+  if (holder.line) {
+    holder.line.applyOptions({ color: cssVar('--accent'), priceFormat: fmt || { type: 'price', precision: 2, minMove: 0.01 } });
+    holder.line.setData(data);
+    if (data.length) holder.chart.timeScale().fitContent();
+  }
+  if (!ov) return;
+  if (!holder.line) { ov.innerHTML = emptyState('Graficul nu s-a putut încărca', ' (Lightweight Charts indisponibil)'); ov.classList.remove('hidden'); return; }
+  if (data.length < 2) { ov.innerHTML = emptyState(emptyT, ' ' + (emptyM || '')); ov.classList.remove('hidden'); } else ov.classList.add('hidden');
+}
+
+async function enterPerformance() {
+  $$('#pf-days button').forEach((b) => b.classList.toggle('active', Number(b.dataset.days) === PF.days));
+  ensureLineChart(PF, 'pf-chart');
+  await Promise.all([loadPerformance(), loadShadow()]);
+}
+async function loadPerformance() {
+  const seq = ++PF.seq;
+  const q = `/stats?days=${PF.days}${PF.account ? '&account_key=' + enc(PF.account) : ''}`;
+  let d;
+  try { d = await api(q); } catch (e) {
+    $('#pf-kpis').innerHTML = `<div class="card span-2">${emptyState('Statistici indisponibile', ' ' + (e.detail || e.message))}</div>`;
+    return;
+  }
+  if (seq !== PF.seq) return;
+  // first load: default to the first (= current) account
+  if (!PF.account && Array.isArray(d.accounts) && d.accounts.length && !lsGet('mt5bot.pfAccountAll')) {
+    PF.account = d.accounts[0]; lsSet('mt5bot.pfAccount', PF.account);
+    return loadPerformance();
+  }
+  PF.data = d;
+  renderPerformance(d);
+}
+function renderPerformance(d) {
+  const sel = $('#pf-account');
+  const accs = Array.isArray(d.accounts) ? d.accounts.slice() : [];
+  if (PF.account && !accs.includes(PF.account)) accs.unshift(PF.account);
+  sel.innerHTML = `<option value="">Toate conturile</option>` + accs.map((a) => `<option value="${esc(a)}" ${a === PF.account ? 'selected' : ''}>${esc(a)}</option>`).join('');
+  const s = d.summary || {}, c = d.claude || {};
+  $('#pf-warn').innerHTML = (d.warnings || []).map((w) => `<div class="banner">${esc(w)}</div>`).join('');
+  const dd = isNum(s.max_dd_usd) ? `${fmtUsd(s.max_dd_usd)}${isNum(s.max_dd_pct) ? ' (' + fmtNum(s.max_dd_pct, 1) + '%)' : ''}` : '—';
+  $('#pf-kpis').innerHTML = [
+    kpiTile('Tranzacții', isNum(s.trades) ? String(s.trades) : '—', `${s.wins ?? 0} câștig · ${s.losses ?? 0} pierdere · ${fmtNum(s.sample_days, 1)} zile`),
+    kpiTile('Rată câștig', fmtPct(s.win_rate, 1), `Pierderi consecutive max: ${s.max_consec_losses ?? '—'}`),
+    kpiTile('R mediu (expectanță)', fmtR(s.avg_r), `<span class="ci">${fmtCi(s.ci90_avg_r)}</span> · n=${s.trades_with_r ?? 0}`, pnlCls(s.avg_r)),
+    kpiTile('Profit factor', fmtPf(s.profit_factor, s), `câștig ${fmtUsd(s.gross_win_usd)} / pierdere ${fmtUsd(s.gross_loss_usd)}`),
+    kpiTile('Rezultat net', isNum(s.net_usd) ? fmtSigned(s.net_usd) + ' USD' : '—', isNum(s.avg_slippage_pts) ? `Slippage mediu ${fmtSigned(s.avg_slippage_pts, 1)} puncte` : 'profit + comision + swap', pnlCls(s.net_usd)),
+    kpiTile('Drawdown maxim', dd, `în R: ${isNum(s.max_dd_r) ? fmtNum(s.max_dd_r, 2) + 'R' : '—'}`),
+    kpiTile('Cost Claude azi', fmtUsd(c.today_usd, 3), `${c.calls_today ?? 0} apeluri`),
+    kpiTile('Cost Claude total', fmtUsd(c.total_usd, 2), `${c.calls_total ?? 0} apeluri${c.unpriced_calls ? ` · ${c.unpriced_calls} fără preț` : ''}`),
+  ].join('');
+  const eq = Array.isArray(d.equity) && d.equity.length ? d.equity : null;
+  $('#pf-eq-sub').textContent = eq ? 'USD, din instantanee la 60 s' : (d.account_key ? 'USD — fără instantanee încă' : 'Alege un cont');
+  setLine(PF, 'pf-chart-overlay', eq || [], d.account_key ? 'Fără date de equity' : 'Alege un cont', d.account_key ? 'Instantaneele se salvează la fiecare 60 s.' : 'Curba de equity se afișează per cont.');
+  $('#pf-by-symbol').innerHTML = groupTable(d.by_symbol, 'Simbol', (k) => `<b>${esc(k)}</b>`);
+  const byHour = {};
+  Object.keys(d.by_hour || {}).sort((a, b) => Number(a) - Number(b)).forEach((k) => { byHour[k] = d.by_hour[k]; });
+  $('#pf-by-hour').innerHTML = groupTable(byHour, 'Ora', (k) => (k === '—' ? '—' : `${String(k).padStart(2, '0')}:00`));
+  $('#pf-by-ai').innerHTML = groupTable(d.by_ai_verdict, 'Verdict', verdictKey);
+}
+function shadowTable(obj, keyHead, keyFmt = (k) => esc(k)) {
+  const entries = Object.entries(obj || {});
+  if (!entries.length) return emptyState('Nicio dată', '');
+  const rows = entries.map(([k, g]) => {
+    const oc = g.outcomes || {};
+    const ocTxt = ['TP', 'SL', 'BE', 'TIME', 'HORIZON'].filter((x) => oc[x]).map((x) => `${x} ${oc[x]}`).join(' · ') || '—';
+    return `<tr><td class="wrap">${keyFmt(k)}</td>${nCell(g.n)}<td class="num">${fmtPct(g.win_rate)}</td>
+      <td class="num ${pnlCls(g.avg_r)}">${fmtR(g.avg_r)}</td><td class="num ci-txt">${esc(fmtCi(g.ci90_avg_r).replace('IC90% ', ''))}</td>
+      <td class="num">${fmtR(g.sum_r, 1)}</td><td class="num">${fmtR(g.avg_mfe_r)} / ${fmtR(g.avg_mae_r)}</td><td class="dim">${esc(ocTxt)}</td></tr>`;
+  }).join('');
+  return table([keyHead, { t: 'n', cls: 'num' }, { t: 'Câștig', cls: 'num' }, { t: 'R mediu (brut)', cls: 'num' }, { t: 'IC90%', cls: 'num' }, { t: 'Σ R', cls: 'num' }, { t: 'MFE / MAE', cls: 'num' }, 'Rezultate'], rows);
+}
+async function loadShadow() {
+  const box = $('#sh-body');
+  let d;
+  try { d = await api(`/shadow?days=${PF.days}`); } catch (e) { box.innerHTML = emptyState('Analiza în umbră indisponibilă', ' ' + (e.detail || e.message)); return; }
+  $('#sh-count').textContent = `${d.labeled ?? 0} etichetați · ${d.pending ?? 0} în așteptare · ${d.candidates ?? 0} candidați`;
+  const warn = (d.labeled ?? 0) < SHADOW_MIN_N
+    ? `<div class="banner">Eșantion mic: ${d.labeled ?? 0} candidați etichetați (minim ${SHADOW_MIN_N} pentru orice concluzie). Grupurile cu n &lt; 30 sunt marcate cu portocaliu.</div>` : '';
+  const all = d.all || {};
+  box.innerHTML = `${warn}
+    <div class="grid g-4" style="padding:4px 12px 4px">
+      ${kpiTile('Candidați etichetați', String(all.n ?? 0), 'BUY/SELL detectate, indiferent de filtre')}
+      ${kpiTile('R mediu (toți)', fmtR(all.avg_r), `<span class="ci">${fmtCi(all.ci90_avg_r)}</span>`, pnlCls(all.avg_r))}
+      ${kpiTile('Rată câștig', fmtPct(all.win_rate, 1), 'outcome_r &gt; 0')}
+      ${kpiTile('Σ R', fmtR(all.sum_r, 1), 'dacă toți ar fi fost tranzacționați')}
+    </div>
+    <div class="fieldset-title" style="padding:0 12px">Pe categorie (ce s-a întâmplat cu candidatul)</div>${shadowTable(d.by_category, 'Categorie')}
+    <div class="fieldset-title" style="padding:0 12px">Pe tip de blocaj (un candidat poate avea mai multe)</div>${shadowTable(d.by_blocker, 'Blocaj')}
+    <div class="fieldset-title" style="padding:0 12px">Pe verdict Claude (doar semnale)</div>${shadowTable(d.by_ai_verdict, 'Verdict', verdictKey)}
+    <p class="faint" style="font-size:12px;margin:10px 12px 0">Simulare pe bare închise: intrare la deschiderea barei următoare + spread mediu live pe oră (sau minimul barei, minim 1 punct), 1 punct alunecare la stop, aceeași regulă SL/TP/BE/timp ca live; la ambiguitate în aceeași bară se consideră SL. R brut = fără comision. HORIZON = fără time stop live, evaluat la 24 h. Valoarea unui filtru = R-ul pe care îl evită (R mediu negativ = filtrul ajută).</p>`;
+}
+
+/* ---------------- backtest page ---------------- */
+const BT = { chart: null, line: null, timer: 0, current: null, formReady: false };
+function btNum(name, label, value, step, hint) {
+  return `<label class="field">${esc(label)}<input type="number" name="${name}" value="${esc(value ?? '')}" step="${step || 'any'}">${hint ? `<span class="hint">${esc(hint)}</span>` : ''}</label>`;
+}
+function btSelect(name, label, value, opts) {
+  return `<label class="field">${esc(label)}<select name="${name}">${opts.map((o) => `<option value="${esc(o[0])}" ${String(o[0]) === String(value) ? 'selected' : ''}>${esc(o[1])}</option>`).join('')}</select></label>`;
+}
+async function enterBacktest() {
+  if (!BT.formReady) await renderBacktestForm();
+  loadArchiveStatus();
+  await loadBacktestRuns();
+  if (BT.current) showBacktest(BT.current);
+}
+function leaveBacktest() { clearTimeout(BT.timer); BT.timer = 0; }
+async function renderBacktestForm() {
+  await ensureSymbols();
+  let risk = {};
+  try { risk = await api('/risk'); } catch (e) { /* defaults */ }
+  const st = (S.settings && S.settings.strategy) || {};
+  const sch = (S.settings && S.settings.schedule) || {};
+  const syms = (st.symbols && st.symbols.length ? st.symbols : S.symbols.map((s) => s.symbol));
+  const tfOpts = ALL_TFS.map((t) => [t, t]);
+  $('#bt-form').innerHTML = `
+    <div class="fieldset-title">Perechi</div>
+    <div class="sym-picks">${syms.map((s) => `<label><input type="checkbox" name="sym" value="${esc(s)}" checked>${esc(s)}</label>`).join('') || '<span class="faint">Nicio pereche în setări</span>'}</div>
+    <div class="fieldset-title">Perioadă și timeframe</div>
+    <div class="form-grid">
+      ${btNum('days', 'Zile de istoric', 90, 1)}
+      ${btSelect('signal_tf', 'Timeframe semnal', st.signal_timeframe || 'M5', tfOpts)}
+      ${btSelect('htf_tf', 'Timeframe superior (HTF)', st.htf_timeframe || 'H1', tfOpts)}
+    </div>
+    <div class="fieldset-title">Strategie</div>
+    <div class="form-grid">
+      ${btNum('min_score', 'Scor minim (1–5)', st.min_score ?? 4, 1)}
+      ${btNum('atr_sl_mult', 'SL × ATR', st.atr_sl_mult ?? 1.5, 0.1)}
+      ${btNum('min_sl_points', 'SL minim (puncte)', st.min_sl_points ?? 60, 1)}
+      ${btNum('atr_tp_mult', 'TP × ATR', st.atr_tp_mult ?? 2.5, 0.1)}
+      ${btNum('max_same_currency_direction', 'Corelație max (monedă+direcție)', risk.max_same_currency_direction ?? 1, 1, '0 = fără filtru')}
+    </div>
+    <div class="fieldset-title">Costuri</div>
+    <div class="form-grid">
+      ${btSelect('cost_mode', 'Spread', 'stats', [['stats', 'Statistici live (oră/simbol)'], ['bar', 'Spread din bare (minim — optimist)'], ['fixed', 'Spread fix']])}
+      ${btNum('fixed_spread_pts', 'Spread fix (puncte)', 12, 1, 'folosit doar la „Spread fix”')}
+      ${btNum('commission_per_lot_usd', 'Comision / lot (USD, dus-întors)', 7, 0.5)}
+      ${btNum('slippage_pts', 'Slippage (puncte)', 1, 0.5)}
+    </div>
+    <label class="check-field" style="padding-top:14px"><input type="checkbox" name="session" checked> Doar în sesiune (${esc(sch.start || '—')}–${esc(sch.end || '—')} ${esc(sch.tz || '')})</label>
+    <div class="form-actions">
+      <span class="faint" style="font-size:12px;margin-right:auto;align-self:center">Rulează pe server în fundal; o singură rulare odată.</span>
+      <button type="submit" class="btn primary" id="bt-run">Rulează backtest</button>
+    </div>`;
+  BT.formReady = true;
+}
+function readBacktestForm() {
+  const f = $('#bt-form');
+  const v = (n) => { const el = f.querySelector(`[name="${n}"]`); return el ? el.value : null; };
+  const num = (n) => { const x = Number(v(n)); return Number.isFinite(x) ? x : undefined; };
+  const symbols = $$('input[name="sym"]:checked', f).map((i) => i.value);
+  const mode = v('cost_mode');
+  const cost = { mode, commission_per_lot_usd: num('commission_per_lot_usd'), slippage_pts: num('slippage_pts') };
+  if (mode === 'fixed') cost.fixed_spread_pts = num('fixed_spread_pts');
+  return {
+    symbols, days: num('days'), signal_tf: v('signal_tf'), htf_tf: v('htf_tf'),
+    strategy: { min_score: num('min_score'), atr_sl_mult: num('atr_sl_mult'), min_sl_points: num('min_sl_points'), atr_tp_mult: num('atr_tp_mult') },
+    risk: { max_same_currency_direction: num('max_same_currency_direction') },
+    cost, session: f.querySelector('[name="session"]').checked ? true : null,
+  };
+}
+async function runBacktest(ev) {
+  ev.preventDefault();
+  const body = readBacktestForm();
+  if (!body.symbols.length) { toast('Alege cel puțin o pereche', 'warn'); return; }
+  const r = await act('/backtest/run', body, 'Backtest pornit', $('#bt-run'));
+  if (!r || !r.id) return;
+  BT.current = r.id;
+  showBacktest(r.id);
+  loadBacktestRuns();
+}
+async function showBacktest(id) {
+  clearTimeout(BT.timer); BT.timer = 0;
+  BT.current = id;
+  let d;
+  try { d = await api(`/backtest/runs/${enc(id)}`); } catch (e) {
+    $('#bt-result').innerHTML = `<div class="card">${emptyState('Rezultat indisponibil', ' ' + (e.detail || e.message))}</div>`; return;
+  }
+  if (S.route.page !== 'backtest' || BT.current !== id) return;
+  renderBacktestResult(d);
+  if (d.status === 'RUNNING') BT.timer = setTimeout(() => showBacktest(id), 1000);
+  else loadBacktestRuns();
+}
+function btParamsText(p) {
+  if (!p) return '—';
+  const st = p.strategy || {}, c = p.cost || {};
+  return [`${(p.symbols || []).join(', ')}`, p.days ? `${p.days} zile` : '', `${p.signal_tf || ''}/${p.htf_tf || ''}`,
+    isNum(st.min_score) ? `scor ≥${st.min_score}` : '', isNum(st.atr_sl_mult) ? `SL ${st.atr_sl_mult}×ATR` : '',
+    isNum(st.atr_tp_mult) ? `TP ${st.atr_tp_mult}×ATR` : '', c.mode ? `spread ${c.mode}${c.mode === 'fixed' ? ' ' + c.fixed_spread_pts + 'p' : ''}` : '',
+    p.session ? 'în sesiune' : 'non-stop'].filter(Boolean).join(' · ');
+}
+function pick(o, keys) { for (const k of keys) { if (o && o[k] !== undefined && o[k] !== null) return o[k]; } return null; }
+function renderBacktestResult(d) {
+  const box = $('#bt-result');
+  const head = `<div class="card-head"><div><h2>Rezultat backtest <span class="badge sim" style="margin-left:6px">BACKTEST</span></h2>
+    <div class="sub" style="margin-top:2px">${esc(btParamsText(d.params))} · ${fmtDTs(d.created_ts)}</div></div><span class="mono faint">${esc(String(d.id).slice(0, 8))}</span></div>`;
+  if (d.status === 'RUNNING') {
+    const p = isNum(d.progress) ? d.progress : 0;
+    box.innerHTML = `<div class="card">${head}<div class="bt-status"><div class="progress"><span style="width:${(p * 100).toFixed(0)}%"></span></div>
+      <div class="dim" style="font-size:13px">Rulează… ${(p * 100).toFixed(0)}% — rezultatul apare automat.</div></div></div>`;
+    return;
+  }
+  if (d.status !== 'DONE' || !d.metrics) {
+    box.innerHTML = `<div class="card">${head}<div class="banner bad">Backtest eșuat: ${esc(d.error || d.status)}</div></div>`;
+    return;
+  }
+  const m = d.metrics, s = m.summary || {};
+  const ci = s.ci90_avg_r;
+  const losing = Array.isArray(ci) && isNum(ci[1]) && ci[1] < 0;
+  const warns = (m.warnings || []).map((w) => `<div class="banner">${esc(w)}</div>`).join('');
+  const tiles = [
+    kpiTile('Tranzacții', isNum(s.trades) ? String(s.trades) : '—', `${fmtNum(s.sample_days, 0)} zile de date`),
+    kpiTile('Rată câștig', fmtPct(s.win_rate, 1), `Pierderi consecutive max: ${s.max_consec_losses ?? '—'}`),
+    kpiTile('R mediu (expectanță)', fmtR(pick(s, ['expectancy_r', 'avg_r'])), `<span class="ci">${fmtCi(ci)}</span>`, pnlCls(s.avg_r)),
+    kpiTile('Profit factor', fmtPf(s.profit_factor, null), `Drawdown max ${isNum(s.max_dd_r) ? fmtNum(s.max_dd_r, 1) + 'R' : '—'}`),
+    kpiTile('Rezultat net (simulat)', isNum(s.net_usd) ? fmtSigned(s.net_usd) + ' USD' : '—', `capital inițial ${fmtUsd(d.params && d.params.initial_equity, 0)}`, pnlCls(s.net_usd)),
+  ];
+  const tKey = (t) => Number(pick(t, ['exit_t', 'exit_ts', 'close_t', 'entry_t', 'entry_ts', 'open_t', 't'])) || 0;
+  const trades = Array.isArray(m.trades) ? m.trades.slice().sort((a, b) => tKey(b) - tKey(a)).slice(0, 100) : [];
+  const tradeRows = trades.map((t) => {
+    const tin = pick(t, ['entry_t', 'entry_ts', 'open_t', 't']); const tout = pick(t, ['exit_t', 'exit_ts', 'close_t']);
+    const r = pick(t, ['r', 'r_multiple', 'outcome_r']); const usd = pick(t, ['net_usd', 'pnl_usd', 'usd']);
+    const oc = pick(t, ['outcome', 'reason', 'exit_reason']);
+    return `<tr><td class="num">${fmtDTs(tin)}</td><td class="num">${fmtDTs(tout)}</td><td><b>${esc(t.symbol || '—')}</b></td><td>${sideBadge(pick(t, ['side', 'direction']))}</td>
+      <td><span class="badge ${oc === 'TP' ? 'ok' : oc === 'SL' ? 'bad' : ''}">${esc(oc || '—')}</span></td>
+      <td class="num ${pnlCls(r)}">${fmtR(r)}</td><td class="num ${pnlCls(usd)}">${fmtSigned(usd)}</td></tr>`;
+  }).join('');
+  box.innerHTML = `<div class="card">${head}
+      ${losing ? '<div class="banner bad">Strategia pierde după costuri: chiar și limita superioară a intervalului de încredere 90% pentru R mediu este sub 0.</div>' : ''}
+      ${warns}
+      <div class="grid g-5">${tiles.join('')}</div>
+    </div>
+    <div class="card flush"><div class="card-head"><h2>Curba în R (cumulat)</h2><span class="sub">simulat</span></div>
+      <div class="chart-box mini" id="bt-chart"><div class="chart-overlay hidden" id="bt-chart-overlay"></div></div></div>
+    <div class="grid g-2">
+      <div class="card flush"><div class="card-head"><h2>Pe simbol</h2></div><div class="tbl-box">${groupTable(m.by_symbol, 'Simbol', (k) => `<b>${esc(k)}</b>`)}</div></div>
+      <div class="card flush"><div class="card-head"><h2>Ultimele tranzacții simulate</h2><span class="sub">${trades.length} afișate</span></div>
+        <div class="tbl-box">${trades.length ? table(['Intrare', 'Ieșire', 'Simbol', 'Direcție', 'Rezultat', { t: 'R', cls: 'num' }, { t: 'USD', cls: 'num' }], tradeRows) : emptyState('Nicio tranzacție simulată', '')}</div></div>
+    </div>`;
+  // chart element was re-created: rebuild the chart on it
+  if (BT.chart) { try { BT.chart.remove(); } catch (e) { /* ignore */ } BT.chart = null; BT.line = null; }
+  ensureLineChart(BT, 'bt-chart');
+  setLine(BT, 'bt-chart-overlay', m.equity_r || [], 'Prea puține tranzacții pentru curbă', '', { type: 'price', precision: 2, minMove: 0.01 });
+}
+async function loadBacktestRuns() {
+  const box = $('#bt-runs');
+  let list;
+  try { list = await api('/backtest/runs?limit=30'); } catch (e) { box.innerHTML = emptyState('Lista indisponibilă', ' ' + (e.detail || e.message)); return; }
+  if (!Array.isArray(list) || !list.length) { box.innerHTML = emptyState('Nicio rulare încă', ' Configurează parametrii și apasă „Rulează backtest”.'); return; }
+  if (!BT.current) BT.current = list[0].id;
+  const rows = list.map((r) => {
+    const s = r.summary || {};
+    const ci = s.ci90_avg_r;
+    const st = r.status === 'DONE' ? 'ok' : r.status === 'RUNNING' ? 'info' : 'bad';
+    return `<tr class="clickable" data-bt="${esc(r.id)}"><td class="num">${fmtDTs(r.created_ts)}</td><td><span class="badge ${st}">${esc(r.status)}</span></td>
+      <td class="wrap">${esc(btParamsText(r.params))}</td><td class="num">${isNum(s.trades) ? s.trades : '—'}</td>
+      <td class="num ${pnlCls(s.avg_r)}">${fmtR(pick(s, ['expectancy_r', 'avg_r']))}</td><td class="num ci-txt ${Array.isArray(ci) && ci[1] < 0 ? 'down' : ''}">${esc(fmtCi(ci).replace('IC90% ', ''))}</td>
+      <td class="num ${pnlCls(s.net_usd)}">${fmtSigned(s.net_usd)}</td></tr>`;
+  }).join('');
+  box.innerHTML = table(['Creat', 'Stare', 'Parametri', { t: 'Tranz.', cls: 'num' }, { t: 'R mediu', cls: 'num' }, { t: 'IC90%', cls: 'num' }, { t: 'Net USD', cls: 'num' }], rows);
+}
+async function loadArchiveStatus() {
+  const box = $('#ar-body');
+  let d;
+  try { d = await api('/archive/status'); } catch (e) { box.innerHTML = emptyState('Starea arhivei indisponibilă', ' ' + (e.detail || e.message)); return; }
+  $('#ar-sub').textContent = d.enabled ? `țintă ${d.days_target} zile` : 'arhivare dezactivată';
+  const rows = [];
+  Object.keys(d.symbols || {}).sort().forEach((sym) => {
+    const tfs = d.symbols[sym] || {};
+    Object.keys(tfs).sort((a, b) => (TF_SECONDS[a] || 0) - (TF_SECONDS[b] || 0)).forEach((tf) => {
+      const x = tfs[tf] || {};
+      const tgt = x.days_target || d.days_target || 1;
+      const p = x.done ? 1 : Math.max(0, Math.min(1, (x.days_loaded || 0) / tgt));
+      rows.push(`<div class="ar-row" title="${esc((x.bars ?? 0) + ' bare')}"><span class="sym">${esc(sym)}</span><span class="tf">${esc(tf)}</span>
+        <div class="progress ${x.done ? 'done' : ''}"><span style="width:${(p * 100).toFixed(0)}%"></span></div>
+        <span class="v">${fmtNum(x.days_loaded || 0, 0)}/${tgt} zile${x.done ? ' ✓' : ''}</span></div>`);
+    });
+  });
+  const ea = d.ea_version ? `EA v${esc(d.ea_version)}` : 'EA neconectat';
+  box.innerHTML = rows.length ? rows.join('') + `<p class="faint" style="font-size:12px;margin:10px 0 0">${ea} · descărcarea continuă în fundal (EA ≥ 1.11); ✓ = tot istoricul disponibil la broker.</p>`
+    : emptyState('Arhiva este goală', d.enabled ? ' Istoricul se descarcă automat de la EA (necesită AIBridgeEA v1.11+).' : ' ARCHIVE_ENABLED=false în .env.');
+}
+
 /* ---------------- symbols ---------------- */
 async function refreshSymbols() {
   try {
@@ -1363,7 +1678,7 @@ async function resync() {
 }
 
 /* ---------------- router ---------------- */
-const PAGES = ['overview', 'chart', 'signals', 'signal', 'positions', 'control', 'integrations', 'system'];
+const PAGES = ['overview', 'chart', 'signals', 'signal', 'positions', 'performance', 'backtest', 'control', 'integrations', 'system'];
 function route() {
   const raw = decodeURIComponent((location.hash || '#overview').slice(1));
   let [page, ...rest] = raw.split('/');
@@ -1372,6 +1687,7 @@ function route() {
   const prev = S.route.page;
   if (prev === 'chart' && page !== 'chart') leaveChart();
   if (prev === 'system' && page !== 'system') leaveSystem();
+  if (prev === 'backtest' && page !== 'backtest') leaveBacktest();
   if (prev === 'signal' && page !== 'signal' && SD.chart) { try { SD.chart.remove(); } catch (e) { /* ignore */ } SD.chart = null; }
   S.route = { page, arg };
   $$('.page').forEach((s) => { s.hidden = s.id !== 'page-' + page; });
@@ -1386,6 +1702,8 @@ function route() {
     case 'signals': enterSignals(); break;
     case 'signal': if (arg) enterSignalDetail(arg); break;
     case 'positions': enterPositions(); break;
+    case 'performance': enterPerformance(); break;
+    case 'backtest': enterBacktest(); break;
     case 'control': enterControl(); break;
     case 'integrations': enterIntegrations(); break;
     case 'system': enterSystem(); break;
@@ -1394,7 +1712,8 @@ function route() {
 
 function applyChartThemes() {
   const opts = chartThemeOptions();
-  [CH.chart, SD.chart].forEach((c) => { if (c) c.applyOptions(opts); });
+  [CH.chart, SD.chart, PF.chart, BT.chart].forEach((c) => { if (c) c.applyOptions(opts); });
+  [PF.line, BT.line].forEach((l) => { if (l) l.applyOptions({ color: cssVar('--accent') }); });
   [CH.s, SD.s].forEach((s) => {
     if (!s) return;
     s.candle.applyOptions({ upColor: cssVar('--up'), downColor: cssVar('--down'), wickUpColor: cssVar('--up'), wickDownColor: cssVar('--down') });
@@ -1458,6 +1777,20 @@ function init() {
   $('#btn-csv').addEventListener('click', exportCsv);
   $('#btn-pos-refresh').addEventListener('click', enterPositions);
   $('#log-level').addEventListener('change', loadLogs);
+  $('#pf-account').addEventListener('change', (ev) => {
+    PF.account = ev.target.value; lsSet('mt5bot.pfAccount', PF.account || null); lsSet('mt5bot.pfAccountAll', PF.account ? null : '1');
+    loadPerformance();
+  });
+  $('#pf-days').addEventListener('click', (ev) => {
+    const b = ev.target.closest('button[data-days]');
+    if (!b) return;
+    PF.days = Number(b.dataset.days); lsSet('mt5bot.pfDays', String(PF.days));
+    $$('#pf-days button').forEach((x) => x.classList.toggle('active', x === b));
+    loadPerformance(); loadShadow();
+  });
+  $('#pf-refresh').addEventListener('click', () => { loadPerformance(); loadShadow(); });
+  $('#bt-form').addEventListener('submit', runBacktest);
+  $('#bt-runs').addEventListener('click', (ev) => { const tr = ev.target.closest('tr[data-bt]'); if (tr) showBacktest(tr.dataset.bt); });
   $('#log-refresh').addEventListener('click', loadLogs);
   document.addEventListener('click', async (ev) => {
     const b = ev.target.closest('#btn-tg-test');

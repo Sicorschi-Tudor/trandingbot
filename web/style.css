@@ -134,7 +134,7 @@ h3 { font-size: 14px; }
 .dot.warn { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
 .dot.bad { background: var(--down); box-shadow: 0 0 0 3px var(--down-soft); }
 
-@media (max-width: 1180px) {
+@media (max-width: 1380px) {
   .menu-btn { display: grid; }
   .nav {
     display: none; position: absolute; top: 56px; left: 0; right: 0;
@@ -399,3 +399,31 @@ dialog.modal::backdrop { background: rgba(5, 8, 12, .6); backdrop-filter: blur(2
 .log-level-ERROR { color: var(--down); font-weight: 700; }
 .log-level-WARN { color: var(--warn); font-weight: 700; }
 .log-level-INFO { color: var(--info); }
+
+/* ---------- Performance / backtest ---------- */
+.tbl-box { padding: 4px 4px 8px; }
+.page-actions label.field select { width: auto; min-width: 150px; }
+.kpi .value.up { color: var(--up); } .kpi .value.down { color: var(--down); }
+.kpi .meta .ci { font-family: var(--mono); font-size: 11.5px; }
+.n-warn { color: var(--warn); font-weight: 650; }
+.bt-layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; align-items: start; }
+@media (max-width: 1100px) { .bt-layout { grid-template-columns: minmax(0, 1fr); } }
+.bt-layout + .card, .bt-layout + div:not(:empty), #bt-result > * + * { margin-top: 16px; }
+.sym-picks { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.sym-picks label {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; font-family: var(--mono);
+  border: 1px solid var(--border-strong); border-radius: 7px; padding: 5px 9px; cursor: pointer; color: var(--text-dim);
+}
+.sym-picks input { accent-color: var(--accent-strong); }
+.sym-picks label:has(input:checked) { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+.fieldset-title { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-faint); font-weight: 650; margin: 16px 0 8px; }
+.fieldset-title:first-child { margin-top: 0; }
+.progress { height: 6px; border-radius: 99px; background: var(--surface-3); overflow: hidden; }
+.progress > span { display: block; height: 100%; border-radius: 99px; background: var(--accent); transition: width .3s; }
+.progress.done > span { background: var(--up); }
+.ar-row { display: grid; grid-template-columns: 82px 44px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 12px; padding: 5px 0; }
+.ar-row .sym { font-family: var(--mono); font-weight: 600; }
+.ar-row .tf { color: var(--text-faint); font-weight: 600; }
+.ar-row .v { color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bt-status { display: grid; gap: 8px; }
+.ci-txt { font-family: var(--mono); font-size: 11.5px; color: var(--text-faint); }

@@ -119,6 +119,12 @@ Request JSON (EA → server):
   - `instance_id`: random string generated in `OnInit`. The server remembers ids seen in the last 30 s; more than one → WARN `Mai multe instanțe AIBridgeEA active` (max once per 5 min).
   - `calendar` + `calendar_ok` — ONLY on the first successful sync after a calendar refresh (on init, every 10 min, or when the server sends `CALENDAR`): `"calendar":[{"t":1730000000,"ccy":"USD","imp":3,"name":"Fed Interest Rate Decision"}],"calendar_ok":true`. Source: `CalendarValueHistory(values, TimeTradeServer()-3600, TimeTradeServer()+86400)` (no country/currency filter) + `CalendarEventById` + `CalendarCountryById`; only importance ≥ MODERATE (`imp`: 1 LOW, 2 MODERATE, 3 HIGH), events with `time_mode` DATE/NOTIME skipped, `t` converted to UTC like bars, max 200 items. If the calendar functions fail: `"calendar":[],"calendar_ok":false` (logged once by the EA).
   - Server storage: `rt.calendar` (list, sorted by `t`), `rt.calendar_ts` (time.time() of the last good update), `rt.bridge["calendar_ok"]`. When `calendar_ok` is false the previous list and `calendar_ts` are kept.
+- EA ≥ 1.11 also sends, ONLY on the sync right after a response that contained `HISTX` (kept and resent until a POST returns HTTP 200):
+  `"archive":[{"symbol":"EURUSD","tf":"M5","end_utc":1730000000,"bars":[{"t":..,"o":..,"h":..,"l":..,"c":..,"tv":..,"sp":..}],"err":4401}]`
+  - `bars`: up to `count` CLOSED bars strictly older than `end_utc`, oldest → newest, from `CopyRates(sym, tf, server_time(end_utc) - 1 s, count, rates)` (UTC→server with the EA offset; bar `t` converted back to UTC like live bars; the server applies the same clock-skew correction). `sp` = MqlRates.spread (minimum spread of the bar, points).
+  - The EA runs the CopyRates AFTER handling the response that carried `HISTX` (commands already executed), so a slow history download never delays quotes, positions or results; the batch travels in the next request. 5000 bars ≈ 0.5 MB (< 1.5 MB).
+  - `err` (only when non-zero): series not ready (`CopyRates` = -1, or 0 bars while the broker has older data / `SERIES_SYNCHRONIZED` false) → `bars: []` + `err`. The server does NOT mark the pair done; it retries after 30 s, 60 s, … (max 10 min).
+  - `bars: []` without `err` = the broker has nothing older (or the terminal's *Max bars in chart* limit was reached) → the pair is done.
 
 Response (server → EA), `text/plain`, one instruction per line, fields separated by `|`:
 ```
@@ -130,10 +136,17 @@ OPEN|<cmd_id>|<symbol>|BUY|<volume>|<sl>|<tp>|<deviation_points>|<comment>[|<ref
 MODIFY|<cmd_id>|<ticket>|<sl>|<tp>
 CLOSE|<cmd_id>|<ticket>|<volume>
 CALENDAR
+HISTX|<symbol>|<tf>|<end_utc>|<count>
 ```
 - The 3 trailing OPEN fields are sent only when the EA reported `ea_version` ≥ 1.10 (v1.00 parses them fine but ignores them; existing tests pin the 9-field form for 1.00). `ref_price` = ask (BUY) / bid (SELL) when the intent was queued; `max_slip_points` = max(5, round(0.25 × SL distance in points)); `expires_utc` = queue time + 20 s, shifted by the EA's measured `TimeGMT()` error (`rt.bridge["ea_gmt_skew_s"]`). `0` disables a check.
 - EA ≥ 1.10 on OPEN: if `TimeGMT() > expires_utc` → result ok=false, retcode 10012, retcode_desc `TIMEOUT (expired)`; if |current ask/bid − ref_price| > max_slip_points × point → ok=false, retcode 10020, retcode_desc `PRICE_CHANGED (ref drift)`. Nothing is sent to the broker in both cases.
 - `CALENDAR` (EA ≥ 1.10 only): refresh and resend the calendar on the next sync. Sent when the server has no calendar or it is older than 20 min (max once per 60 s).
+- `HISTX` (EA ≥ 1.11 only, `app/archive.py`): archive backfill request, `count` ≤ 5000, `end_utc` in the EA's UTC frame (real UTC + `rt.bridge["clock_skew_s"]`). At most ONE per response, and only when: `ARCHIVE_ENABLED` (default true), the bridge is connected, the response carries no OPEN/MODIFY/CLOSE, no DEMO intent is QUEUED/DELIVERED/UNKNOWN (`executor.PENDING_STATES`), no `HIST` refill is pending, and no earlier HISTX is still unanswered (60 s timeout → retried with backoff). Pairs, in order: for each active symbol, `[signal_tf, htf_tf, "M15"]`. Each pair walks backwards from its oldest archived bar (first request: the open time of the current bar) until `oldest_ts ≤ now − ARCHIVE_DAYS·86400` (default 120) or the EA answers with no bars. `count` = min(`ARCHIVE_BATCH_BARS` (5000), bars left to the target). Rows are written by a single background thread (`INSERT OR IGNORE` into `bars_archive`, 500-row transactions); live bars flushed to `bars` are mirrored into `bars_archive` too, so the archive has no gap between the backfill and now.
+- Reply matching: an `archive` item answers the outstanding HISTX only when its `symbol`, `tf` AND `end_utc` echo that request (`rt.archive_plan["pending"]["ea_end"]`). Anything else (a batch resent after a lost HTTP 200, a late reply after the 60 s timeout) is only written (`INSERT OR IGNORE`); it never marks the pair done/exhausted, never sets an error and never clears the pending request.
+- Broker DST (EA ≥ 1.12): the EA stamps every bar with TODAY's server offset. It now also sends `"srv_offset"` (top level, every sync) and `"srv_off"` (per archive item) = `TimeTradeServer()-TimeGMT()` in seconds. The server recovers the broker's server time of each archive bar and converts it with the rule from `MT5_SERVER_TZ` (default `auto`; `EET` = Europe/Athens, EU switch dates; `NY` = America/New_York + 7 h, "New York close" GMT+2/+3; any IANA zone; `fixed` = today's offset for every bar, the pre-1.12 behaviour). `auto` picks the rule whose offset today equals the broker's (`srv_offset` + clock skew); when only one rule matches (the weeks between the EU and US switches) it is remembered per account server in `settings.archive_server_tz`; when both match and nothing is remembered, `NY` is assumed; when none matches, `fixed`. The chosen rule is logged (INFO `archive`). HISTX `end_utc` is shifted the same way so the EA's `end_utc + offset` lands on the broker's server time of that UTC instant. A rule whose offset today differs from the broker's is ignored (`fixed`). Bars archived by EA 1.11 (or with `fixed`) older than the broker's last DST switch can be 1 h off.
+- EA ≥ 1.12 copies archive batches from local terminal history only (`CopyRates` by range from `max(SERIES_TERMINAL_FIRSTDATE, end − 2·count·period − 4 days)`; partial batches are normal); the count form that starts (and waits for) a broker download is used only when nothing local is older than `end_utc`.
+- Archive status: `rt.archive_status = {symbol: {tf: {"bars": int, "oldest_ts": int|None, "target_ts": int, "done": bool}}}` — rebuilt from `bars_archive` at startup (`COUNT(*)`, `MIN(t)` per pair; also lists inactive symbols already archived), updated on every archive payload.
+- Live spread statistics: every sync, each symbol's quote `spread_points` is sampled at most once per 10 s (skipped when the tick is older than 60 s) into an in-memory aggregate per (symbol, UTC hour of day), flushed every 60 s on the background thread into `spread_stats` (n, sum, sum of squares, max are added up).
 
 - EA must `SymbolSelect(sym,true)` for every symbol in SYMBOLS. Unknown TF names ignored. TF names: M1,M5,M15,M30,H1,H4,D1.
 - EA keeps an in-memory set of executed cmd_ids (last 500) and **never executes the same cmd_id twice**.
@@ -221,3 +234,23 @@ PUBLIC_APP_URL=http://127.0.0.1:8787
 
 ## 6. Risk Engine checks (each produces {"name","ok","detail"}; ALL must pass)
 mode_allows_execution (PAPER/DEMO and EXECUTION_ENABLED, not SIGNAL_ONLY, not LIVE) · entries_not_paused · bridge_connected (DEMO) · account_is_demo (DEMO) · terminal_trade_allowed (DEMO: terminal.trade_allowed && account.trade_expert) · quote_fresh · spread_ok · sl_tp_present · sl_distance_ok (≥ stops_level) · volume_ok (volume = floor_to_step(equity*risk_pct/100 / (sl_dist/tick_size*tick_value)); if < volume_min → fail "risk too small for min lot" except test-order uses volume_min and checks its risk ≤ 2×max_risk) · max_open_positions · max_trades_per_day · daily_loss_ok (equity vs day-start equity, day boundary in DEFAULT_TIMEZONE) · drawdown_ok (equity vs peak equity) · consecutive_losses_ok · free_margin_ok (margin_free/equity*100 ≥ MIN_FREE_MARGIN_PCT) · no_existing_bot_position_on_symbol.
+
+## 7. Storage additions (stage B; additive migrations on the existing `bot.db`)
+`app/db.py` creates these with `CREATE TABLE IF NOT EXISTS` and adds missing columns with `ALTER TABLE … ADD COLUMN` guarded by `PRAGMA table_info` (`DB.migrated` lists what was added). Nothing is dropped or rewritten.
+```
+bars_archive(symbol TEXT, tf TEXT, t INTEGER, o REAL, h REAL, l REAL, c REAL, tv REAL, sp REAL, PRIMARY KEY(symbol,tf,t))
+spread_stats(symbol TEXT, hour_utc INTEGER, n INTEGER, sum_pts REAL, sum_sq REAL, max_pts REAL, PRIMARY KEY(symbol,hour_utc))
+analyses(id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, tf TEXT, bar_time INTEGER, created_ts REAL, account_key TEXT,
+         direction TEXT, candidate_side TEXT, entry REAL, sl REAL, tp REAL, score REAL, blockers_json TEXT, signal_id TEXT,
+         ai_verdict TEXT, outcome TEXT, outcome_r REAL, mfe_r REAL, mae_r REAL, labeled_ts REAL, UNIQUE(symbol,tf,bar_time))
+equity_snapshots(account_key TEXT, ts INTEGER, balance REAL, equity REAL, PRIMARY KEY(account_key,ts))
+claude_usage(id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, signal_id TEXT, model TEXT, input_tokens INTEGER,
+             output_tokens INTEGER, cache_read_tokens INTEGER, cost_usd REAL)
+backtest_runs(id TEXT PRIMARY KEY, created_ts REAL, status TEXT, params_json TEXT, metrics_json TEXT, error TEXT)
+trades  + account_key TEXT, signal_entry REAL, initial_sl REAL, risk_money REAL, r_multiple REAL
+signals + account_key TEXT        intents + account_key TEXT
+```
+Indexes: `ix_analyses_bar(bar_time)`, `ix_analyses_signal(signal_id)`, `ix_claude_usage_ts(ts)`.
+`spread_stats.hour_utc` is the UTC hour of day (0–23); mean = sum_pts/n, sd = sqrt(sum_sq/n − mean²). `bars.sp` / `bars_archive.sp` are the MT5 bar spread (minimum within the bar), not the average.
+Env: `ARCHIVE_ENABLED=true`, `ARCHIVE_DAYS=120`, `ARCHIVE_BATCH_BARS=5000`, `MT5_SERVER_TZ=auto`.
+Shadow labels (`app/labeler.py`): BE moves the stop to entry ± 2 points like `position_manager.plan`, only when the bar's favourable price leaves spread/stops level + 1 point; entries and ask-side exits use the `spread_stats` mean of that UTC hour (fallback max(bar sp, 1)), stop exits 1 point slippage; `outcome_r` is GROSS of commission. With `max_hold_minutes=0` (no live time stop) open setups are closed at a 24 h horizon with outcome `HORIZON`. Backtests read bars through their own read-only SQLite connection (`backtest.ReadOnlyDB`), never the shared locked one.

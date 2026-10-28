@@ -103,7 +103,96 @@ CREATE TABLE IF NOT EXISTS equity_marks (
     peak_equity REAL NOT NULL,
     updated_at_utc TEXT
 );
+CREATE TABLE IF NOT EXISTS bars_archive (
+    symbol TEXT NOT NULL,
+    tf TEXT NOT NULL,
+    t INTEGER NOT NULL,
+    o REAL, h REAL, l REAL, c REAL, tv REAL, sp REAL,
+    PRIMARY KEY (symbol, tf, t)
+);
+CREATE TABLE IF NOT EXISTS spread_stats (
+    symbol TEXT NOT NULL,
+    hour_utc INTEGER NOT NULL,
+    n INTEGER NOT NULL DEFAULT 0,
+    sum_pts REAL NOT NULL DEFAULT 0,
+    sum_sq REAL NOT NULL DEFAULT 0,
+    max_pts REAL,
+    PRIMARY KEY (symbol, hour_utc)
+);
+CREATE TABLE IF NOT EXISTS analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    tf TEXT NOT NULL,
+    bar_time INTEGER NOT NULL,
+    created_ts REAL,
+    account_key TEXT,
+    direction TEXT,
+    candidate_side TEXT,
+    entry REAL,
+    sl REAL,
+    tp REAL,
+    score REAL,
+    blockers_json TEXT,
+    signal_id TEXT,
+    ai_verdict TEXT,
+    outcome TEXT,
+    outcome_r REAL,
+    mfe_r REAL,
+    mae_r REAL,
+    labeled_ts REAL,
+    UNIQUE (symbol, tf, bar_time)
+);
+CREATE INDEX IF NOT EXISTS ix_analyses_bar ON analyses(bar_time);
+CREATE INDEX IF NOT EXISTS ix_analyses_signal ON analyses(signal_id);
+CREATE TABLE IF NOT EXISTS equity_snapshots (
+    account_key TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    balance REAL,
+    equity REAL,
+    PRIMARY KEY (account_key, ts)
+);
+CREATE TABLE IF NOT EXISTS claude_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    signal_id TEXT,
+    model TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cache_read_tokens INTEGER,
+    cost_usd REAL
+);
+CREATE INDEX IF NOT EXISTS ix_claude_usage_ts ON claude_usage(ts);
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id TEXT PRIMARY KEY,
+    created_ts REAL NOT NULL,
+    status TEXT NOT NULL,
+    params_json TEXT,
+    metrics_json TEXT,
+    error TEXT
+);
 """
+
+# additive columns on tables that already exist in older databases: (table, column, type)
+ADDED_COLUMNS = [
+    ("trades", "account_key", "TEXT"),
+    ("trades", "signal_entry", "REAL"),
+    ("trades", "initial_sl", "REAL"),
+    ("trades", "risk_money", "REAL"),
+    ("trades", "r_multiple", "REAL"),
+    ("signals", "account_key", "TEXT"),
+    ("intents", "account_key", "TEXT"),
+]
+
+
+def migrate(conn: sqlite3.Connection) -> list[str]:
+    """Additive only: never drops or rewrites existing data. Returns the columns added."""
+    added = []
+    for table, col, typ in ADDED_COLUMNS:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if cols and col not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+            added.append(f"{table}.{col}")
+    return added
 
 
 class DB:
@@ -119,6 +208,7 @@ class DB:
                 self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=NORMAL")
             self.conn.executescript(SCHEMA)
+            self.migrated = migrate(self.conn)
 
     def execute(self, sql: str, params: tuple | list = ()) -> sqlite3.Cursor:
         with self.lock:

@@ -84,6 +84,12 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str = ""
     TELEGRAM_MESSAGE_THREAD_ID: str = ""
     PUBLIC_APP_URL: str = "http://127.0.0.1:8787"
+    # history archive pulled from the EA (v1.11+) for backtests / outcome labels
+    ARCHIVE_ENABLED: bool = True
+    ARCHIVE_DAYS: int = 120
+    ARCHIVE_BATCH_BARS: int = 5000
+    # broker server-time DST rule for archive bars (EA v1.12+): auto | EET | NY | fixed | IANA zone name
+    MT5_SERVER_TZ: str = "auto"
 
     @property
     def db_path(self) -> Path:

@@ -448,3 +448,123 @@ async def stream(request: Request):
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
+
+
+# ---- performance / shadow / archive / backtest ---------------------------
+# sync handlers: FastAPI runs them in its threadpool, so aggregation never blocks the event loop
+@router.get("/stats")
+def get_stats(request: Request, account_key: str | None = None, days: int = Query(30, ge=0, le=3650)):
+    return _engine_call(get_engine(request).perf_stats, account_key or None, days)
+
+
+@router.get("/shadow")
+def get_shadow(request: Request, days: int = Query(30, ge=0, le=3650)):
+    return _engine_call(get_engine(request).shadow_stats, days)
+
+
+@router.get("/archive/status")
+async def get_archive_status(request: Request):
+    return get_engine(request).archive_status()
+
+
+BT_COST_MODES = ("stats", "bar", "fixed")
+BT_COST_NUM: dict[str, tuple[type, float, float]] = {
+    "fixed_spread_pts": (float, 0, 1000),
+    "commission_per_lot_usd": (float, 0, 100),
+    "slippage_pts": (float, 0, 100),
+}
+BT_STRATEGY_KEYS = ("atr_sl_mult", "atr_tp_mult", "min_sl_points", "min_score", "break_even_at_r", "max_hold_minutes")
+BT_RISK_KEYS = ("max_same_currency_direction", "max_spread_points", "max_open_positions", "max_signals_per_symbol_per_session")
+
+
+def validate_backtest_params(body: dict, eng: Engine) -> dict:
+    st = eng.rt.strategy
+    syms = body.get("symbols") or eng.rt.active_symbols()
+    if isinstance(syms, str):
+        syms = syms.split(",")
+    if not isinstance(syms, list) or not (1 <= len(syms) <= 20):
+        raise HTTPException(status_code=422, detail="symbols: listă cu 1–20 simboluri")
+    symbols = []
+    for s in syms:
+        s = str(s).strip().upper()
+        if not SYMBOL_RE.match(s):
+            raise HTTPException(status_code=422, detail=f"simbol invalid: {s}")
+        if s not in symbols:
+            symbols.append(s)
+    out: dict = {"symbols": symbols}
+    if body.get("start_ts") is not None or body.get("end_ts") is not None:
+        start = _num("start_ts", body.get("start_ts"), int, 946684800, 4102444800)
+        end = _num("end_ts", body.get("end_ts", int(utcnow().timestamp())), int, 946684800, 4102444800)
+        if end <= start:
+            raise HTTPException(status_code=422, detail="end_ts trebuie să fie după start_ts")
+        out.update(start_ts=start, end_ts=end)
+    else:
+        out["days"] = _num("days", body.get("days", 30), int, 1, 730)
+    for k, default in (("signal_tf", st["signal_timeframe"]), ("htf_tf", st["htf_timeframe"])):
+        tf = str(body.get(k) or default).upper()
+        if tf not in TF_SECONDS:
+            raise HTTPException(status_code=422, detail=f"{k}: timeframe invalid")
+        out[k] = tf
+    if TF_SECONDS[out["htf_tf"]] <= TF_SECONDS[out["signal_tf"]]:
+        raise HTTPException(status_code=422, detail="htf_tf trebuie să fie mai mare decât signal_tf")
+    strat = body.get("strategy") or {}
+    risk = body.get("risk") or {}
+    cost = body.get("cost") or {}
+    if not all(isinstance(x, dict) for x in (strat, risk, cost)):
+        raise HTTPException(status_code=422, detail="strategy/risk/cost: obiecte JSON")
+    out["strategy"] = {}
+    for k, v in strat.items():
+        if k not in BT_STRATEGY_KEYS:
+            raise HTTPException(status_code=422, detail=f"strategy: cheie necunoscută {k}")
+        out["strategy"][k] = _num(k, v, *STRATEGY_NUM[k])
+    out["risk"] = {}
+    for k, v in risk.items():
+        if k not in BT_RISK_KEYS:
+            raise HTTPException(status_code=422, detail=f"risk: cheie necunoscută {k}")
+        out["risk"][k] = _num(k, v, *RISK_RULES[k])
+    mode = str(cost.get("mode") or "stats").lower()
+    if mode not in BT_COST_MODES:
+        raise HTTPException(status_code=422, detail="cost.mode: stats|bar|fixed")
+    out["cost"] = {"mode": mode, "commission_per_lot_usd": 7.0, "slippage_pts": 1.0}
+    for k, v in cost.items():
+        if k == "mode":
+            continue
+        if k not in BT_COST_NUM:
+            raise HTTPException(status_code=422, detail=f"cost: cheie necunoscută {k}")
+        out["cost"][k] = _num(k, v, *BT_COST_NUM[k])
+    if mode == "fixed" and "fixed_spread_pts" not in out["cost"]:
+        raise HTTPException(status_code=422, detail="cost.fixed_spread_pts necesar pentru modul fixed")
+    sess = body.get("session", "default")
+    if sess == "default" or sess is True:
+        sch = eng.rt.schedule
+        out["session"] = {"start": sch["start"], "end": sch["end"], "tz": sch["tz"], "days": list(sch["days"])}
+    elif sess in (None, False):
+        out["session"] = None
+    elif isinstance(sess, dict):
+        upd = validate_schedule_update({k: v for k, v in sess.items() if k in ("start", "end", "days", "tz")}, eng.rt.schedule)
+        out["session"] = {**{k: eng.rt.schedule[k] for k in ("start", "end", "tz", "days")}, **upd}
+    else:
+        raise HTTPException(status_code=422, detail="session: obiect, true sau null")
+    out["initial_equity"] = _num("initial_equity", body.get("initial_equity", 200), float, 1, 1e9)
+    out["risk_pct"] = _num("risk_pct", body.get("risk_pct", eng.rt.risk.get("max_risk_per_trade_pct", 0.25)), float, 0.001, 5)
+    return out
+
+
+@router.post("/backtest/run", dependencies=[Depends(require_admin)])
+async def backtest_run(request: Request):
+    eng = get_engine(request)
+    params = validate_backtest_params(await _json(request), eng)
+    return _engine_call(eng.start_backtest, params)
+
+
+@router.get("/backtest/runs")
+def backtest_runs(request: Request, limit: int = Query(30, ge=1, le=200)):
+    return get_engine(request).list_backtests(limit)
+
+
+@router.get("/backtest/runs/{run_id}")
+def backtest_run_detail(request: Request, run_id: str):
+    r = get_engine(request).get_backtest(run_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Backtest inexistent")
+    return r
