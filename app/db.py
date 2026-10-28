@@ -170,6 +170,23 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     metrics_json TEXT,
     error TEXT
 );
+CREATE TABLE IF NOT EXISTS trade_paths (
+    source TEXT NOT NULL,
+    trade_id TEXT NOT NULL,
+    symbol TEXT,
+    side TEXT,
+    ts INTEGER NOT NULL,
+    minutes REAL,
+    r_now REAL,
+    mfe_r REAL,
+    mae_r REAL,
+    price REAL,
+    atr REAL,
+    ema_dist_atr REAL,
+    spread_pts REAL,
+    PRIMARY KEY (source, trade_id, ts)
+);
+CREATE INDEX IF NOT EXISTS ix_trade_paths_ts ON trade_paths(ts);
 """
 
 # additive columns on tables that already exist in older databases: (table, column, type)

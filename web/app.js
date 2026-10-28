@@ -1046,7 +1046,10 @@ async function loadSettingsForms() {
 function renderStrategyForm() {
   const form = $('#strategy-form');
   if (!stratOrig) { form.innerHTML = emptyState('Setări de strategie indisponibile', ''); return; }
-  form.innerHTML = `<div class="form-grid">${Object.entries(stratOrig).map(([k, v]) => fieldFor(k, v, STRAT_LABELS, false)).join('')}</div>
+  const nm = $('#strategy-name');
+  if (nm) nm.textContent = `activă: ${stratOrig.name || 'trend-v1'}`;
+  form.innerHTML = `<p class="faint" style="font-size:12px;margin:0 0 10px">Strategia live: <b class="mono">${esc(stratOrig.name || 'trend-v1')}</b> — se schimbă doar manual (PUT /strategy {name}, token admin, jurnalizat ca WARN).</p>
+    <div class="form-grid">${Object.entries(stratOrig).filter(([k]) => k !== 'name').map(([k, v]) => fieldFor(k, v, STRAT_LABELS, false)).join('')}</div>
     <div class="form-actions"><button type="button" class="btn ghost" data-reset="strategy">Resetează</button><button type="submit" class="btn primary">Salvează strategia</button></div>`;
 }
 function renderScheduleForm() {
@@ -1132,7 +1135,7 @@ function initControl() {
   $('#strategy-form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     if (!stratOrig) return;
-    const r = await putSettings('/strategy', readForm(ev.target, stratOrig), 'Strategia a fost salvată');
+    const r = await putSettings('/strategy', readForm(ev.target, stratOrig, new Set(['name'])), 'Strategia a fost salvată');
     if (r) { loadSettingsForms(); S.symbolsLoadedAt = 0; }
   });
   $('#schedule-form').addEventListener('submit', async (ev) => {
@@ -1368,7 +1371,31 @@ async function loadShadow() {
 }
 
 /* ---------------- backtest page ---------------- */
-const BT = { chart: null, line: null, timer: 0, current: null, formReady: false };
+const BT = { chart: null, line: null, timer: 0, current: null, formReady: false, strategies: [], exits: [] };
+// typical standard-account spreads (points); symbols not listed use the fixed spread
+const STD_SPREADS = { EURUSD: 10, GBPUSD: 14, USDJPY: 12, USDCHF: 15, AUDUSD: 12, NZDUSD: 18, USDCAD: 16, EURJPY: 18,
+  GBPJPY: 28, EURGBP: 14, EURAUD: 25, AUDJPY: 18, EURCHF: 18, XAUUSD: 30 };
+const EXIT_LABELS = { base: 'Bază (SL/TP + BE + timp, ca live)', trailing: 'Trailing stop', partial: 'Închidere parțială', invalidation: 'Invalidare (EMA20/MACD)',
+  stall: 'Stagnare', giveback: 'Protecție profit (giveback)', combo: 'Combinație' };
+function btStrategyParams() {
+  const f = $('#bt-form'); const box = $('#bt-strat-params'); if (!f || !box) return;
+  const name = f.querySelector('[name="strategy_name"]').value;
+  const st = BT.strategies.find((x) => x.name === name) || {};
+  const ps = Object.entries(st.params || {}).filter(([, v]) => isNum(v) || typeof v === 'boolean');
+  $('#bt-strat-desc').textContent = st.description || '';
+  box.innerHTML = ps.map(([k, v]) => typeof v === 'boolean'
+    ? `<label class="check-field"><input type="checkbox" name="sp_${esc(k)}" data-sp="${esc(k)}" ${v ? 'checked' : ''}> ${esc(k)}</label>`
+    : btNum(`sp_${k}`, k, v, 'any').replace('<input ', `<input data-sp="${esc(k)}" data-int="${Number.isInteger(v) ? 1 : 0}" `)).join('');
+}
+function btExitParams() {
+  const f = $('#bt-form'); const box = $('#bt-exit-params'); if (!f || !box) return;
+  const mode = f.querySelector('[name="exit_mode"]').value;
+  const ex = BT.exits.find((x) => x.mode === mode) || { params: {} };
+  box.innerHTML = Object.entries(ex.params || {}).map(([k, v]) => Array.isArray(v)
+    ? `<label class="field">${esc(k)}<input type="text" name="ex_${esc(k)}" data-ex="${esc(k)}" data-list="1" value="${esc(v.join(','))}"><span class="hint">moduri separate prin virgulă</span></label>`
+    : btNum(`ex_${k}`, k, v, 'any').replace('<input ', `<input data-ex="${esc(k)}" `)).join('')
+    || '<span class="faint" style="font-size:12px">Folosește break-even și limita de timp din parametrii strategiei.</span>';
+}
 function btNum(name, label, value, step, hint) {
   return `<label class="field">${esc(label)}<input type="number" name="${name}" value="${esc(value ?? '')}" step="${step || 'any'}">${hint ? `<span class="hint">${esc(hint)}</span>` : ''}</label>`;
 }
@@ -1386,10 +1413,14 @@ async function renderBacktestForm() {
   await ensureSymbols();
   let risk = {};
   try { risk = await api('/risk'); } catch (e) { /* defaults */ }
+  try { BT.strategies = await api('/strategies'); } catch (e) { BT.strategies = [{ name: 'trend-v1', version: 'trend-v1', description: '', params: {} }]; }
+  try { BT.exits = await api('/exits'); } catch (e) { BT.exits = [{ mode: 'base', params: {} }]; }
   const st = (S.settings && S.settings.strategy) || {};
   const sch = (S.settings && S.settings.schedule) || {};
   const syms = (st.symbols && st.symbols.length ? st.symbols : S.symbols.map((s) => s.symbol));
   const tfOpts = ALL_TFS.map((t) => [t, t]);
+  const stratOpts = BT.strategies.map((x) => [x.name, `${x.name}${x.version && x.version !== x.name ? ' (' + x.version + ')' : ''}${x.name === (st.name || 'trend-v1') ? ' — live' : ''}`]);
+  const exitOpts = BT.exits.map((x) => [x.mode, EXIT_LABELS[x.mode] || x.mode]);
   $('#bt-form').innerHTML = `
     <div class="fieldset-title">Perechi</div>
     <div class="sym-picks">${syms.map((s) => `<label><input type="checkbox" name="sym" value="${esc(s)}" checked>${esc(s)}</label>`).join('') || '<span class="faint">Nicio pereche în setări</span>'}</div>
@@ -1401,24 +1432,48 @@ async function renderBacktestForm() {
     </div>
     <div class="fieldset-title">Strategie</div>
     <div class="form-grid">
+      ${btSelect('strategy_name', 'Strategie', st.name || 'trend-v1', stratOpts)}
       ${btNum('min_score', 'Scor minim (1–5)', st.min_score ?? 4, 1)}
       ${btNum('atr_sl_mult', 'SL × ATR', st.atr_sl_mult ?? 1.5, 0.1)}
       ${btNum('min_sl_points', 'SL minim (puncte)', st.min_sl_points ?? 60, 1)}
       ${btNum('atr_tp_mult', 'TP × ATR', st.atr_tp_mult ?? 2.5, 0.1)}
       ${btNum('max_same_currency_direction', 'Corelație max (monedă+direcție)', risk.max_same_currency_direction ?? 1, 1, '0 = fără filtru')}
     </div>
+    <p class="faint" id="bt-strat-desc" style="font-size:12px;margin:8px 0 0"></p>
+    <div class="form-grid" id="bt-strat-params"></div>
+    <div class="fieldset-title">Ieșire</div>
+    <div class="form-grid">
+      ${btSelect('exit_mode', 'Mod de ieșire', 'base', exitOpts)}
+    </div>
+    <div class="form-grid" id="bt-exit-params"></div>
     <div class="fieldset-title">Costuri</div>
     <div class="form-grid">
       ${btSelect('cost_mode', 'Spread', 'stats', [['stats', 'Statistici live (oră/simbol)'], ['bar', 'Spread din bare (minim — optimist)'], ['fixed', 'Spread fix']])}
       ${btNum('fixed_spread_pts', 'Spread fix (puncte)', 12, 1, 'folosit doar la „Spread fix”')}
       ${btNum('commission_per_lot_usd', 'Comision / lot (USD, dus-întors)', 7, 0.5)}
       ${btNum('slippage_pts', 'Slippage (puncte)', 1, 0.5)}
+      <label class="field">Spread pe simbol (puncte)<input type="text" name="sym_spreads" value="" placeholder="EURUSD:10,GBPUSD:14"><span class="hint">gol = după modul de spread ales</span></label>
     </div>
+    <div class="form-actions" style="justify-content:flex-start;margin-top:8px"><button type="button" class="btn ghost sm" id="bt-std-costs">Costuri broker standard</button>
+      <span class="faint" style="font-size:12px;align-self:center">spread tipic cont standard pe simbol, fără comision, slippage 1 punct</span></div>
     <label class="check-field" style="padding-top:14px"><input type="checkbox" name="session" checked> Doar în sesiune (${esc(sch.start || '—')}–${esc(sch.end || '—')} ${esc(sch.tz || '')})</label>
     <div class="form-actions">
       <span class="faint" style="font-size:12px;margin-right:auto;align-self:center">Rulează pe server în fundal; o singură rulare odată.</span>
       <button type="submit" class="btn primary" id="bt-run">Rulează backtest</button>
     </div>`;
+  const f = $('#bt-form');
+  f.querySelector('[name="strategy_name"]').addEventListener('change', btStrategyParams);
+  f.querySelector('[name="exit_mode"]').addEventListener('change', btExitParams);
+  $('#bt-std-costs').addEventListener('click', () => {
+    const picked = $$('input[name="sym"]', f).map((i) => i.value);
+    f.querySelector('[name="cost_mode"]').value = 'fixed';
+    f.querySelector('[name="fixed_spread_pts"]').value = 20;
+    f.querySelector('[name="commission_per_lot_usd"]').value = 0;
+    f.querySelector('[name="slippage_pts"]').value = 1;
+    f.querySelector('[name="sym_spreads"]').value = picked.map((s) => `${s}:${STD_SPREADS[s] ?? 20}`).join(',');
+    toast('Costuri broker standard aplicate', 'ok');
+  });
+  btStrategyParams(); btExitParams();
   BT.formReady = true;
 }
 function readBacktestForm() {
@@ -1429,9 +1484,25 @@ function readBacktestForm() {
   const mode = v('cost_mode');
   const cost = { mode, commission_per_lot_usd: num('commission_per_lot_usd'), slippage_pts: num('slippage_pts') };
   if (mode === 'fixed') cost.fixed_spread_pts = num('fixed_spread_pts');
+  const per = {};
+  String(v('sym_spreads') || '').split(',').map((x) => x.trim()).filter(Boolean).forEach((x) => {
+    const [k, p] = x.split(':'); const n = Number(p); if (k && Number.isFinite(n)) per[k.trim().toUpperCase()] = n;
+  });
+  if (Object.keys(per).length) cost.per_symbol_spread_pts = per;
+  const strategy = { min_score: num('min_score'), atr_sl_mult: num('atr_sl_mult'), min_sl_points: num('min_sl_points'), atr_tp_mult: num('atr_tp_mult') };
+  $$('[data-sp]', f).forEach((el) => {
+    if (el.type === 'checkbox') strategy[el.dataset.sp] = el.checked;
+    else if (el.value !== '' && Number.isFinite(Number(el.value))) strategy[el.dataset.sp] = Number(el.value);
+  });
+  const exitParams = {};
+  $$('[data-ex]', f).forEach((el) => {
+    if (el.dataset.list) exitParams[el.dataset.ex] = el.value.split(',').map((x) => x.trim()).filter(Boolean);
+    else if (el.value !== '' && Number.isFinite(Number(el.value))) exitParams[el.dataset.ex] = Number(el.value);
+  });
   return {
     symbols, days: num('days'), signal_tf: v('signal_tf'), htf_tf: v('htf_tf'),
-    strategy: { min_score: num('min_score'), atr_sl_mult: num('atr_sl_mult'), min_sl_points: num('min_sl_points'), atr_tp_mult: num('atr_tp_mult') },
+    strategy_name: v('strategy_name'), exit: { mode: v('exit_mode'), params: exitParams },
+    strategy,
     risk: { max_same_currency_direction: num('max_same_currency_direction') },
     cost, session: f.querySelector('[name="session"]').checked ? true : null,
   };
@@ -1461,9 +1532,10 @@ async function showBacktest(id) {
 function btParamsText(p) {
   if (!p) return '—';
   const st = p.strategy || {}, c = p.cost || {};
-  return [`${(p.symbols || []).join(', ')}`, p.days ? `${p.days} zile` : '', `${p.signal_tf || ''}/${p.htf_tf || ''}`,
+  const ex = p.exit || {};
+  return [`${p.strategy_name || 'trend-v1'}`, `ieșire ${ex.mode || 'base'}`, `${(p.symbols || []).join(', ')}`, p.days ? `${p.days} zile` : '', `${p.signal_tf || ''}/${p.htf_tf || ''}`,
     isNum(st.min_score) ? `scor ≥${st.min_score}` : '', isNum(st.atr_sl_mult) ? `SL ${st.atr_sl_mult}×ATR` : '',
-    isNum(st.atr_tp_mult) ? `TP ${st.atr_tp_mult}×ATR` : '', c.mode ? `spread ${c.mode}${c.mode === 'fixed' ? ' ' + c.fixed_spread_pts + 'p' : ''}` : '',
+    isNum(st.atr_tp_mult) ? `TP ${st.atr_tp_mult}×ATR` : '', c.mode ? `spread ${c.mode}${c.mode === 'fixed' ? ' ' + c.fixed_spread_pts + 'p' : ''}` : '', c.per_symbol_spread_pts ? 'spread pe simbol' : '',
     p.session ? 'în sesiune' : 'non-stop'].filter(Boolean).join(' · ');
 }
 function pick(o, keys) { for (const k of keys) { if (o && o[k] !== undefined && o[k] !== null) return o[k]; } return null; }

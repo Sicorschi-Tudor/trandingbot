@@ -10,12 +10,18 @@ Phase 1 (per symbol, parallel processes): strategy.analyze with a neutral contex
 Phase 2 (sequential, all symbols in time order): context blockers, risk checks, sizing, fills, exits.
 The split is exact because analyze() = market blockers + context_blockers(); a test pins the equivalence.
 
+Stage C research: params.strategy_name picks a plugin from app.strategies (default trend-v1 = the live engine),
+params.exit = {mode, params} an exit policy from app.exits (default base = live exits), cost.per_symbol_spread_pts
+fixed spreads per symbol, record_paths/paths_out per-trade bar paths (JSONL). run_cached() keeps phase 1 (and the
+loaded bars) in a caller-owned dict, so a sweep over exit policies only re-runs phase 2.
+
 CLI: python -m app.backtest --symbols EURUSD,GBPUSD --days 90
 """
 from __future__ import annotations
 
 import argparse
 import bisect
+import hashlib
 import json
 import math
 import os
@@ -27,6 +33,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
+from . import exits
 from . import risk as risk_mod
 from . import scheduler, strategy
 from .config import ROOT_DIR, TF_SECONDS, get_settings, iso
@@ -43,6 +50,7 @@ MAX_TRADES_OUT = 300
 MAX_CURVE_PTS = 500
 DEFAULT_COMMISSION = 7.0
 DEFAULT_SLIPPAGE = 1.0
+DEFAULT_STRATEGY = "trend-v1"
 # USD value of one unit of the quote currency when no loaded pair gives the rate (warned)
 APPROX_USD = {"EUR": 1.08, "GBP": 1.27, "JPY": 1 / 150.0, "CHF": 1.12, "CAD": 0.73, "AUD": 0.65, "NZD": 0.59,
               "SEK": 0.095, "NOK": 0.092, "SGD": 0.74, "HKD": 0.128}
@@ -106,6 +114,38 @@ def load_spread_stats(db) -> dict[tuple[str, int], float]:
     return out
 
 
+# ---- strategy plugins -----------------------------------------------------------
+
+def _registry():
+    try:
+        from . import strategies as reg  # lazy: the package is optional for trend-v1
+    except ModuleNotFoundError as e:
+        if e.name not in ("app.strategies", __package__ + ".strategies"):
+            raise
+        return None
+    return reg
+
+
+def get_plugin(name: str | None):
+    """Plugin module for a strategy name (None when the registry is missing and name is trend-v1)."""
+    name = name or DEFAULT_STRATEGY
+    reg = _registry()
+    if reg is None:
+        if name == DEFAULT_STRATEGY:
+            return None
+        raise ValueError(f"Strategie necunoscută: {name} (registrul app.strategies lipsește)")
+    try:
+        return reg.get(name)
+    except KeyError as e:
+        raise ValueError(str(e.args[0]) if e.args else f"Strategie necunoscută: {name}") from None
+
+
+def get_analyzer(name: str | None):
+    """analyze(symbol, sig_bars, htf_bars, quote, cfg, risk, ctx) of a strategy (looked up at call time)."""
+    mod = get_plugin(name)
+    return strategy.analyze if mod is None else mod.analyze
+
+
 # ---- config ---------------------------------------------------------------
 
 def resolve(db, params: dict) -> dict:
@@ -118,7 +158,16 @@ def resolve(db, params: dict) -> dict:
             for k, v in saved.items():
                 if k in cur:
                     cur[k] = v
-    strat.update(params.get("strategy") or {})
+    strategy_name = str(params.get("strategy_name") or DEFAULT_STRATEGY)
+    plugin = get_plugin(strategy_name)
+    reg = _registry()
+    if plugin is not None and reg is not None and hasattr(reg, "merged_cfg"):
+        strat = reg.merged_cfg(strategy_name, strat, params.get("strategy") or {})
+    else:
+        if plugin is not None:
+            for k, v in (getattr(plugin, "PARAMS", None) or {}).items():
+                strat.setdefault(k, v)
+        strat.update(params.get("strategy") or {})
     if params.get("signal_tf"):
         strat["signal_timeframe"] = str(params["signal_tf"]).upper()
     if params.get("htf_tf"):
@@ -151,13 +200,29 @@ def resolve(db, params: dict) -> dict:
     cost.update({k: v for k, v in (params.get("cost") or {}).items() if v is not None})
     if cost["mode"] not in ("stats", "bar", "fixed"):
         raise ValueError(f"cost.mode invalid: {cost['mode']}")
-    if cost["mode"] == "fixed" and cost.get("fixed_spread_pts") is None:
+    per_sym = {}
+    for k, v in (cost.get("per_symbol_spread_pts") or {}).items():
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"cost.per_symbol_spread_pts.{k}: număr invalid") from None
+        if not 0 <= fv <= 1000:
+            raise ValueError(f"cost.per_symbol_spread_pts.{k}: între 0 și 1000")
+        per_sym[str(k).upper()] = fv
+    cost["per_symbol_spread_pts"] = per_sym
+    if cost["mode"] == "fixed" and cost.get("fixed_spread_pts") is None and any(s_ not in per_sym for s_ in symbols):
         raise ValueError("cost.fixed_spread_pts lipsește pentru mode=fixed")
+    exit_policy = exits.ExitPolicy.from_spec(params.get("exit"))
+    if params.get("record_paths") and not params.get("paths_out"):
+        raise ValueError("record_paths necesită paths_out (cale fișier JSONL)")
     return {"strategy": strat, "risk": rsk, "schedule": sched, "symbols": symbols, "start_ts": start, "end_ts": end,
             "now_ts": now, "cost": cost, "initial_equity": float(params.get("initial_equity") or 200.0),
             "size_mode": params.get("size_mode") or "live", "halt_on_drawdown": bool(params.get("halt_on_drawdown")),
             "specs": params.get("specs") or {}, "tz": (sched or {}).get("tz") or s.DEFAULT_TIMEZONE,
-            "workers": params.get("workers")}
+            "workers": params.get("workers"), "strategy_name": strategy_name,
+            "strategy_version": getattr(plugin, "VERSION", None) if plugin is not None else strategy.STRATEGY_VERSION,
+            "exit": exit_policy, "record_paths": bool(params.get("record_paths")),
+            "paths_out": params.get("paths_out")}
 
 
 class Session:
@@ -224,6 +289,7 @@ def scan_symbol(job: dict) -> dict:
     htf_close = [b["t"] + hsec for b in htf]
     spreads = job["spreads"]
     corr = int(rsk.get("max_same_currency_direction", 1))
+    analyze = get_analyzer(job.get("strategy_name"))
     out: dict[int, tuple] = {}
     n = 0
     for i in job["idx"]:
@@ -235,8 +301,8 @@ def scan_symbol(job: dict) -> dict:
                  "digits": digits, "point": point, "stops_level": stops_level}
         ctx = strategy.AnalysisContext(session_open=True, has_bot_position=False, signals_this_session=0,
                                        tick_age=0.0, now_ts=T, open_exposures=[], corr_limit=corr)
-        a = strategy.analyze(symbol, sig[max(0, i - SIG_WINDOW + 1): i + 1], htf[max(0, k - HTF_WINDOW): k],
-                             quote, cfg, rsk, ctx)
+        a = analyze(symbol, sig[max(0, i - SIG_WINDOW + 1): i + 1], htf[max(0, k - HTF_WINDOW): k],
+                    quote, cfg, rsk, ctx)
         n += 1
         cand = a.get("candidate")
         if not cand:
@@ -405,8 +471,23 @@ def _progress(cb, frac: float, msg: str) -> None:
 # ---- main -----------------------------------------------------------------------
 
 def run(db, params: dict, progress=None) -> dict:
+    return run_cached(db, params, None, progress)
+
+
+def _digest(obj) -> str:
+    return hashlib.sha1(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
+    """run() with phase 1 (strategy analyses) and the loaded bars kept in `cache` (a dict owned by the caller, one
+    per database). Phase-1 key: strategy name + settings, risk settings, symbols, period, timeframes, session, specs
+    and the modelled spreads — so changing the exit policy, costs other than spread, sizing or equity re-runs only
+    phase 2. Without now_ts/end_ts in params the first call pins `now` in the cache (same bars on every call)."""
     t0 = time.time()
-    cfg = resolve(db, params or {})
+    params = dict(params or {})
+    if cache is not None and params.get("now_ts") is None:
+        params["now_ts"] = cache.setdefault("_now", time.time())
+    cfg = resolve(db, params)
     strat, rsk, cost = cfg["strategy"], cfg["risk"], cfg["cost"]
     tf, htf_tf = strat["signal_timeframe"], strat["htf_timeframe"]
     sec, hsec = TF_SECONDS[tf], TF_SECONDS[htf_tf]
@@ -418,11 +499,19 @@ def run(db, params: dict, progress=None) -> dict:
     # data
     sig_from = start - SIG_WINDOW * sec * 2 - 4 * 86400
     htf_from = start - int(HTF_WINDOW * hsec * 1.5) - 4 * 86400
-    series: dict[str, list[dict]] = {}
-    htfs: dict[str, list[dict]] = {}
+    data_key = ("data", tuple(cfg["symbols"]), tf, htf_tf, sig_from, htf_from, end, now)
+    data = cache.get(data_key) if cache is not None else None
+    if data is None:
+        series: dict[str, list[dict]] = {}
+        htfs: dict[str, list[dict]] = {}
+        for sym in cfg["symbols"]:
+            series[sym] = load_bars(db, sym, tf, sig_from, end, now)
+            htfs[sym] = load_bars(db, sym, htf_tf, htf_from, end, now)
+        data = (series, htfs)
+        if cache is not None:
+            cache[data_key] = data
+    series, htfs = data
     for sym in cfg["symbols"]:
-        series[sym] = load_bars(db, sym, tf, sig_from, end, now)
-        htfs[sym] = load_bars(db, sym, htf_tf, htf_from, end, now)
         n_in = sum(1 for b in series[sym] if b["t"] + sec >= start)
         if n_in == 0:
             warnings.append(f"{sym}: nicio bară {tf} în interval — simbol ignorat.")
@@ -434,9 +523,13 @@ def run(db, params: dict, progress=None) -> dict:
 
     # spreads (points) per bar
     stats = load_spread_stats(db) if cost["mode"] == "stats" else {}
+    per_sym = cost.get("per_symbol_spread_pts") or {}
     fallback_n: dict[str, int] = {}
     spreads: dict[str, list[float]] = {}
     for sym, bars in series.items():
+        if sym in per_sym:
+            spreads[sym] = [round(float(per_sym[sym]), 2)] * len(bars)
+            continue
         sp = []
         for b in bars:
             if cost["mode"] == "fixed":
@@ -453,7 +546,7 @@ def run(db, params: dict, progress=None) -> dict:
         miss = ", ".join(sorted(fallback_n))
         warnings.append(f"Statistici de spread lipsă pentru {miss} (unele ore) — folosesc spread-ul barei max(sp, 1), "
                         f"care subestimează costul (sp din MT5 este minimul barei).")
-    if cost["mode"] == "bar":
+    if cost["mode"] == "bar" and any(s_ not in per_sym for s_ in series):
         warnings.append("Cost mode 'bar': spread-ul barei (sp) este minimul din bară — costurile reale sunt mai mari.")
 
     specs = {}
@@ -463,40 +556,58 @@ def run(db, params: dict, progress=None) -> dict:
         warnings.append("Specificații simbol estimate (point/contract/lot 0.01) — trimite `specs` pentru valori exacte.")
 
     # phase 1: chunks of decisions (with their own 400/200-bar lookback) spread over worker processes
-    jobs = []
-    n_dec = 0
-    for sym, bars in series.items():
-        idx = [i for i, b in enumerate(bars)
-               if start <= b["t"] + sec <= end and i + 1 >= strategy.MIN_SIG_BARS and sess.open(b["t"] + sec)]
-        if not idx:
-            continue
-        n_dec += len(idx)
-        sp = specs[sym]
-        htf_close = [b["t"] + hsec for b in htfs[sym]]
-        for c0 in range(0, len(idx), CHUNK):
-            part = idx[c0:c0 + CHUNK]
-            lo, hi = max(0, part[0] - SIG_WINDOW + 1), part[-1] + 1
-            k_lo = max(0, bisect.bisect_right(htf_close, bars[part[0]]["t"] + sec) - HTF_WINDOW)
-            k_hi = bisect.bisect_right(htf_close, bars[part[-1]]["t"] + sec)
-            jobs.append({"symbol": sym, "strategy": strat, "risk": rsk, "point": sp["point"], "digits": sp["digits"],
-                         "stops_level": sp["stops_level"], "offset": lo, "spreads": spreads[sym][lo:hi],
-                         "idx": [i - lo for i in part],
-                         "sig": [(b["t"], b["o"], b["h"], b["l"], b["c"]) for b in bars[lo:hi]],
-                         "htf": [(b["t"], b["o"], b["h"], b["l"], b["c"]) for b in htfs[sym][k_lo:k_hi]]})
+    scan_key = None
+    if cache is not None:
+        scan_key = ("scan", cfg["strategy_name"], _digest([strat, rsk, cfg["symbols"], start, end, tf, htf_tf,
+                                                           cfg["schedule"], cfg["tz"], specs, spreads]), data_key)
+    hit = cache.get(scan_key) if scan_key is not None else None
     workers = cfg["workers"]
-    if workers is None:
-        workers = min(len(jobs), max(1, (os.cpu_count() or 2) - 1))
-    _progress(progress, 0.05, f"analizez {n_dec} bare")
-    t1 = time.time()
-    scans: dict[str, dict] = {}
-    for r in _run_scans(jobs, int(workers), warnings, progress):
-        cur = scans.setdefault(r["symbol"], {"symbol": r["symbol"], "decisions": {}, "n": 0})
-        cur["decisions"].update(r["decisions"])
-        cur["n"] += r["n"]
-    t_scan = time.time() - t1
-    _progress(progress, 0.85, "simulez execuția")
+    if hit is not None:
+        scans, scan_warnings, n_dec = hit
+        warnings.extend(scan_warnings)
+        t_scan = 0.0
+        if workers is None:
+            workers = 0
+        _progress(progress, 0.85, "analize din cache — simulez execuția")
+    else:
+        jobs = []
+        n_dec = 0
+        for sym, bars in series.items():
+            idx = [i for i, b in enumerate(bars)
+                   if start <= b["t"] + sec <= end and i + 1 >= strategy.MIN_SIG_BARS and sess.open(b["t"] + sec)]
+            if not idx:
+                continue
+            n_dec += len(idx)
+            sp = specs[sym]
+            htf_close = [b["t"] + hsec for b in htfs[sym]]
+            for c0 in range(0, len(idx), CHUNK):
+                part = idx[c0:c0 + CHUNK]
+                lo, hi = max(0, part[0] - SIG_WINDOW + 1), part[-1] + 1
+                k_lo = max(0, bisect.bisect_right(htf_close, bars[part[0]]["t"] + sec) - HTF_WINDOW)
+                k_hi = bisect.bisect_right(htf_close, bars[part[-1]]["t"] + sec)
+                jobs.append({"symbol": sym, "strategy": strat, "risk": rsk, "point": sp["point"],
+                             "digits": sp["digits"], "stops_level": sp["stops_level"], "offset": lo,
+                             "spreads": spreads[sym][lo:hi], "idx": [i - lo for i in part],
+                             "strategy_name": cfg["strategy_name"],
+                             "sig": [(b["t"], b["o"], b["h"], b["l"], b["c"]) for b in bars[lo:hi]],
+                             "htf": [(b["t"], b["o"], b["h"], b["l"], b["c"]) for b in htfs[sym][k_lo:k_hi]]})
+        if workers is None:
+            workers = min(len(jobs), max(1, (os.cpu_count() or 2) - 1))
+        _progress(progress, 0.05, f"analizez {n_dec} bare")
+        t1 = time.time()
+        scans: dict[str, dict] = {}
+        w0 = len(warnings)
+        for r in _run_scans(jobs, int(workers), warnings, progress):
+            cur = scans.setdefault(r["symbol"], {"symbol": r["symbol"], "decisions": {}, "n": 0})
+            cur["decisions"].update(r["decisions"])
+            cur["n"] += r["n"]
+        t_scan = time.time() - t1
+        if scan_key is not None:
+            cache[scan_key] = (scans, list(warnings[w0:]), n_dec)
+        _progress(progress, 0.85, "simulez execuția")
 
     # phase 2
+    t2 = time.time()
     prices = _Prices(series, sec)
     res = _simulate(cfg, series, spreads, specs, scans, sess, prices, warnings)
     trades = res["trades"]
@@ -508,6 +619,8 @@ def run(db, params: dict, progress=None) -> dict:
     warnings.append("Fără calendar economic în backtest: blocările pe știri nu sunt simulate.")
     if len(trades) < 30:
         warnings.append(f"Doar {len(trades)} tranzacții — rezultatele nu sunt semnificative statistic.")
+    if cfg["record_paths"]:
+        _write_paths(cfg["paths_out"], res.get("paths") or [])
 
     summary = summarize(trades, ci=True)
     first = min((b["t"] + sec for bars in series.values() for b in bars if b["t"] + sec >= start), default=start)
@@ -535,17 +648,30 @@ def run(db, params: dict, progress=None) -> dict:
     counts["analyses"] = sum(r["n"] for r in scans.values())
     counts["candidates"] = sum(len(r["decisions"]) for r in scans.values())
     _progress(progress, 1.0, "gata")
+    by_exit = {}
+    for t in trades:
+        by_exit[t["outcome"]] = by_exit.get(t["outcome"], 0) + 1
     return {
         "summary": summary, "by_symbol": by_symbol, "by_hour": by_hour, "equity_r": curve,
         "trades": ordered[-MAX_TRADES_OUT:], "warnings": warnings, "counts": counts,
-        "final_equity": round(res["equity"], 2),
+        "final_equity": round(res["equity"], 2), "by_outcome": by_exit,
         "params": {"symbols": cfg["symbols"], "start_utc": iso(start), "end_utc": iso(end), "signal_tf": tf,
                    "htf_tf": htf_tf, "cost": cost, "session": cfg["schedule"], "initial_equity": cfg["initial_equity"],
                    "risk_pct": rsk.get("max_risk_per_trade_pct"), "size_mode": cfg["size_mode"],
                    "strategy": {k: v for k, v in strat.items() if k != "symbols"},
-                   "risk": rsk},
-        "timing": {"total_s": round(time.time() - t0, 2), "analyze_s": round(t_scan, 2), "workers": int(workers)},
+                   "risk": rsk, "strategy_name": cfg["strategy_name"], "strategy_version": cfg["strategy_version"],
+                   "exit": cfg["exit"].to_dict()},
+        "timing": {"total_s": round(time.time() - t0, 2), "analyze_s": round(t_scan, 2), "workers": int(workers),
+                   "simulate_s": round(time.time() - t2, 2), "phase1_cached": hit is not None},
     }
+
+
+def _write_paths(path: str, rows: list[dict]) -> None:
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
 def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, sess: Session, prices: _Prices,
@@ -563,6 +689,9 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
     max_cl = int(rsk.get("max_consecutive_losses", 3))
     pause_s = int(rsk.get("loss_streak_pause_minutes", 90) or 0) * 60
     r_only = cfg["size_mode"] == "r_only"
+    policy: exits.ExitPolicy = cfg.get("exit") or exits.ExitPolicy()
+    record = bool(cfg.get("record_paths"))
+    paths: list[dict] = []
 
     equity = cfg["initial_equity"]
     peak = equity
@@ -576,6 +705,8 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
     streak, last_loss = 0, None
     counts = {"blocked_market": 0, "blocked_context": {}, "signals": 0, "risk_rejected": {}, "filled": 0,
               "skipped_gap": 0, "expired_unfilled": 0, "closed_at_end": 0}
+    if "partial" in policy.modes:
+        counts["partial_disabled_min_lot"] = 0
 
     events = []
     for s_idx, sym in enumerate(cfg["symbols"]):
@@ -589,9 +720,12 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
         sp: SimPosition = pos["sim"]
         spec = specs[sym]
         vol, tv = pos["volume"], pos["tick_value"]
-        gross = (px - sp.entry) * sp.sign / spec["tick_size"] * tv * vol
-        comm = comm_lot * vol
         risk_usd = sp.r_dist / spec["tick_size"] * tv * vol
+        if sp.closed_frac:
+            gross = sp.total_r(px) * risk_usd  # partial close: R-weighted pieces of the same volume
+        else:
+            gross = (px - sp.entry) * sp.sign / spec["tick_size"] * tv * vol
+        comm = comm_lot * vol
         net = gross - comm
         r = net / risk_usd if risk_usd > 0 else 0.0
         equity += net
@@ -608,11 +742,17 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
             "symbol": sym, "side": sp.side, "signal_t": pos["signal_t"], "entry_t": sp.opened_t, "exit_t": int(t),
             "entry": round(sp.entry, spec["digits"] + 1), "sl": pos["sl0"], "tp": sp.tp,
             "exit": round(px, spec["digits"] + 1), "outcome": reason, "r": round(r, 4),
-            "gross_r": round(sp.r_of(px), 4), "usd": round(net, 2), "commission_usd": round(comm, 2),
+            "gross_r": round(sp.total_r(px), 4), "usd": round(net, 2), "commission_usd": round(comm, 2),
             "volume": round(vol, 4), "spread_pts": pos["spread_pts"], "mfe_r": round(sp.mfe / sp.r_dist, 3),
             "mae_r": round(sp.mae / sp.r_dist, 3), "score": pos["score"],
             "entry_utc": iso(sp.opened_t), "exit_utc": iso(t),
         })
+        if sp.closed_frac:
+            trades[-1]["partial_frac"] = round(sp.closed_frac, 4)
+        if record:
+            paths.append({"source": "backtest", "trade_id": f"{sym}-{sp.opened_t}", "symbol": sym, "side": sp.side,
+                          "entry_t": sp.opened_t, "exit_t": int(t), "outcome": reason, "r": round(r, 4),
+                          "gross_r": round(sp.total_r(px), 4), "path": pos.get("path") or []})
         del book[sym]
 
     def current_streak(now_t: float) -> tuple[int, float | None]:
@@ -656,6 +796,18 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
                     counts["skipped_gap"] += 1  # broker would reject stops on the wrong side of the price
                     del book[sym]
                     continue
+                if not policy.is_base:
+                    frac = None
+                    if "partial" in policy.modes and not r_only:
+                        frac = _partial_frac(pos["volume"], policy.p["partial_frac"], spec)
+                        if frac == 0.0:
+                            counts["partial_disabled_min_lot"] += 1
+                    exits.attach(sim, policy, history=series[sym][max(0, i - exits.WARMUP_BARS):i], bar_sec=sec,
+                                 partial_frac=frac)
+                if record:
+                    if sim.ind is None:
+                        sim.ind = exits.IncIndicators().seed(series[sym][max(0, i - exits.WARMUP_BARS):i])
+                    pos["path"] = []
                 pos["sim"], pos["state"] = sim, "OPEN"
                 counts["filled"] += 1
             sim = pos["sim"]
@@ -663,8 +815,10 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
                 close(sym, pos, "SESSION_END", sim.close_price(b["o"], sp_px), b["t"])
                 continue
             hit = sim.step(b, sp_px)
+            if record:
+                _path_point(pos, sim, b, sec, sp_px, spreads[sym][i])
             if hit:
-                close(sym, pos, hit[0], hit[1], b["t"])
+                close(sym, pos, hit[0], hit[1], b["t"] + sec if hit[0] in exits.AT_CLOSE_REASONS else b["t"])
             elif max_hold > 0 and b["t"] + sec - sim.opened_t >= max_hold:
                 close(sym, pos, "TIME", sim.close_price(b["c"], sp_px), b["t"] + sec)
         # 2) decisions at the close of bar t
@@ -714,7 +868,8 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
                 if p["state"] == "PENDING":
                     open_risk += p["risk_usd"]
                 elif (p["sim"].sl - p["sim"].entry) * p["sim"].sign < 0:  # SL at/after BE risks nothing (live rule)
-                    open_risk += abs(p["sim"].entry - p["sim"].sl) / specs[s]["tick_size"] * p["tick_value"] * p["volume"]
+                    o_r = abs(p["sim"].entry - p["sim"].sl) / specs[s]["tick_size"] * p["tick_value"] * p["volume"]
+                    open_risk += o_r * (1.0 - p["sim"].closed_frac) if p["sim"].closed_frac else o_r
             info = {**spec, "bid": bar["c"], "ask": entry if side == "BUY" else bar["c"] + sp_pts * spec["point"],
                     "spread_points": sp_pts, "tick_value": tv}
             rc = risk_mod.evaluate(risk_mod.RiskContext(
@@ -752,7 +907,31 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
     if counts["risk_rejected"].get("volume_ok"):
         warnings.append(f"{counts['risk_rejected']['volume_ok']} semnale respinse: risc prea mic pentru lotul minim "
                         f"(ca în live). size_mode='r_only' le simulează în R.")
-    return {"trades": trades, "counts": counts, "equity": equity}
+    return {"trades": trades, "counts": counts, "equity": equity, "paths": paths}
+
+
+def _partial_frac(volume: float, frac: float, spec: dict) -> float:
+    """Fraction really closable after lot rounding (0.0 when either piece would be below volume_min)."""
+    step, vmin = spec["volume_step"] or 0.01, spec["volume_min"]
+    part = math.floor(volume * frac / step + 1e-9) * step
+    if part < vmin - 1e-9 or volume - part < vmin - 1e-9 or volume <= 0:
+        return 0.0
+    return part / volume
+
+
+def _path_point(pos: dict, sim: SimPosition, b: dict, sec: int, sp_px: float, sp_pts: float) -> None:
+    """Trade path row at the close of bar b (same fields as the live trade_paths table)."""
+    ind = sim.ind
+    ts = int(b["t"] + sec)
+    atr = ind.atr if ind is not None else None
+    ema = ind.ema20 if ind is not None else None
+    pos["path"].append({
+        "ts": ts, "minutes": round((ts - sim.opened_t) / 60, 2),
+        "r_now": round(sim.r_of(sim.close_price(b["c"], sp_px)), 4),
+        "mfe_r": round(sim.mfe / sim.r_dist, 4), "mae_r": round(sim.mae / sim.r_dist, 4), "price": b["c"],
+        "atr": None if atr is None else round(atr, 8),
+        "ema_dist_atr": round((b["c"] - ema) * sim.sign / atr, 4) if atr and ema is not None else None,
+        "spread_pts": sp_pts})
 
 
 # ---- CLI ------------------------------------------------------------------------
@@ -788,6 +967,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-session", action="store_true")
     ap.add_argument("--r-only", action="store_true", help="ignoră lotul minim (măsoară doar R)")
     ap.add_argument("--workers", type=int, default=None)
+    ap.add_argument("--strategy", default=DEFAULT_STRATEGY, help="numele strategiei (app.strategies)")
+    ap.add_argument("--exit", default="base", help="politica de ieșire (app.exits.MODES)")
+    ap.add_argument("--exit-params", default="{}", help='parametri JSON, ex. {"trail_start_r": 1.0}')
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     path = a.db or str(get_settings().db_path)
@@ -795,7 +977,8 @@ def main(argv: list[str] | None = None) -> int:
     params = {"days": a.days, "signal_tf": a.signal_tf, "htf_tf": a.htf_tf, "initial_equity": a.equity,
               "risk_pct": a.risk_pct, "workers": a.workers, "size_mode": "r_only" if a.r_only else "live",
               "cost": {"mode": a.cost, "fixed_spread_pts": a.spread, "commission_per_lot_usd": a.commission,
-                       "slippage_pts": a.slippage}}
+                       "slippage_pts": a.slippage},
+              "strategy_name": a.strategy, "exit": {"mode": a.exit, "params": json.loads(a.exit_params)}}
     if a.symbols:
         params["symbols"] = [x.strip().upper() for x in a.symbols.split(",") if x.strip()]
     if a.no_session:

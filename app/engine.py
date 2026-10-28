@@ -37,6 +37,9 @@ NEUTRAL_EQUITY_FRAC = 0.0005  # fallback when the initial risk is unknown: 0.05%
 DEAL_REASON = {4: "SL", 5: "TP", 3: "BOT", 0: "MANUAL", 1: "MANUAL", 2: "MANUAL", 6: "SO"}
 EQUITY_SNAPSHOT_S = 60.0
 LABEL_EVERY_S = 60.0
+DEFAULT_STRATEGY = "trend-v1"
+PATH_EVERY_S = 60  # live trade path rows: one per position per minute
+PATH_SOURCE = "live"
 
 
 class EngineError(Exception):
@@ -80,6 +83,9 @@ class Engine:
         self._last_label_ts = 0.0
         self._labeler_busy = False
         self._perf_warned: set[str] = set()
+        # live trade paths: (source, ticket) -> {"entry","risk","side","symbol","opened_ts","mfe","mae"}
+        self._paths: dict[tuple[str, str], dict] = {}
+        self._last_path_ts = 0
         self.backtests: dict[str, dict] = {}  # run id -> {"progress": 0..1}
         self._bt_lock = threading.Lock()
         self.ai.on_usage = self.record_claude_usage
@@ -88,6 +94,7 @@ class Engine:
     # ---- lifecycle -------------------------------------------------------
     def startup(self) -> None:
         self.rt.load_runtime_config()
+        self._load_strategy_name()
         self.paper.load(self.db.get_setting("paper_state"))
         self.rt.load_bars_from_db()
         s = self.settings
@@ -552,7 +559,7 @@ class Engine:
                    "explanation": "" if ai_on else "Analiza Claude este dezactivată (lipsește ANTHROPIC_API_KEY sau CLAUDE_ENABLED=false).",
                    "risks": [], "model": self.settings.CLAUDE_MODEL},
             "status": "NEW", "status_reason": "", "mode": self.mode(), "feed_label": self.settings.feed_label,
-            "strategy_version": STRATEGY_VERSION, "intent_id": None,
+            "strategy_version": a.get("strategy_version") or STRATEGY_VERSION, "intent_id": None,
             # execution context at creation: a signal never executes after a later arm/mode change
             "created_ts": time.time(), "created_mode": self.mode(),
             "created_armed": bool(self.rt.trading["execution_enabled"]),
@@ -673,6 +680,185 @@ class Engine:
             self.rt.log("WARN", "news", "Calendar economic indisponibil — blocarea intrărilor pe știri nu se aplică "
                                         "(EA fără calendar sau date mai vechi de 30 min)")
 
+    # ---- strategy registry -----------------------------------------------
+    @staticmethod
+    def strategy_registry():
+        """app.strategies (plugins) when present; None -> only the built-in trend-v1."""
+        try:
+            return importlib.import_module("app.strategies")
+        except ImportError:
+            return None
+
+    def strategy_names(self) -> list[str]:
+        reg = self.strategy_registry()
+        names = []
+        if reg is not None:
+            try:
+                names = [str(n) for n in reg.names()]
+            except Exception:
+                names = []
+        return names if DEFAULT_STRATEGY in names else [DEFAULT_STRATEGY] + names
+
+    def strategy_catalog(self) -> list[dict]:
+        out = []
+        reg = self.strategy_registry()
+        for n in self.strategy_names():
+            mod = None
+            if reg is not None:
+                try:
+                    mod = reg.get(n)
+                except Exception:
+                    mod = None
+            if mod is None:
+                out.append({"name": n, "version": STRATEGY_VERSION if n == DEFAULT_STRATEGY else "?",
+                            "description": "Trend EMA20/EMA50 + MACD + RSI, confirmat de trendul EMA50 pe HTF."
+                            if n == DEFAULT_STRATEGY else "", "params": {}})
+                continue
+            out.append({"name": str(getattr(mod, "NAME", n)), "version": str(getattr(mod, "VERSION", "")),
+                        "description": str(getattr(mod, "DESCRIPTION_RO", "")),
+                        "params": dict(getattr(mod, "PARAMS", {}) or {})})
+        return out
+
+    def _load_strategy_name(self) -> None:
+        saved = self.db.get_setting("strategy")
+        name = saved.get("name") if isinstance(saved, dict) else None
+        if not name:
+            return
+        if name in self.strategy_names():
+            self.rt.strategy["name"] = name
+            if name != DEFAULT_STRATEGY:
+                self.rt.log("WARN", "strategy", f"Strategie live activă: {name} (nu {DEFAULT_STRATEGY})")
+        else:
+            self.rt.log("WARN", "strategy", f"Strategia salvată {name} nu există — folosesc {DEFAULT_STRATEGY}")
+
+    def active_strategy_name(self) -> str:
+        return str(self.rt.strategy.get("name", DEFAULT_STRATEGY) or DEFAULT_STRATEGY)
+
+    def active_strategy(self):
+        """(name, analyze fn, cfg). trend-v1 always runs app.strategy.analyze on the live settings, unchanged."""
+        name = self.active_strategy_name()
+        if name != DEFAULT_STRATEGY:
+            reg = self.strategy_registry()
+            try:
+                mod = reg.get(name) if reg is not None else None
+            except Exception:
+                mod = None
+            if mod is not None and callable(getattr(mod, "analyze", None)):
+                # plugin defaults < live settings (same precedence as the backtest)
+                merge = getattr(reg, "merged_cfg", None)
+                cfg = (merge(name, self.rt.strategy) if callable(merge)
+                       else {**dict(getattr(mod, "PARAMS", {}) or {}), **self.rt.strategy})
+                return name, mod.analyze, cfg
+            self._perf_warn_once(f"strategy_missing:{name}", f"strategia {name} indisponibilă — folosesc {DEFAULT_STRATEGY}")
+        return DEFAULT_STRATEGY, strategy.analyze, self.rt.strategy
+
+    # ---- live trade paths -------------------------------------------------
+    def _path_positions(self) -> list[tuple[str, dict]]:
+        """Open bot-owned positions (PAPER always, DEMO when the bridge serves a demo account)."""
+        rt = self.rt
+        items = [("PAPER", p) for p in list(self.paper.positions.values())]
+        acc = rt.mt5_account or {}
+        if rt.bridge_connected() and acc.get("trade_mode") == 0:
+            for p in rt.mt5_positions:
+                if int(p.get("magic") or 0) != self.settings.MT5_MAGIC:
+                    continue
+                items.append(("MT5", {"ticket": int(p["ticket"]), "symbol": p["symbol"],
+                                      "side": "BUY" if int(p.get("type", 0)) == 0 else "SELL",
+                                      "price_open": p.get("price_open"), "sl": p.get("sl"), "opened_ts": p.get("time"),
+                                      "comment": p.get("comment")}))
+        return items
+
+    def _path_state(self, source: str, pos: dict) -> dict | None:
+        """Initial risk = |fill price - SL of the OPEN intent|; MFE/MAE resumed from rows already written."""
+        ticket = int(pos["ticket"])
+        if source == "PAPER":
+            init_sl = pos.get("initial_sl")
+            oi = self.executor.get(pos["intent_id"]) if pos.get("intent_id") else None
+            if oi and oi.get("sl"):
+                init_sl = oi["sl"]
+        else:
+            oi = self.executor.open_intent_for_ticket(ticket) or self.executor.open_intent_by_comment(pos.get("comment") or "")
+            init_sl = (oi or {}).get("sl")
+        entry = pos.get("price_open")
+        if not init_sl or not entry:
+            return None
+        risk = abs(float(entry) - float(init_sl))
+        if risk <= 0:
+            return None
+        st = {"entry": float(entry), "risk": risk, "side": pos["side"], "symbol": pos["symbol"],
+              "opened_ts": pos.get("opened_ts"), "mfe": 0.0, "mae": 0.0}
+        try:
+            r = self.db.query_one("SELECT MAX(mfe_r) AS mfe, MAX(mae_r) AS mae FROM trade_paths "
+                                  "WHERE source=? AND trade_id=? AND symbol=?", (PATH_SOURCE, str(ticket), pos["symbol"]))
+            if r and r["mfe"] is not None:
+                st["mfe"], st["mae"] = float(r["mfe"]), float(r["mae"] or 0)
+        except sqlite3.Error:
+            pass
+        return st
+
+    def _path_indicators(self, symbol: str) -> tuple[float | None, float | None]:
+        bars = self.rt.closed_bars(symbol, self.rt.strategy["signal_timeframe"])[-200:]
+        if len(bars) < 21:
+            return None, None
+        closes = [b["c"] for b in bars]
+        return (ind.last(ind.atr([b["h"] for b in bars], [b["l"] for b in bars], closes, 14)),
+                ind.last(ind.ema(closes, 20)))
+
+    def track_trade_paths(self, now: float) -> int:
+        """Every loop: MFE/MAE from the closing price (bid for BUY, ask for SELL); once per minute: one trade_paths row
+        per open bot position. R is relative to the initial risk. Never influences trading."""
+        rt = self.rt
+        ts = int(now // PATH_EVERY_S * PATH_EVERY_S)
+        write = ts != self._last_path_ts
+        max_age = float(rt.risk.get("max_tick_age_seconds", 10)) * 3
+        seen: set[tuple[str, str]] = set()
+        rows = []
+        ind_cache: dict[str, tuple] = {}
+        for source, pos in self._path_positions():
+            key = (source, str(pos["ticket"]))
+            seen.add(key)
+            q = rt.quotes.get(pos["symbol"]) or {}
+            if not q.get("bid") or not q.get("ask"):
+                continue
+            age = rt.tick_age(pos["symbol"], now)
+            if age is None or age > max_age:
+                continue
+            st = self._paths.get(key)
+            if st is None:
+                st = self._path_state(source, pos)
+                if st is None:
+                    continue
+                self._paths[key] = st
+            sign = 1 if st["side"] == "BUY" else -1
+            price = float(q["bid"] if sign > 0 else q["ask"])
+            r_now = (price - st["entry"]) * sign / st["risk"]
+            st["mfe"] = max(st["mfe"], r_now)
+            st["mae"] = max(st["mae"], -r_now)
+            if not write:
+                continue
+            if st["symbol"] not in ind_cache:
+                ind_cache[st["symbol"]] = self._path_indicators(st["symbol"])
+            atr, ema = ind_cache[st["symbol"]]
+            ema_dist = round((price - ema) * sign / atr, 4) if atr and ema is not None else None
+            minutes = round((now - float(st["opened_ts"])) / 60.0, 2) if st.get("opened_ts") else None
+            rows.append((PATH_SOURCE, key[1], st["symbol"], st["side"], ts, minutes, round(r_now, 4), round(st["mfe"], 4),
+                         round(st["mae"], 4), price, atr, ema_dist, q.get("spread_points")))
+        for k in list(self._paths):
+            if k not in seen:
+                self._paths.pop(k, None)
+        if not write:
+            return 0
+        self._last_path_ts = ts
+        if rows:
+            try:
+                self.db.executemany("INSERT OR IGNORE INTO trade_paths(source, trade_id, symbol, side, ts, minutes, r_now, "
+                                    "mfe_r, mae_r, price, atr, ema_dist_atr, spread_pts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                    rows)
+            except sqlite3.Error as e:
+                self._perf_warn_once("trade_paths_db", f"traiectorii tranzacții nesalvate: {e!r}")
+                return 0
+        return len(rows)
+
     # ---- analysis --------------------------------------------------------
     def analyze_symbol(self, symbol: str, allow_signal: bool = True) -> dict:
         rt = self.rt
@@ -688,7 +874,10 @@ class Engine:
             open_exposures=self.open_exposures("ALL"), corr_limit=int(rt.risk.get("max_same_currency_direction", 1)),
             news_block=news_block,
         )
-        a = strategy.analyze(symbol, sig_bars, htf_bars, rt.quotes.get(symbol), rt.strategy, rt.risk, ctx)
+        name, fn, cfg = self.active_strategy()
+        a = fn(symbol, sig_bars, htf_bars, rt.quotes.get(symbol), cfg, rt.risk, ctx)
+        if name != DEFAULT_STRATEGY:
+            a["strategy_version"] = name
         self.record_analysis(a)
         rt.last_analysis[symbol] = a
         rt.engine_info["last_analysis_utc"] = a["time_utc"]
@@ -1512,6 +1701,10 @@ class Engine:
             self.pm.run(now)
         except Exception as e:
             rt.log("ERROR", "positions", f"position manager: {e!r}")
+        try:
+            self.track_trade_paths(now)
+        except Exception as e:
+            self._perf_warn_once("trade_paths", f"traiectorii tranzacții: {e!r}")
         self.executor.check_timeouts(now)
         self.expire_signals()
 

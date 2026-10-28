@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import re
 import secrets
 from typing import Any
@@ -274,7 +275,7 @@ async def get_settings_view(request: Request):
     s = eng.settings
     return {
         "schedule": dict(eng.rt.schedule),
-        "strategy": dict(eng.rt.strategy),
+        "strategy": {**dict(eng.rt.strategy), "name": eng.active_strategy_name()},
         "telegram": {"enabled": bool(s.TELEGRAM_ENABLED), "configured": s.telegram_configured,
                      "thread_id_set": bool((s.TELEGRAM_MESSAGE_THREAD_ID or "").strip())},
         "ai": {"enabled": eng.ai.enabled, "model": s.CLAUDE_MODEL, "veto_enabled": s.CLAUDE_VETO_ENABLED,
@@ -292,16 +293,34 @@ async def put_schedule(request: Request):
     return dict(eng.rt.schedule)
 
 
+@router.get("/strategies")
+async def get_strategies(request: Request):
+    return get_engine(request).strategy_catalog()
+
+
 @router.put("/strategy", dependencies=[Depends(require_admin)])
 async def put_strategy(request: Request):
     eng = get_engine(request)
-    upd = validate_strategy_update(await _json(request), eng.rt.strategy)
+    body = await _json(request)
+    name = None
+    if "name" in body:
+        name = str(body.pop("name") or "").strip()
+        if name not in eng.strategy_names():
+            raise HTTPException(status_code=422, detail=f"name: strategie necunoscută {name!r} "
+                                                        f"(disponibile: {', '.join(eng.strategy_names())})")
+    upd = validate_strategy_update(body, eng.rt.strategy)
     if "signal_timeframe" in upd or "symbols" in upd:
         eng.last_analyzed_bar.clear()
+    prev = eng.active_strategy_name()
     eng.rt.strategy.update(upd)
+    if name is not None:
+        eng.rt.strategy["name"] = name  # used from the next closed bar
     eng.db.set_setting("strategy", eng.rt.strategy)
-    eng.rt.log("WARN", "control", f"Strategie actualizată: {upd}")
-    return dict(eng.rt.strategy)
+    if name is not None and name != prev:
+        eng.rt.log("WARN", "control", f"Strategia live schimbată: {prev} → {name} (se aplică de la următoarea bară)")
+    if upd:
+        eng.rt.log("WARN", "control", f"Strategie actualizată: {upd}")
+    return {**dict(eng.rt.strategy), "name": eng.active_strategy_name()}
 
 
 # ---- control -------------------------------------------------------------
@@ -475,6 +494,63 @@ BT_COST_NUM: dict[str, tuple[type, float, float]] = {
 }
 BT_STRATEGY_KEYS = ("atr_sl_mult", "atr_tp_mult", "min_sl_points", "min_score", "break_even_at_r", "max_hold_minutes")
 BT_RISK_KEYS = ("max_same_currency_direction", "max_spread_points", "max_open_positions", "max_signals_per_symbol_per_session")
+# exit policies (app/exits.py); defaults shown in the UI when the module does not publish its own
+EXIT_DEFAULTS: dict[str, dict] = {
+    "base": {},
+    "trailing": {"trail_start_r": 1.0, "trail_atr_mult": 1.5, "trail_min_r": 0.5},
+    "partial": {"partial_frac": 0.5, "partial_r": 1.0},
+    "invalidation": {"min_bars": 3},
+    "stall": {"stall_minutes": 60, "stall_band_r": 0.3},
+    "giveback": {"gb_arm_r": 1.0, "gb_frac": 0.5},
+    "combo": {"modes": ["trailing", "stall"]},
+}
+
+
+def exit_catalog() -> dict[str, dict]:
+    try:
+        ex = importlib.import_module("app.exits")
+    except ImportError:
+        return {k: dict(v) for k, v in EXIT_DEFAULTS.items()}
+    published = getattr(ex, "DEFAULT_PARAMS", None) or getattr(ex, "DEFAULTS", None)
+    modes = list(getattr(ex, "MODES", None) or EXIT_DEFAULTS)
+    out = {}
+    for m in modes:
+        d = (published or {}).get(m) if isinstance(published, dict) else None
+        out[str(m)] = dict(d) if isinstance(d, dict) else dict(EXIT_DEFAULTS.get(m, {}))
+    return out
+
+
+def validate_exit(body) -> dict:
+    if body in (None, {}):
+        return {"mode": "base", "params": {}}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="exit: obiect {mode, params}")
+    cat = exit_catalog()
+    mode = str(body.get("mode") or "base").lower()
+    if mode not in cat:
+        raise HTTPException(status_code=422, detail=f"exit.mode: unul din {', '.join(cat)}")
+    raw = body.get("params") or {}
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=422, detail="exit.params: obiect JSON")
+    params: dict = {}
+    for k, v in raw.items():
+        k = str(k)
+        if not re.match(r"^[a-z_]{1,40}$", k):
+            raise HTTPException(status_code=422, detail=f"exit.params: cheie invalidă {k}")
+        if k == "modes":
+            if not isinstance(v, list) or not v or any(str(m) not in cat or str(m) == "combo" for m in v):
+                raise HTTPException(status_code=422, detail="exit.params.modes: listă de moduri (fără combo)")
+            params[k] = [str(m) for m in v]
+        else:
+            params[k] = _num(f"exit.{k}", v, float, 0, 100000)
+    if mode == "combo" and not params.get("modes"):
+        raise HTTPException(status_code=422, detail="exit combo: params.modes necesar")
+    return {"mode": mode, "params": params}
+
+
+@router.get("/exits")
+async def get_exits():
+    return [{"mode": m, "params": p} for m, p in exit_catalog().items()]
 
 
 def validate_backtest_params(body: dict, eng: Engine) -> dict:
@@ -512,11 +588,26 @@ def validate_backtest_params(body: dict, eng: Engine) -> dict:
     cost = body.get("cost") or {}
     if not all(isinstance(x, dict) for x in (strat, risk, cost)):
         raise HTTPException(status_code=422, detail="strategy/risk/cost: obiecte JSON")
+    name = str(body.get("strategy_name") or "trend-v1").strip()
+    if name not in eng.strategy_names():
+        raise HTTPException(status_code=422, detail=f"strategy_name: strategie necunoscută {name!r}")
+    out["strategy_name"] = name
+    plugin_params = next((c.get("params") or {} for c in eng.strategy_catalog() if c["name"] == name), {})
     out["strategy"] = {}
     for k, v in strat.items():
-        if k not in BT_STRATEGY_KEYS:
+        if k in BT_STRATEGY_KEYS:
+            out["strategy"][k] = _num(k, v, *STRATEGY_NUM[k])
+        elif k in plugin_params:
+            d = plugin_params[k]
+            if isinstance(d, bool):
+                out["strategy"][k] = _bool(k, v)
+            elif isinstance(d, (int, float)):
+                out["strategy"][k] = _num(k, v, int if isinstance(d, int) else float, -1e6, 1e6)
+            else:
+                raise HTTPException(status_code=422, detail=f"strategy: parametrul {k} nu poate fi modificat")
+        else:
             raise HTTPException(status_code=422, detail=f"strategy: cheie necunoscută {k}")
-        out["strategy"][k] = _num(k, v, *STRATEGY_NUM[k])
+    out["exit"] = validate_exit(body.get("exit"))
     out["risk"] = {}
     for k, v in risk.items():
         if k not in BT_RISK_KEYS:
@@ -529,10 +620,23 @@ def validate_backtest_params(body: dict, eng: Engine) -> dict:
     for k, v in cost.items():
         if k == "mode":
             continue
+        if k == "per_symbol_spread_pts":
+            if not isinstance(v, dict) or len(v) > 50:
+                raise HTTPException(status_code=422, detail="cost.per_symbol_spread_pts: obiect {simbol: puncte}")
+            sp = {}
+            for sym, pts in v.items():
+                sym = str(sym).strip().upper()
+                if not SYMBOL_RE.match(sym):
+                    raise HTTPException(status_code=422, detail=f"simbol invalid: {sym}")
+                sp[sym] = _num(f"spread {sym}", pts, float, 0, 10000)
+            if sp:
+                out["cost"][k] = sp
+            continue
         if k not in BT_COST_NUM:
             raise HTTPException(status_code=422, detail=f"cost: cheie necunoscută {k}")
         out["cost"][k] = _num(k, v, *BT_COST_NUM[k])
-    if mode == "fixed" and "fixed_spread_pts" not in out["cost"]:
+    if mode == "fixed" and "fixed_spread_pts" not in out["cost"] and \
+            any(s not in out["cost"].get("per_symbol_spread_pts", {}) for s in symbols):
         raise HTTPException(status_code=422, detail="cost.fixed_spread_pts necesar pentru modul fixed")
     sess = body.get("session", "default")
     if sess == "default" or sess is True:

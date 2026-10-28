@@ -53,6 +53,13 @@ class SimPosition:
     mfe: float = 0.0  # price distance, favourable
     mae: float = 0.0  # price distance, adverse
     extra: dict = field(default_factory=dict)
+    # Stage C exit policies (app/exits.py): None = base behaviour (code path below, unchanged)
+    exit: object = None
+    ind: object = None  # exits.IncIndicators updated with every bar (policies / trade paths); never changes base exits
+    xs: dict = field(default_factory=dict)
+    bar_sec: int = 60
+    closed_frac: float = 0.0  # fraction already closed (partial exit)
+    realized_r: float = 0.0  # R booked by partial closes (weighted by their fraction)
 
     def __post_init__(self) -> None:
         self.sign = 1 if self.side == "BUY" else -1
@@ -65,8 +72,27 @@ class SimPosition:
     def r_of(self, price: float) -> float:
         return (price - self.entry) * self.sign / self.r_dist if self.r_dist > 0 else 0.0
 
+    def total_r(self, price: float) -> float:
+        """R of the whole position when the rest closes at `price` (partial closes included)."""
+        if not self.closed_frac:
+            return self.r_of(price)
+        return self.realized_r + (1.0 - self.closed_frac) * self.r_of(price)
+
+    def book_partial(self, frac: float, price: float) -> None:
+        frac = min(frac, 1.0 - self.closed_frac)
+        self.realized_r += frac * self.r_of(price)
+        self.closed_frac += frac
+
     def step(self, bar: dict, spread_px: float) -> tuple[str, float] | None:
         """Process one bar (t,o,h,l,c). Returns (reason, exit_price) when the position closes in this bar."""
+        if self.ind is not None:
+            self.ind.update(bar)
+        if self.exit is not None:
+            from .exits import step as exit_step
+            return exit_step(self, bar, spread_px)
+        return self._step_base(bar, spread_px)
+
+    def _step_base(self, bar: dict, spread_px: float) -> tuple[str, float] | None:
         sg = self.sign
         if sg > 0:
             lo, hi, op = bar["l"], bar["h"], bar["o"]
@@ -101,9 +127,11 @@ class SimPosition:
 
 
 def simulate(side: str, sl: float, tp: float, bars: list[dict], point: float, decision_ts: float, cfg: dict,
-             now_ts: float, slip_px: float = 0.0, spread_fn=None) -> dict | None:
+             now_ts: float, slip_px: float = 0.0, spread_fn=None, exit_policy=None) -> dict | None:
     """Label one setup from bars after the decision. Returns dict(outcome, outcome_r, mfe_r, mae_r, entry, exit, ...)
-    or None while unresolved. spread_fn(bar) -> spread in price (default: bar sp × point)."""
+    or None while unresolved. spread_fn(bar) -> spread in price (default: bar sp × point).
+    exit_policy: exits.ExitPolicy / {mode, params} (default base); its indicators are seeded with the bars before
+    the decision that `bars` contains (closed bars only)."""
     spread_fn = spread_fn or (lambda b: float(b.get("sp") or 0) * point)
     tf_sec = int(cfg.get("_bar_sec") or 60)
     max_hold = int(cfg.get("max_hold_minutes") or 0) * 60
@@ -117,6 +145,10 @@ def simulate(side: str, sl: float, tp: float, bars: list[dict], point: float, de
     entry = eb["o"] + (sp0 if side == "BUY" else 0.0)
     pos = SimPosition(side, entry, sl, tp, point, int(eb["t"]), be_at_r=be_r, slip_px=slip_px,
                       stops_px=float(cfg.get("_stops_px") or 0))
+    if exit_policy:
+        from .exits import WARMUP_BARS, ExitPolicy, attach
+        before = [b for b in bars if b["t"] < decision_ts][-WARMUP_BARS:]
+        attach(pos, ExitPolicy.from_spec(exit_policy), history=before, bar_sec=tf_sec)
     if not pos.valid or (tp - entry) * pos.sign <= 0:
         # the market opened beyond the stop (or the target): nothing tradeable at these levels
         return {"outcome": "SL" if not pos.valid else "TP", "outcome_r": -1.0 if not pos.valid else 0.0,
@@ -144,7 +176,7 @@ def simulate(side: str, sl: float, tp: float, bars: list[dict], point: float, de
 
 
 def _result(pos: SimPosition, reason: str, px: float, t: int) -> dict:
-    return {"outcome": reason, "outcome_r": round(pos.r_of(px), 4), "mfe_r": round(pos.mfe / pos.r_dist, 4),
+    return {"outcome": reason, "outcome_r": round(pos.total_r(px), 4), "mfe_r": round(pos.mfe / pos.r_dist, 4),
             "mae_r": round(pos.mae / pos.r_dist, 4), "entry": pos.entry, "exit": px, "entry_t": pos.opened_t,
             "exit_t": t, "gap": False}
 
