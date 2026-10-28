@@ -36,7 +36,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 
-MODES = ("base", "trailing", "partial", "invalidation", "stall", "giveback", "channel", "signal_flip", "combo")
+MODES = ("base", "trailing", "partial", "invalidation", "stall", "giveback", "channel", "signal_flip", "rescue", "combo")
 DEFAULT_PARAMS: dict[str, dict] = {
     "base": {},
     "trailing": {"trail_start_r": 1.0, "trail_atr_mult": 1.5, "trail_min_r": 0.5},
@@ -46,6 +46,8 @@ DEFAULT_PARAMS: dict[str, dict] = {
     "giveback": {"gb_arm_r": 1.0, "gb_frac": 0.5},
     "channel": {"channel_n": 20},
     "signal_flip": {"flip_on_flat": 0},
+    # long time under water, then exit at the first small profit
+    "rescue": {"rescue_minutes": 30, "rescue_mae_r": 0.5, "rescue_neg_frac": 0.6, "rescue_close_r": 0.05},
     "combo": {"modes": ["trailing", "stall"]},
 }
 AT_CLOSE_REASONS = ("INVALIDATION", "STALL", "GIVEBACK", "CHANNEL", "FLIP")  # exits at the bar close (time = bar end)
@@ -202,7 +204,7 @@ def attach(pos, policy: ExitPolicy | None, history: list[dict] | None = None, ba
         pos.ind = IncIndicators().seed(history or [])
     frac = policy.p.get("partial_frac", 0.0) if partial_frac is None else partial_frac
     pos.xs = {"bars": 0, "best": None, "trailed": False, "partial_frac": float(frac) if "partial" in policy.modes else 0.0,
-              "partial_done": False, "be_pending": False, "stall_checked": False}
+              "partial_done": False, "be_pending": False, "stall_checked": False, "neg_bars": 0, "rescue_armed": False}
     if "channel" in policy.modes:
         n = int(policy.p["channel_n"])
         pos.xs["chan_n"] = n
@@ -255,6 +257,9 @@ def step(pos, bar: dict, spread_px: float) -> tuple[str, float] | None:
     hit_tp = hi >= pos.tp if sg > 0 else lo <= pos.tp
     if hit_tp:
         return "TP", pos.tp
+    # rescue: armed by previous closed bars only; exits intrabar at the small profit level
+    if xs.get("rescue_armed") and r_dist > 0 and favour >= p["rescue_close_r"] * r_dist:
+        return "RESCUE", pos.entry + sg * p["rescue_close_r"] * r_dist
     if pos.be_at_r > 0 and not pos.be_done and r_dist > 0 and favour >= pos.be_at_r * r_dist - pos.point / 2:
         _try_be(pos, fav_px, spread_px)
     if xs["be_pending"] and not pos.be_done:
@@ -276,6 +281,14 @@ def step(pos, bar: dict, spread_px: float) -> tuple[str, float] | None:
         xs["stall_checked"] = True
         if -p["stall_band_r"] <= r_now <= p["stall_band_r"]:
             return "STALL", cpx
+    if "rescue" in modes and r_dist > 0:
+        if r_now < 0:
+            xs["neg_bars"] += 1
+        elapsed = bar["t"] + pos.bar_sec - pos.opened_t
+        xs["rescue_armed"] = (elapsed >= p["rescue_minutes"] * 60 and pos.mae / r_dist >= p["rescue_mae_r"]
+                              and xs["neg_bars"] / max(1, xs["bars"]) >= p["rescue_neg_frac"])
+        if xs["rescue_armed"] and r_now >= p["rescue_close_r"]:
+            return "RESCUE", cpx
     if "giveback" in modes and r_dist > 0:
         mfe_r = pos.mfe / r_dist
         if mfe_r >= p["gb_arm_r"] and r_now <= mfe_r * (1 - p["gb_frac"]):
