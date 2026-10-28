@@ -19,6 +19,7 @@ from .ai_claude import ClaudeReviewer
 from .config import STRATEGY_VERSION, TF_SECONDS, VERSION, Settings, iso, parse_iso, utcnow
 from .db import DB
 from .executor import Executor
+from .forward import ForwardRunner
 from .paper import PaperBroker
 from .position_manager import PositionManager
 from .simfeed import SimFeed
@@ -90,6 +91,8 @@ class Engine:
         self._bt_lock = threading.Lock()
         self.ai.on_usage = self.record_claude_usage
         self.rt.quote_hooks.append(self._on_quote)
+        # forward tests (PAPER, simulated only): own book, never intents/bridge commands
+        self.forward = ForwardRunner(self)
 
     # ---- lifecycle -------------------------------------------------------
     def startup(self) -> None:
@@ -108,6 +111,10 @@ class Engine:
         if not s.ADMIN_TOKEN:
             self.rt.log("WARN", "engine", "ADMIN_TOKEN nu este setat — acțiunile de administrare sunt blocate")
         self._perf_startup()
+        try:
+            self.forward.startup()
+        except Exception as e:
+            self.rt.log("ERROR", "forward", f"teste forward neîncărcate: {e!r}")
 
     async def start(self) -> None:
         if self.sim:
@@ -1697,6 +1704,10 @@ class Engine:
             self._perf_warn_once("trade_paths", f"traiectorii tranzacții: {e!r}")
         self.executor.check_timeouts(now)
         self.expire_signals()
+        try:
+            self.forward.tick(now)
+        except Exception as e:
+            self._perf_warn_once("forward", f"teste forward: {e!r}")
 
     async def _loop(self) -> None:
         while True:

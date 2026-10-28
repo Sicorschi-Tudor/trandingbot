@@ -11,16 +11,21 @@ get()/merged_cfg()/describe() and the backtest, but names() lists them only with
 engine and the UI keep offering just the intraday set (they run on the live signal timeframe and session, which
 these plugins are not built for). Optional module hooks used by app.backtest: RUN_DEFAULTS (backtest-only
 defaults), default_exit(cfg) (exit policy when the run gives none) and bias(symbol, sig_bars, htf_bars, cfg)
-(direction on closed bars, for the 'signal_flip' exit)."""
+(direction on closed bars, for the 'signal_flip' exit).
+
+Forward-test plugins (fade-v1: exact mirror of trend-v1, paper/backtest only) are reachable through get()/merged_cfg()/
+describe() and listed by forward_names(); they are in neither names() nor research_names(), so the live engine, the UI
+and the API backtest list never offer them."""
 from __future__ import annotations
 
 from types import ModuleType
 
-from . import breakout_v1, donchian_v1, ma_trend_v1, meanrev_v1, pullback_v1, trend_v1, tsmom_v1
+from . import breakout_v1, donchian_v1, fade_v1, ma_trend_v1, meanrev_v1, pullback_v1, trend_v1, tsmom_v1
 
 DEFAULT = "trend-v1"
 _REGISTRY: dict[str, ModuleType] = {m.NAME: m for m in (trend_v1, meanrev_v1, breakout_v1, pullback_v1)}
 _RESEARCH: dict[str, ModuleType] = {m.NAME: m for m in (donchian_v1, ma_trend_v1, tsmom_v1)}
+_FORWARD: dict[str, ModuleType] = {m.NAME: m for m in (fade_v1,)}
 
 
 def names(include_research: bool = False) -> list[str]:
@@ -31,11 +36,15 @@ def research_names() -> list[str]:
     return list(_RESEARCH)
 
 
+def forward_names() -> list[str]:
+    return list(_FORWARD)
+
+
 def get(name: str | None) -> ModuleType:
     key = name or DEFAULT
-    mod = _REGISTRY.get(key) or _RESEARCH.get(key)
+    mod = _REGISTRY.get(key) or _RESEARCH.get(key) or _FORWARD.get(key)
     if mod is None:
-        raise KeyError(f"Strategie necunoscută: {key} (disponibile: {', '.join(names(True))})")
+        raise KeyError(f"Strategie necunoscută: {key} (disponibile: {', '.join(names(True) + forward_names())})")
     return mod
 
 
@@ -46,7 +55,7 @@ def merged_cfg(name: str | None, live: dict | None, overrides: dict | None = Non
 def describe() -> list[dict]:
     """[{name, version, description, params}] for GET /api/v1/strategies."""
     return [{"name": m.NAME, "version": m.VERSION, "description": m.DESCRIPTION_RO, "params": dict(m.PARAMS)}
-            for m in (*_REGISTRY.values(), *_RESEARCH.values())]
+            for m in (*_REGISTRY.values(), *_RESEARCH.values(), *_FORWARD.values())]
 
 
-__all__ = ["DEFAULT", "names", "research_names", "get", "merged_cfg", "describe"]
+__all__ = ["DEFAULT", "names", "research_names", "forward_names", "get", "merged_cfg", "describe"]

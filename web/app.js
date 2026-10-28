@@ -1291,7 +1291,7 @@ function setLine(holder, overlayId, pts, emptyT, emptyM, fmt) {
 async function enterPerformance() {
   $$('#pf-days button').forEach((b) => b.classList.toggle('active', Number(b.dataset.days) === PF.days));
   ensureLineChart(PF, 'pf-chart');
-  await Promise.all([loadPerformance(), loadShadow()]);
+  await Promise.all([loadPerformance(), loadShadow(), loadForward()]);
 }
 async function loadPerformance() {
   const seq = ++PF.seq;
@@ -1368,6 +1368,102 @@ async function loadShadow() {
     <div class="fieldset-title" style="padding:0 12px">Pe tip de blocaj (un candidat poate avea mai multe)</div>${shadowTable(d.by_blocker, 'Blocaj')}
     <div class="fieldset-title" style="padding:0 12px">Pe verdict Claude (doar semnale)</div>${shadowTable(d.by_ai_verdict, 'Verdict', verdictKey)}
     <p class="faint" style="font-size:12px;margin:10px 12px 0">Simulare pe bare închise: intrare la deschiderea barei următoare + spread mediu live pe oră (sau minimul barei, minim 1 punct), 1 punct alunecare la stop, aceeași regulă SL/TP/BE/timp ca live; la ambiguitate în aceeași bară se consideră SL. R brut = fără comision. HORIZON = fără time stop live, evaluat la 24 h. Valoarea unui filtru = R-ul pe care îl evită (R mediu negativ = filtrul ajută).</p>`;
+}
+
+/* ---------------- forward tests (PAPER, simulated) ---------------- */
+const FW = { charts: {}, seq: 0 };
+const FW_VERDICT_CLS = { 'ÎN CURS': 'info', 'PROMIȚĂTOR': 'ok', 'RESPINS': 'bad' };
+const FW_REASON = { SL: 'bad', TP: 'ok', TIME: '' };
+function fwCheckVal(c) {
+  if (!isNum(c.value)) return '—';
+  if (c.key === 'min_trades') return `${c.value} / ${c.threshold}`;
+  if (c.key === 'max_weeks') return `${fmtNum(c.value, 1)} / ${fmtNum(c.threshold, 0)}`;
+  return c.key === 'pf_gt' ? fmtNum(c.value, 2) : fmtSigned(c.value, 3);
+}
+function fwChecklist(t) {
+  const rows = (t.checks || []).map((c) => {
+    const gate = c.key === 'min_trades' || c.key === 'max_weeks';
+    const mark = c.ok ? '<span class="badge ok">✓</span>' : `<span class="badge ${gate ? '' : 'bad'}">${gate ? '…' : '✗'}</span>`;
+    const thr = gate ? '' : ` ${fmtNum(c.threshold, 2)}`;
+    return `<li class="fw-check">${mark}<span>${esc(c.label)}${esc(thr)}</span><span class="v">${fwCheckVal(c)}</span></li>`;
+  }).join('');
+  const frozen = t.decision ? `<p class="faint" style="font-size:12px;margin:6px 0 0">Verdict înghețat la ${esc(t.decision.trades_count)} tranzacții (${fmtDT(t.decision.decided_utc)}); statisticile de după sunt doar informative.</p>` : '';
+  return `<ul class="fw-checks">${rows}</ul>${frozen}
+    <p class="faint" style="font-size:12px;margin:6px 0 0">Verdictul se decide doar la ${esc(t.criteria && t.criteria.min_trades)} tranzacții sau după ${esc(t.criteria && t.criteria.max_weeks)} săptămâni; până atunci rămâne „ÎN CURS”.</p>`;
+}
+function fwOpenTable(t) {
+  const list = t.open || [];
+  if (!list.length) return emptyState('Nicio poziție simulată deschisă', '');
+  const rows = list.map((p) => `<tr><td><b>${esc(p.symbol)}</b></td><td>${sideBadge(p.side)}</td><td class="num">${fmtPrice(p.entry, p.symbol)}</td>
+    <td class="num">${fmtPrice(p.sl, p.symbol)}</td><td class="num">${fmtPrice(p.tp, p.symbol)}</td><td class="num">${fmtPrice(p.price, p.symbol)}</td>
+    <td class="num ${pnlCls(p.r_now)}">${fmtR(p.r_now)}</td><td class="num">${fmtDTs(p.opened_utc)}</td><td class="num">${fmtNum(p.minutes, 0)} min</td></tr>`).join('');
+  return table(['Simbol', 'Direcție', { t: 'Intrare', cls: 'num' }, { t: 'SL', cls: 'num' }, { t: 'TP', cls: 'num' }, { t: 'Preț', cls: 'num' },
+    { t: 'R acum', cls: 'num' }, { t: 'Deschis', cls: 'num' }, { t: 'Durată', cls: 'num' }], rows);
+}
+function fwTradesTable(t) {
+  const list = t.last_trades || [];
+  if (!list.length) return emptyState('Nicio tranzacție simulată încă', '');
+  const rows = list.map((r) => `<tr><td class="num">${fmtDTs(r.opened_utc)}</td><td class="num">${fmtDTs(r.closed_utc)}</td><td><b>${esc(r.symbol)}</b></td>
+    <td>${sideBadge(r.side)}</td><td><span class="badge ${FW_REASON[r.reason] ?? ''}">${esc(r.reason || '—')}</span></td>
+    <td class="num">${fmtPrice(r.entry, r.symbol)} → ${fmtPrice(r.exit_price, r.symbol)}</td>
+    <td class="num ${pnlCls(r.r)}">${fmtR(r.r)}</td><td class="num ${pnlCls(r.r_adj)}"><b>${fmtR(r.r_adj)}</b></td>
+    <td class="num ${pnlCls(r.usd_adj)}">${fmtSigned(r.usd_adj)}</td></tr>`).join('');
+  return table(['Intrare', 'Ieșire', 'Simbol', 'Direcție', 'Motiv', { t: 'Preț', cls: 'num' }, { t: 'R (demo)', cls: 'num' },
+    { t: 'R ajustat', cls: 'num' }, { t: 'USD ajustat', cls: 'num' }], rows);
+}
+function fwCard(t, i) {
+  const c = t.config || {};
+  const syms = Array.isArray(c.symbols) ? c.symbols.join(', ') : 'simbolurile active';
+  const tiles = [
+    kpiTile('Tranzacții', String(t.trades_count ?? 0), `${(t.open || []).length} deschise · ${fmtNum(t.weeks_elapsed, 1)} săpt.`),
+    kpiTile('Rată câștig', fmtPct(t.win_rate, 1), 'R ajustat &gt; 0'),
+    kpiTile('R mediu ajustat', fmtR(t.avg_r_adj, 3), `<span class="ci">${fmtCi(t.ci90_adj)}</span>`, pnlCls(t.avg_r_adj)),
+    kpiTile('Profit factor ajustat', isNum(t.pf_adj) ? fmtNum(t.pf_adj, 2) : '—', `Σ ${fmtR(t.sum_r_adj, 1)}`),
+    kpiTile('Rezultat ajustat', isNum(t.usd_adj) ? fmtSigned(t.usd_adj) + ' USD' : '—', `la ${fmtUsd(c.equity, 0)} × ${fmtNum(c.risk_pct, 2)}% risc (fără lot minim)`, pnlCls(t.usd_adj)),
+  ];
+  return `<div class="fw-test" data-fw="${esc(t.name)}">
+    <div class="fw-head">
+      <div><h3>${esc(t.name)} <span class="badge violet">${esc(t.strategy)}</span> <span class="badge ${FW_VERDICT_CLS[t.verdict] || ''} lg">${esc(t.verdict)}</span></h3>
+        <div class="sub">${esc(c.signal_tf)}/${esc(c.htf_tf)} · ${esc(syms)} · limită de timp ${fmtNum(c.time_stop_minutes, 0)} min · pornit ${fmtDT(t.started_utc)}</div></div>
+      <button class="btn" data-fw-reset="${esc(t.name)}">Resetează</button>
+    </div>
+    <div class="grid g-5">${tiles.join('')}</div>
+    <div class="fw-grid">
+      <div><div class="fieldset-title">Criterii (pre-înregistrate)</div>${fwChecklist(t)}</div>
+      <div><div class="fieldset-title">Curba în R ajustat (cumulat)</div>
+        <div class="chart-box mini" id="fw-chart-${i}"><div class="chart-overlay hidden" id="fw-chart-ov-${i}"></div></div></div>
+    </div>
+    <div class="fieldset-title">Poziții simulate deschise</div><div class="tbl-box">${fwOpenTable(t)}</div>
+    <div class="fieldset-title">Ultimele 20 de tranzacții simulate</div><div class="tbl-box">${fwTradesTable(t)}</div>
+  </div>`;
+}
+async function loadForward() {
+  const box = $('#fw-body');
+  if (!box) return;
+  const seq = ++FW.seq;
+  let list;
+  try { list = await api('/forward'); } catch (e) { box.innerHTML = emptyState('Testele forward sunt indisponibile', ' ' + (e.detail || e.message)); return; }
+  if (seq !== FW.seq) return;
+  Object.values(FW.charts).forEach((h) => { try { h.chart && h.chart.remove(); } catch (x) { /* ignore */ } });
+  FW.charts = {};
+  list = Array.isArray(list) ? list : [];
+  $('#fw-count').textContent = list.length ? `${list.length} test${list.length > 1 ? 'e' : ''}` : '';
+  if (!list.length) {
+    box.innerHTML = emptyState('Niciun test forward configurat', ' Setează FORWARD_TESTS în .env (ex. fade-v1 pe H1/H4) și repornește serverul.');
+    return;
+  }
+  box.innerHTML = list.map(fwCard).join('');
+  list.forEach((t, i) => {
+    const h = { chart: null, line: null };
+    FW.charts[i] = h;
+    ensureLineChart(h, `fw-chart-${i}`);
+    setLine(h, `fw-chart-ov-${i}`, t.equity_curve_adj || [], 'Prea puține tranzacții pentru curbă', 'Curba apare după 2 tranzacții închise.', { type: 'price', precision: 2, minMove: 0.01 });
+  });
+}
+async function resetForward(name, btn) {
+  if (!confirm(`Resetezi testul forward „${name}”? Toate tranzacțiile și pozițiile SIMULATE ale testului se șterg, iar ceasul pornește din nou.`)) return;
+  const d = await act('/forward/reset', { name, confirm: 'RESET' }, `Testul ${name} a fost resetat`, btn);
+  if (d) loadForward();
 }
 
 /* ---------------- backtest page ---------------- */
@@ -1860,7 +1956,11 @@ function init() {
     $$('#pf-days button').forEach((x) => x.classList.toggle('active', x === b));
     loadPerformance(); loadShadow();
   });
-  $('#pf-refresh').addEventListener('click', () => { loadPerformance(); loadShadow(); });
+  $('#pf-refresh').addEventListener('click', () => { loadPerformance(); loadShadow(); loadForward(); });
+  $('#fw-body').addEventListener('click', (ev) => {
+    const b = ev.target.closest('[data-fw-reset]');
+    if (b) resetForward(b.dataset.fwReset, b);
+  });
   $('#bt-form').addEventListener('submit', runBacktest);
   $('#bt-runs').addEventListener('click', (ev) => { const tr = ev.target.closest('tr[data-bt]'); if (tr) showBacktest(tr.dataset.bt); });
   $('#log-refresh').addEventListener('click', loadLogs);

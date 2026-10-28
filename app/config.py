@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     ARCHIVE_EXTRA_WITH_POSITIONS: bool = False
     # broker server-time DST rule for archive bars (EA v1.12+): auto | EET | NY | fixed | IANA zone name
     MT5_SERVER_TZ: str = "auto"
+    # forward tests (PAPER, simulated only — never send orders): JSON list of
+    # {name, strategy, signal_tf, htf_tf, symbols, risk_pct, equity, criteria}; settings key 'forward_tests' overrides
+    FORWARD_TESTS: str = "[]"
 
     @property
     def db_path(self) -> Path:

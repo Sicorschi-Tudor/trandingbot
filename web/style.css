@@ -432,3 +432,17 @@ dialog.modal::backdrop { background: rgba(5, 8, 12, .6); backdrop-filter: blur(2
 #bt-strat-params:empty { display: none; }
 #bt-strat-params, #bt-exit-params { margin-top: 10px; }
 #bt-strat-desc:empty { display: none; }
+
+/* ---------- forward tests (PAPER, simulated) ---------- */
+.fw-panel { border-color: var(--warn-soft); }
+#fw-body { padding: 4px 12px 12px; }
+.fw-test + .fw-test { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--border); }
+.fw-head { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; margin-bottom: 12px; }
+.fw-head h3 { margin: 0; font-size: 16px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.fw-head .sub { margin-top: 4px; }
+.fw-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 16px; margin-top: 12px; }
+@media (max-width: 1100px) { .fw-grid { grid-template-columns: minmax(0, 1fr); } }
+.fw-checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.fw-check { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 13px; }
+.fw-check .badge { justify-content: center; }
+.fw-check .v { font-family: var(--mono); font-size: 12px; color: var(--text-dim); white-space: nowrap; }

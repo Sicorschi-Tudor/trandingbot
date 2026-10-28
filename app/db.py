@@ -187,6 +187,48 @@ CREATE TABLE IF NOT EXISTS trade_paths (
     PRIMARY KEY (source, trade_id, ts)
 );
 CREATE INDEX IF NOT EXISTS ix_trade_paths_ts ON trade_paths(ts);
+CREATE TABLE IF NOT EXISTS forward_meta (
+    name TEXT PRIMARY KEY,
+    started_ts REAL NOT NULL,
+    config_json TEXT,
+    decided_json TEXT
+);
+CREATE TABLE IF NOT EXISTS forward_positions (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    entry REAL NOT NULL,
+    sl REAL NOT NULL,
+    tp REAL NOT NULL,
+    opened_ts REAL NOT NULL,
+    bar_time INTEGER,
+    point REAL,
+    digits INTEGER,
+    spread_pts REAL,
+    std_spread_pts REAL,
+    data_json TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_forward_positions_name ON forward_positions(name);
+CREATE TABLE IF NOT EXISTS forward_trades (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    entry REAL NOT NULL,
+    sl REAL NOT NULL,
+    tp REAL NOT NULL,
+    opened_ts REAL NOT NULL,
+    closed_ts REAL NOT NULL,
+    exit_price REAL,
+    reason TEXT,
+    r REAL,
+    r_adj REAL,
+    usd_adj REAL,
+    bar_time INTEGER,
+    data_json TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_forward_trades_name ON forward_trades(name, closed_ts);
 """
 
 # additive columns on tables that already exist in older databases: (table, column, type)
@@ -198,6 +240,7 @@ ADDED_COLUMNS = [
     ("trades", "r_multiple", "REAL"),
     ("signals", "account_key", "TEXT"),
     ("intents", "account_key", "TEXT"),
+    ("forward_meta", "decided_json", "TEXT"),
 ]
 
 

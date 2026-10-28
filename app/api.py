@@ -697,3 +697,21 @@ def backtest_run_detail(request: Request, run_id: str):
     if not r:
         raise HTTPException(status_code=404, detail="Backtest inexistent")
     return r
+
+
+# ---- forward tests (PAPER, simulated only — never orders) ----------------
+@router.get("/forward")
+def get_forward(request: Request):
+    return get_engine(request).forward.payload()
+
+
+@router.post("/forward/reset", dependencies=[Depends(require_admin)])
+async def forward_reset(request: Request):
+    body = await _json(request)
+    name = str(body.get("name") or "").strip()
+    fwd = get_engine(request).forward
+    if not name or fwd.test(name) is None:
+        raise HTTPException(status_code=404, detail=f"Test forward inexistent: {name or '—'}")
+    if body.get("confirm") != "RESET":
+        raise HTTPException(status_code=400, detail='Confirmare necesară: {"name":"...","confirm":"RESET"}')
+    return fwd.reset(name)
