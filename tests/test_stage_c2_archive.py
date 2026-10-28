@@ -305,3 +305,10 @@ def test_d1_h4_bars_keep_broker_day_boundary(tmp_path):
     assert [b["t"] for b in bars] == got
     assert load_bars(eng.db, "EURUSD", "D1", 0, 2**31, now_ts=got[-1] + DAY - 1)[-1]["t"] == got[-2]
     eng.db.close()
+
+
+def test_extra_walk_with_positions_override():
+    from types import SimpleNamespace
+    from app import archive
+    rt = SimpleNamespace(settings=SimpleNamespace(MT5_MAGIC=552211), mt5_positions=[{"magic": 552211}])
+    assert archive._bot_positions_open(rt)

@@ -92,6 +92,7 @@ class Settings(BaseSettings):
     # unchanged), e.g. ARCHIVE_EXTRA=H1:1095,H4:1825,D1:3650 in .env for the research setup
     ARCHIVE_EXTRA: str = "off"
     ARCHIVE_EXTRA_INTERVAL_S: float = 60
+    ARCHIVE_EXTRA_WITH_POSITIONS: bool = False
     # broker server-time DST rule for archive bars (EA v1.12+): auto | EET | NY | fixed | IANA zone name
     MT5_SERVER_TZ: str = "auto"
 

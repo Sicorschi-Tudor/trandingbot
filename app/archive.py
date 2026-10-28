@@ -217,7 +217,7 @@ def next_request(rt, now: float, commands_pending: bool = False, hist_pending: b
     # A base pair stuck in error backoff does not hold the extended walk back.
     if not extra_targets(s):
         return None
-    if _bot_positions_open(rt):
+    if _bot_positions_open(rt) and not getattr(s, "ARCHIVE_EXTRA_WITH_POSITIONS", False):
         return None  # the multi-year walk waits for a quiet moment: no bot position whose SL/trailing is managed
     interval = max(0.0, float(getattr(s, "ARCHIVE_EXTRA_INTERVAL_S", EXTRA_INTERVAL_DEFAULT_S) or 0))
     last = plan.get("extra_last_ts")
