@@ -54,7 +54,14 @@ def rescue_close(pos: dict, info: dict, cfg: dict, now_ts: float, initial_sl: fl
         return None
     sign = 1 if pos["side"] == "BUY" else -1
     cur = bid if pos["side"] == "BUY" else ask
-    if rescue_due(cfg, rescue_state, (cur - open_px) * sign / init_risk, now_ts):
+    r_now = (cur - open_px) * sign / init_risk
+    # accrued swap/commission count too: "in profit" must mean net money, not just price
+    tick_size, tick_value = float(info.get("tick_size") or 0), float(info.get("tick_value") or 0)
+    volume = float(pos.get("volume") or 0)
+    costs = float(pos.get("swap") or 0) + float(pos.get("commission") or 0)
+    if costs and tick_size > 0 and tick_value > 0 and volume > 0:
+        r_now += costs / (init_risk / tick_size * tick_value * volume)
+    if rescue_due(cfg, rescue_state, r_now, now_ts):
         return {"type": "CLOSE", "reason": "RESCUE"}
     return None
 

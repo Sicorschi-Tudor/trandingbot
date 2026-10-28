@@ -42,3 +42,15 @@ def test_rescue_never_overrides_stop_loss():
     step(pos, bar(0, 1.0998, 1.09990, 1.09950, 1.09970), 0.0)
     out = step(pos, bar(300, 1.0997, 1.10020, 1.09890, 1.09900), 0.0)  # SL and rescue level in the same bar
     assert out[0] == "SL"
+
+
+def test_live_rescue_counts_swap():
+    from app.position_manager import rescue_close
+    cfg = {"rescue_enabled": True, "rescue_minutes": 30, "rescue_mae_r": 0.3, "rescue_neg_frac": 0.6, "rescue_close_r": 0.1}
+    state = {"opened_ts": 1000, "mae_r": 0.8, "n": 100, "neg": 90}
+    pos = {"side": "SELL", "price_open": 0.56236, "volume": 0.01, "swap": -0.20}
+    info = {"bid": 0.56219, "ask": 0.56226, "tick_size": 0.00001, "tick_value": 1.0}
+    # price alone is +0.11R (sl 90 points away) but triple swap makes it net negative -> no rescue close
+    assert rescue_close(pos, info, cfg, 9000, 0.56326, state) is None
+    pos["swap"] = 0.0
+    assert rescue_close(pos, info, cfg, 9000, 0.56326, state) == {"type": "CLOSE", "reason": "RESCUE"}
