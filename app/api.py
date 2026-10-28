@@ -1,0 +1,450 @@
+"""/api/v1/* routes for the UI (CONTRACT §2)."""
+from __future__ import annotations
+
+import asyncio
+import re
+import secrets
+from typing import Any
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
+
+from . import indicators as ind
+from . import scheduler
+from .config import DAYS, TF_SECONDS, iso, utcnow
+from .engine import Engine, EngineError
+from .state import bar_public, format_sse
+
+router = APIRouter(prefix="/api/v1")
+
+
+def get_engine(request: Request) -> Engine:
+    return request.app.state.engine
+
+
+async def require_admin(request: Request, x_admin_token: str | None = Header(default=None)) -> None:
+    token = get_engine(request).settings.ADMIN_TOKEN
+    if not token:
+        raise HTTPException(status_code=403, detail="Set ADMIN_TOKEN in .env")
+    if not x_admin_token or not secrets.compare_digest(x_admin_token.encode(), token.encode()):
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+
+
+def _engine_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except EngineError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+
+async def _json(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Body JSON invalid")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body trebuie să fie obiect JSON")
+    return body
+
+
+# ---- validation ----------------------------------------------------------
+RISK_RULES: dict[str, tuple[type, float, float]] = {
+    "max_risk_per_trade_pct": (float, 0.001, 5),
+    "max_daily_loss_pct": (float, 0.01, 50),
+    "max_equity_drawdown_pct": (float, 0.01, 100),
+    "max_open_positions": (int, 0, 20),
+    "max_trades_per_day": (int, 0, 200),
+    "max_consecutive_losses": (int, 1, 100),
+    "max_spread_points": (float, 0, 100000),
+    "max_slippage_points": (int, 0, 10000),
+    "max_volume_lots": (float, 0.01, 100),
+    "max_same_currency_direction": (int, 0, 20),
+    "min_free_margin_pct": (float, 0, 100),
+    "max_tick_age_seconds": (float, 1, 3600),
+    "max_signals_per_symbol_per_session": (int, 0, 1000),
+    "news_blackout_minutes": (int, 0, 240),
+    "news_min_importance": (int, 1, 3),
+    "max_total_open_risk_pct": (float, 0.1, 20),
+    "loss_streak_pause_minutes": (int, 0, 1440),
+}
+STRATEGY_NUM: dict[str, tuple[type, float, float]] = {
+    "atr_sl_mult": (float, 0.1, 20),
+    "atr_tp_mult": (float, 0.1, 50),
+    "min_sl_points": (int, 0, 100000),
+    "min_score": (int, 1, 5),
+    "signal_expiry_minutes": (int, 1, 1440),
+    "break_even_at_r": (float, 0, 20),
+    "max_hold_minutes": (int, 0, 100000),
+}
+SYMBOL_RE = re.compile(r"^[A-Za-z0-9._#-]{2,20}$")
+
+
+def _num(key: str, value: Any, typ: type, lo: float, hi: float):
+    if isinstance(value, bool):
+        raise HTTPException(status_code=422, detail=f"{key}: valoare numerică necesară")
+    try:
+        v = typ(value)
+        if typ is int and float(value) != int(v):
+            raise ValueError
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail=f"{key}: valoare invalidă")
+    if not (lo <= v <= hi):
+        raise HTTPException(status_code=422, detail=f"{key}: trebuie între {lo} și {hi}")
+    return v
+
+
+def _bool(key: str, value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise HTTPException(status_code=422, detail=f"{key}: true/false")
+    return value
+
+
+def validate_risk_update(body: dict) -> dict:
+    out = {}
+    for k, v in body.items():
+        if k == "must_have_sl_tp":
+            if v is not True:
+                raise HTTPException(status_code=422, detail="must_have_sl_tp nu poate fi dezactivat în v1")
+            out[k] = True
+        elif k in RISK_RULES:
+            out[k] = _num(k, v, *RISK_RULES[k])
+        else:
+            raise HTTPException(status_code=422, detail=f"Cheie necunoscută: {k}")
+    return out
+
+
+def validate_strategy_update(body: dict, current: dict) -> dict:
+    out = {}
+    for k, v in body.items():
+        if k in STRATEGY_NUM:
+            out[k] = _num(k, v, *STRATEGY_NUM[k])
+        elif k in ("trailing_enabled", "close_at_session_end"):
+            out[k] = _bool(k, v)
+        elif k in ("signal_timeframe", "htf_timeframe"):
+            tf = str(v).upper()
+            if tf not in TF_SECONDS:
+                raise HTTPException(status_code=422, detail=f"{k}: timeframe invalid")
+            out[k] = tf
+        elif k == "symbols":
+            if isinstance(v, str):
+                v = [x for x in v.split(",")]
+            if not isinstance(v, list) or not (1 <= len(v) <= 20):
+                raise HTTPException(status_code=422, detail="symbols: listă cu 1–20 simboluri")
+            syms = []
+            for s in v:
+                s = str(s).strip().upper()
+                if not SYMBOL_RE.match(s):
+                    raise HTTPException(status_code=422, detail=f"simbol invalid: {s}")
+                if s not in syms:
+                    syms.append(s)
+            out[k] = syms
+        else:
+            raise HTTPException(status_code=422, detail=f"Cheie necunoscută: {k}")
+    merged = {**current, **out}
+    if TF_SECONDS[merged["htf_timeframe"]] <= TF_SECONDS[merged["signal_timeframe"]]:
+        raise HTTPException(status_code=422, detail="htf_timeframe trebuie să fie mai mare decât signal_timeframe")
+    return out
+
+
+def validate_schedule_update(body: dict, current: dict) -> dict:
+    out = {}
+    for k, v in body.items():
+        if k == "enabled":
+            out[k] = _bool(k, v)
+        elif k in ("start", "end"):
+            try:
+                t = scheduler.parse_hhmm(str(v))
+            except Exception:
+                raise HTTPException(status_code=422, detail=f"{k}: format HH:MM")
+            out[k] = f"{t.hour:02d}:{t.minute:02d}"
+        elif k == "days":
+            if isinstance(v, str):
+                v = v.split(",")
+            if not isinstance(v, list):
+                raise HTTPException(status_code=422, detail="days: listă")
+            days = [str(d).strip().upper() for d in v if str(d).strip()]
+            if any(d not in DAYS for d in days):
+                raise HTTPException(status_code=422, detail="days: valori permise MON..SUN")
+            out[k] = [d for d in DAYS if d in days]
+        elif k == "tz":
+            try:
+                from zoneinfo import ZoneInfo
+                ZoneInfo(str(v))
+            except Exception:
+                raise HTTPException(status_code=422, detail="tz: timezone IANA invalid")
+            out[k] = str(v)
+        else:
+            raise HTTPException(status_code=422, detail=f"Cheie necunoscută: {k}")
+    merged = {**current, **out}
+    if merged["start"] == merged["end"]:
+        raise HTTPException(status_code=422, detail="start și end nu pot fi egale")
+    return out
+
+
+# ---- read endpoints ------------------------------------------------------
+@router.get("/status")
+async def get_status(request: Request):
+    return get_engine(request).status()
+
+
+@router.get("/symbols")
+async def get_symbols(request: Request):
+    return get_engine(request).symbols_payload()
+
+
+@router.get("/candles")
+async def get_candles(request: Request, symbol: str, tf: str = "M5", limit: int = Query(300, ge=1, le=2000)):
+    eng = get_engine(request)
+    tf = tf.upper()
+    symbol = symbol.upper()
+    if tf not in TF_SECONDS:
+        raise HTTPException(status_code=422, detail="tf invalid")
+    series = list(eng.rt.bars.get((symbol, tf), []))
+    closes = [b["c"] for b in series]
+    ef, es = ind.ema(closes, 20), ind.ema(closes, 50)
+    start = max(0, len(series) - limit)
+    bars = series[start:]
+    return {
+        "symbol": symbol, "tf": tf, "feed_label": eng.settings.feed_label,
+        "bars": [bar_public(b) for b in bars],
+        "ema_fast": [{"time": series[i]["t"], "value": ef[i]} for i in range(start, len(series)) if ef[i] is not None],
+        "ema_slow": [{"time": series[i]["t"], "value": es[i]} for i in range(start, len(series)) if es[i] is not None],
+    }
+
+
+@router.get("/analysis")
+async def get_analysis(request: Request, symbol: str):
+    eng = get_engine(request)
+    symbol = symbol.upper()
+    a = eng.rt.last_analysis.get(symbol)
+    if a is None:
+        a = eng.analyze_symbol(symbol, allow_signal=False)
+    return a
+
+
+@router.get("/signals")
+async def get_signals(request: Request, limit: int = Query(100, ge=1, le=1000), symbol: str | None = None,
+                direction: str | None = None):
+    return get_engine(request).list_signals(limit, symbol or None, direction or None)
+
+
+@router.get("/signals/{signal_id}")
+async def get_signal(request: Request, signal_id: str):
+    eng = get_engine(request)
+    sig = eng.get_signal(signal_id)
+    if not sig:
+        raise HTTPException(status_code=404, detail="Semnal inexistent")
+    sig["events"] = eng.signal_events(signal_id)
+    return sig
+
+
+@router.get("/positions")
+async def get_positions(request: Request):
+    return get_engine(request).positions_payload()
+
+
+@router.get("/trades")
+async def get_trades(request: Request, limit: int = Query(100, ge=1, le=1000)):
+    return get_engine(request).list_trades(limit)
+
+
+@router.get("/intents")
+async def get_intents(request: Request, limit: int = Query(100, ge=1, le=1000)):
+    return get_engine(request).executor.list(limit)
+
+
+@router.get("/risk")
+async def get_risk(request: Request):
+    return dict(get_engine(request).rt.risk)
+
+
+@router.put("/risk", dependencies=[Depends(require_admin)])
+async def put_risk(request: Request):
+    eng = get_engine(request)
+    upd = validate_risk_update(await _json(request))
+    eng.rt.risk.update(upd)
+    eng.db.set_setting("risk", eng.rt.risk)
+    eng.rt.log("WARN", "control", f"Setări risc actualizate: {upd}")
+    return dict(eng.rt.risk)
+
+
+@router.get("/settings")
+async def get_settings_view(request: Request):
+    eng = get_engine(request)
+    s = eng.settings
+    return {
+        "schedule": dict(eng.rt.schedule),
+        "strategy": dict(eng.rt.strategy),
+        "telegram": {"enabled": bool(s.TELEGRAM_ENABLED), "configured": s.telegram_configured,
+                     "thread_id_set": bool((s.TELEGRAM_MESSAGE_THREAD_ID or "").strip())},
+        "ai": {"enabled": eng.ai.enabled, "model": s.CLAUDE_MODEL, "veto_enabled": s.CLAUDE_VETO_ENABLED,
+               "required": s.CLAUDE_REQUIRED, "key_set": eng.ai.key_set},
+    }
+
+
+@router.put("/schedule", dependencies=[Depends(require_admin)])
+async def put_schedule(request: Request):
+    eng = get_engine(request)
+    upd = validate_schedule_update(await _json(request), eng.rt.schedule)
+    eng.rt.schedule.update(upd)
+    eng.db.set_setting("schedule", eng.rt.schedule)
+    eng.rt.log("WARN", "control", f"Program actualizat: {upd}")
+    return dict(eng.rt.schedule)
+
+
+@router.put("/strategy", dependencies=[Depends(require_admin)])
+async def put_strategy(request: Request):
+    eng = get_engine(request)
+    upd = validate_strategy_update(await _json(request), eng.rt.strategy)
+    if "signal_timeframe" in upd or "symbols" in upd:
+        eng.last_analyzed_bar.clear()
+    eng.rt.strategy.update(upd)
+    eng.db.set_setting("strategy", eng.rt.strategy)
+    eng.rt.log("WARN", "control", f"Strategie actualizată: {upd}")
+    return dict(eng.rt.strategy)
+
+
+# ---- control -------------------------------------------------------------
+@router.post("/control/mode", dependencies=[Depends(require_admin)])
+async def control_mode(request: Request):
+    eng = get_engine(request)
+    body = await _json(request)
+    _engine_call(eng.set_mode, str(body.get("mode") or ""))
+    return eng.status()["trading"]
+
+
+@router.post("/control/execution", dependencies=[Depends(require_admin)])
+async def control_execution(request: Request):
+    eng = get_engine(request)
+    body = await _json(request)
+    if not isinstance(body.get("enabled"), bool):
+        raise HTTPException(status_code=422, detail="enabled: true/false")
+    _engine_call(eng.set_execution, body["enabled"])
+    return eng.status()["trading"]
+
+
+@router.post("/control/pause-entries", dependencies=[Depends(require_admin)])
+async def control_pause(request: Request):
+    eng = get_engine(request)
+    eng.set_paused(True)
+    return eng.status()["trading"]
+
+
+@router.post("/control/resume-entries", dependencies=[Depends(require_admin)])
+async def control_resume(request: Request):
+    eng = get_engine(request)
+    eng.set_paused(False)
+    return eng.status()["trading"]
+
+
+@router.post("/control/session", dependencies=[Depends(require_admin)])
+async def control_session(request: Request):
+    eng = get_engine(request)
+    body = await _json(request)
+    action = str(body.get("action") or "").lower()
+    if action not in ("start", "stop", "auto"):
+        raise HTTPException(status_code=422, detail="action: start|stop|auto")
+    eng.rt.session_override = None if action == "auto" else action
+    eng.rt.log("WARN", "control", f"Sesiune: override manual = {action}")
+    return eng.session()
+
+
+@router.post("/control/close-position", dependencies=[Depends(require_admin)])
+async def control_close_position(request: Request):
+    eng = get_engine(request)
+    body = await _json(request)
+    if body.get("confirm") is not True:
+        raise HTTPException(status_code=400, detail="Confirmare necesară: confirm=true")
+    try:
+        ticket = int(body.get("ticket"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="ticket invalid")
+    found = eng.find_position(ticket)
+    source = found[0] if found else "PAPER"
+    return _engine_call(eng.close_position, source, ticket, "MANUAL")
+
+
+@router.post("/control/close-all", dependencies=[Depends(require_admin)])
+async def control_close_all(request: Request):
+    eng = get_engine(request)
+    body = await _json(request)
+    if body.get("confirm") != "CLOSE ALL":
+        raise HTTPException(status_code=400, detail='Confirmare necesară: {"confirm":"CLOSE ALL"}')
+    intents = _engine_call(eng.close_all)
+    return {"ok": True, "intents": intents}
+
+
+@router.post("/control/test-order", dependencies=[Depends(require_admin)])
+async def control_test_order(request: Request):
+    eng = get_engine(request)
+    body = await _json(request)
+    return _engine_call(eng.test_order, str(body.get("symbol") or ""), str(body.get("side") or ""))
+
+
+@router.post("/control/analyze-now", dependencies=[Depends(require_admin)])
+async def control_analyze_now(request: Request):
+    eng = get_engine(request)
+    body = await _json(request)
+    symbol = str(body.get("symbol") or "").upper()
+    if symbol not in eng.rt.active_symbols():
+        raise HTTPException(status_code=404, detail="Simbol inactiv")
+    return eng.analyze_symbol(symbol, allow_signal=True)
+
+
+@router.post("/telegram/test", dependencies=[Depends(require_admin)])
+async def telegram_test(request: Request):
+    eng = get_engine(request)
+    tg = eng.telegram
+    from .telegram import DISCLAIMER, e
+    text = (f"✅ <b>Test conexiune</b> — MT5 AI Bot ({e(eng.settings.feed_label)}, mod {e(eng.mode())}).\n"
+            f"<i>{e(DISCLAIMER)}</i>")
+    res = await tg.send(text, tg.button_url("test"))
+    if res["ok"]:
+        tg.last_ok_utc = iso(utcnow())
+        tg.last_error = None
+        eng.rt.log("INFO", "telegram", "Mesaj de test trimis")
+        return {"ok": True}
+    tg.last_error = res["error"]
+    eng.rt.log("WARN", "telegram", f"Mesaj de test eșuat: {res['error']}")
+    return {"ok": False, "error": res["error"]}
+
+
+@router.get("/logs")
+async def get_logs(request: Request, limit: int = Query(200, ge=1, le=2000), level: str | None = None):
+    eng = get_engine(request)
+    if level:
+        lv = level.upper()
+        if lv == "WARNING":
+            lv = "WARN"
+        return eng.db.query("SELECT id, time_utc, level, component, message FROM system_events WHERE level=? "
+                            "ORDER BY id DESC LIMIT ?", (lv, limit))
+    return eng.db.query("SELECT id, time_utc, level, component, message FROM system_events ORDER BY id DESC LIMIT ?", (limit,))
+
+
+@router.get("/stream")
+async def stream(request: Request):
+    eng = get_engine(request)
+    bus = eng.rt.bus
+    q = bus.subscribe()
+
+    async def gen():
+        try:
+            yield "retry: 3000\n\n"
+            yield format_sse(bus.seq, "status", eng.status())
+            yield format_sse(bus.seq, "positions", eng.positions_payload())
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                if msg is None:
+                    break
+                yield format_sse(*msg)
+        finally:
+            bus.unsubscribe(q)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})

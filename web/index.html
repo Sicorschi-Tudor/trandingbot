@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MT5 AI Bot</title>
+  <meta name="description" content="Panou de control pentru botul de trading MT5 cu analiză AI">
+  <script>
+    // Apply saved theme before paint to avoid flash.
+    try { var t = localStorage.getItem('mt5bot.theme'); if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t); } catch (e) {}
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233b82f6'/%3E%3Cpath d='M7 21l6-6 4 4 8-9' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="#overview">
+      <span class="brand-mark"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16l5-5 4 4 7-8"/></svg></span>
+      <span>MT5 AI Bot <small id="app-version">v1</small></span>
+    </a>
+    <nav class="nav" id="nav">
+      <a href="#overview" data-page="overview">Prezentare</a>
+      <a href="#chart" data-page="chart">Grafic live</a>
+      <a href="#signals" data-page="signals">Semnale</a>
+      <a href="#positions" data-page="positions">Poziții &amp; Ordine</a>
+      <a href="#control" data-page="control">Control &amp; Risc</a>
+      <a href="#integrations" data-page="integrations">Telegram &amp; AI</a>
+      <a href="#system" data-page="system">Sistem &amp; Loguri</a>
+    </nav>
+    <div class="topbar-right">
+      <span id="hdr-paused" class="badge bad hidden">INTRĂRI OPRITE</span>
+      <span id="hdr-feed" class="badge">—</span>
+      <span id="hdr-mode" class="badge hide-sm">—</span>
+      <span class="sse-ind" id="sse-ind" title="Conexiune flux live (SSE)"><span class="dot"></span><span class="lbl">Conectare…</span></span>
+      <button class="icon-btn" id="theme-btn" title="Schimbă tema" aria-label="Schimbă tema">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+      <button class="icon-btn" id="admin-btn" title="Token administrator" aria-label="Setări token administrator">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+      <button class="icon-btn menu-btn" id="menu-btn" aria-label="Meniu" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div id="global-banner"></div>
+
+  <!-- ============ OVERVIEW ============ -->
+  <section class="page" id="page-overview" hidden>
+    <div class="page-head">
+      <div><h1>Prezentare generală</h1><p>Starea serviciului, conturi, sesiune și ultimele semnale. Ora afișată: Europe/Chisinau.</p></div>
+      <div class="page-actions"><span class="dim" id="ov-clock"></span></div>
+    </div>
+    <div class="grid g-5" id="ov-status"></div>
+    <div class="grid g-2" id="ov-accounts"></div>
+    <div class="grid g-4">
+      <div class="card" id="ov-session"></div>
+      <div class="card" id="ov-counts"></div>
+      <div class="card" id="ov-ai"></div>
+      <div class="card" id="ov-news"></div>
+    </div>
+    <div class="card flush">
+      <div class="card-head"><h2>Semnale recente</h2><a href="#signals" class="sub">Vezi toate →</a></div>
+      <div id="ov-signals" style="padding: 4px 4px 8px"></div>
+    </div>
+  </section>
+
+  <!-- ============ CHART ============ -->
+  <section class="page" id="page-chart" hidden>
+    <div class="page-head">
+      <div><h1>Grafic live</h1><p>Lumânări cu EMA rapidă/lentă, nivelurile pozițiilor botului și marcaje de semnal.</p></div>
+    </div>
+    <div class="chart-layout">
+      <div class="card flush">
+        <div class="chart-toolbar">
+          <select id="ch-symbol" aria-label="Simbol"></select>
+          <div class="seg" id="ch-tf" role="group" aria-label="Interval"></div>
+          <div class="quote" id="ch-quote">
+            <span class="bid">Bid<b id="q-bid">—</b></span>
+            <span class="ask">Ask<b id="q-ask">—</b></span>
+            <span>Spread<b id="q-spread">—</b></span>
+            <span>Vârstă tick<b id="q-age">—</b></span>
+            <span id="q-quality" class="badge">—</span>
+          </div>
+        </div>
+        <div class="chart-box" id="ch-box"><div class="chart-overlay hidden" id="ch-overlay"></div></div>
+        <div class="legend">
+          <span><i style="background: var(--accent)"></i>EMA rapidă (20)</span>
+          <span><i style="background: var(--violet)"></i>EMA lentă (50)</span>
+          <span><i style="background: var(--text-dim)"></i>Intrare</span>
+          <span><i style="background: var(--down)"></i>SL</span>
+          <span><i style="background: var(--up)"></i>TP</span>
+          <span class="faint" id="ch-meta"></span>
+        </div>
+      </div>
+      <aside class="card" id="ch-analysis-card">
+        <div class="card-head">
+          <h2>Ultima analiză</h2>
+          <button class="btn primary sm" id="btn-analyze">Analizează acum</button>
+        </div>
+        <div id="ch-analysis"><div class="loading">Se încarcă…</div></div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ============ SIGNALS ============ -->
+  <section class="page" id="page-signals" hidden>
+    <div class="page-head">
+      <div><h1>Semnale</h1><p>Istoric semnale generate de strategia deterministă, cu verdictul AI.</p></div>
+      <div class="page-actions">
+        <button class="btn" id="btn-csv">Export CSV</button>
+      </div>
+    </div>
+    <div class="card flush">
+      <div class="card-head">
+        <div class="filters">
+          <label class="field">Simbol<select id="sg-symbol"><option value="">Toate</option></select></label>
+          <label class="field">Direcție<select id="sg-direction"><option value="">Toate</option><option value="BUY">BUY</option><option value="SELL">SELL</option></select></label>
+        </div>
+        <span class="sub" id="sg-count"></span>
+      </div>
+      <div id="sg-table" style="padding: 4px 4px 8px"></div>
+    </div>
+  </section>
+
+  <!-- ============ SIGNAL DETAIL ============ -->
+  <section class="page" id="page-signal" hidden>
+    <div class="page-head">
+      <div><a href="#signals" class="dim">← Înapoi la semnale</a><h1 id="sd-title" style="margin-top:6px">Semnal</h1><p id="sd-sub"></p></div>
+    </div>
+    <div id="sd-body"><div class="loading">Se încarcă…</div></div>
+  </section>
+
+  <!-- ============ POSITIONS ============ -->
+  <section class="page" id="page-positions" hidden>
+    <div class="page-head">
+      <div><h1>Poziții &amp; Ordine</h1><p>Poziții deschise, comenzi în așteptare, intenții de execuție și tranzacții închise.</p></div>
+      <div class="page-actions"><button class="btn" id="btn-pos-refresh">Reîncarcă</button></div>
+    </div>
+    <div class="card flush"><div class="card-head"><h2>Poziții deschise</h2><span class="sub" id="pos-open-sub"></span></div><div id="pos-open" style="padding:4px 4px 8px"></div></div>
+    <div class="card flush"><div class="card-head"><h2>Comenzi în așteptare (către EA)</h2></div><div id="pos-pending" style="padding:4px 4px 8px"></div></div>
+    <div class="card flush"><div class="card-head"><h2>Intenții de execuție</h2><span class="sub">Apasă pe un rând pentru verificările de risc</span></div><div id="pos-intents" style="padding:4px 4px 8px"></div></div>
+    <div class="card flush"><div class="card-head"><h2>Tranzacții închise</h2></div><div id="pos-trades" style="padding:4px 4px 8px"></div></div>
+  </section>
+
+  <!-- ============ CONTROL ============ -->
+  <section class="page" id="page-control" hidden>
+    <div class="page-head">
+      <div><h1>Control &amp; Risc</h1><p>Toate acțiunile cer token-ul de administrator (iconița roată din bara de sus).</p></div>
+    </div>
+    <div class="grid g-2">
+      <div class="card">
+        <div class="card-head"><h2>Mod de lucru</h2><span class="sub" id="ctl-mode-sub"></span></div>
+        <div class="ctl-row">
+          <div><div class="t">Mod</div><div class="d">SIGNAL_ONLY = doar semnale · PAPER = simulare internă · DEMO = ordine pe contul demo MT5</div></div>
+          <div class="seg" id="ctl-mode">
+            <button data-mode="SIGNAL_ONLY">SIGNAL_ONLY</button>
+            <button data-mode="PAPER">PAPER</button>
+            <button data-mode="DEMO">DEMO</button>
+            <button data-mode="LIVE" disabled title="dezactivat în v1">LIVE</button>
+          </div>
+        </div>
+        <div class="ctl-row">
+          <div><div class="t">Execuție activă</div><div class="d">Când e oprită, botul doar generează semnale, fără ordine (nici PAPER, nici DEMO).</div></div>
+          <label class="switch"><input type="checkbox" id="ctl-exec"><span class="track"></span><span id="ctl-exec-lbl">—</span></label>
+        </div>
+        <div class="ctl-row">
+          <div><div class="t">Sesiune de tranzacționare</div><div class="d" id="ctl-session-d">—</div></div>
+          <div class="seg" id="ctl-session">
+            <button data-act="start">Pornește</button>
+            <button data-act="stop">Oprește</button>
+            <button data-act="auto">Auto (program)</button>
+          </div>
+        </div>
+      </div>
+      <div class="card kill">
+        <div class="card-head"><h2>Siguranță</h2><span class="sub">Kill switch ≠ închidere poziții</span></div>
+        <button class="btn lg danger" id="ctl-pause">Oprește intrările noi</button>
+        <p class="faint" style="margin:0;font-size:12px">Oprirea intrărilor blochează doar pozițiile noi. Pozițiile existente rămân gestionate (SL/TP, break-even).</p>
+        <hr class="section-sep">
+        <button class="btn danger" id="ctl-close-all">Închide TOATE pozițiile botului</button>
+        <p class="faint" style="margin:0;font-size:12px">Închide doar pozițiile cu magic number-ul botului. Necesită dublă confirmare.</p>
+        <hr class="section-sep">
+        <div>
+          <div class="t" style="font-weight:600;margin-bottom:8px">Ordin de test</div>
+          <div class="inline">
+            <label class="field">Simbol<select id="ctl-test-symbol"></select></label>
+            <button class="btn success" data-test-side="BUY">Test BUY</button>
+            <button class="btn danger" data-test-side="SELL">Test SELL</button>
+          </div>
+          <p class="faint" style="margin:8px 0 0;font-size:12px">Doar în PAPER/DEMO. Volum minim, SL/TP din ATR, trece prin tot Risk Engine-ul.</p>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Setări de risc</h2><span class="sub">Salvate în baza de date (suprascriu .env)</span></div>
+      <form id="risk-form"><div class="loading">Se încarcă…</div></form>
+    </div>
+    <div class="grid g-2">
+      <div class="card">
+        <div class="card-head"><h2>Strategie</h2><span class="sub">trend-v1</span></div>
+        <form id="strategy-form"><div class="loading">Se încarcă…</div></form>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Program sesiune</h2></div>
+        <form id="schedule-form"><div class="loading">Se încarcă…</div></form>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ INTEGRATIONS ============ -->
+  <section class="page" id="page-integrations" hidden>
+    <div class="page-head">
+      <div><h1>Telegram &amp; AI</h1><p>Notificări Telegram și revizuirea semnalelor de către Claude.</p></div>
+    </div>
+    <div class="grid g-2">
+      <div class="card" id="int-telegram"></div>
+      <div class="card" id="int-claude"></div>
+    </div>
+  </section>
+
+  <!-- ============ SYSTEM ============ -->
+  <section class="page" id="page-system" hidden>
+    <div class="page-head">
+      <div><h1>Sistem &amp; Loguri</h1><p>Sănătatea componentelor și jurnalul de evenimente.</p></div>
+    </div>
+    <div class="grid g-5" id="sys-health"></div>
+    <div class="card flush">
+      <div class="card-head">
+        <div class="filters">
+          <label class="field">Nivel<select id="log-level"><option value="">Toate</option><option value="INFO">INFO</option><option value="WARN">WARN</option><option value="ERROR">ERROR</option></select></label>
+          <label class="check-field" style="padding-top:18px"><input type="checkbox" id="log-auto" checked> Reîmprospătare automată</label>
+          <button class="btn sm" id="log-refresh" style="margin-bottom:3px">Reîncarcă</button>
+        </div>
+        <span class="sub" id="log-count"></span>
+      </div>
+      <div id="log-table" style="padding:4px 4px 8px"></div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+    <span><b>Atenție:</b> semnalele sunt informative și nu reprezintă sfaturi de investiții. Probabilitățile afișate sunt estimări euristice, necalibrate. Nu există nicio garanție de profit; tranzacționarea implică risc de pierdere.</span>
+  </div>
+</footer>
+
+<dialog class="modal" id="admin-modal">
+  <form method="dialog" class="modal-body" id="admin-form">
+    <h2>Token administrator</h2>
+    <p>Lipește valoarea <span class="mono">ADMIN_TOKEN</span> din fișierul <span class="mono">.env</span>. Este salvat doar în acest browser și trimis ca antet <span class="mono">X-Admin-Token</span> la acțiunile de control.</p>
+    <div class="modal-err hidden" id="admin-err"></div>
+    <label class="field">ADMIN_TOKEN<input type="password" id="admin-token" autocomplete="off" spellcheck="false"></label>
+    <div class="form-actions" style="margin-top:0">
+      <button type="button" class="btn ghost" id="admin-clear">Șterge</button>
+      <button type="button" class="btn" id="admin-cancel">Anulează</button>
+      <button type="submit" class="btn primary" id="admin-save">Salvează</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="/app.js"></script>
+</body>
+</html>
