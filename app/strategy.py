@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from . import indicators as ind
 from .config import STRATEGY_VERSION, iso
-from .risk import currency_conflict
+from .risk import currency_conflict, loss_cooldown_blocker, rollover_blocker
 
 PROB_METHOD = "heuristic-v1 (NOT calibrated)"
 MIN_SIG_BARS = 100
@@ -23,6 +23,8 @@ class AnalysisContext:
     open_exposures: list = field(default_factory=list)
     corr_limit: int = 1
     news_block: str | None = None  # economic-calendar blackout reason (blocks before any Claude call)
+    # close time (UTC ts) of the latest bot trade on this symbol that closed at a loss (risk.cooldown_after_loss_minutes)
+    last_loss_ts: float | None = None
 
 
 def probabilities(score: float) -> dict:
@@ -55,6 +57,13 @@ def context_blockers(symbol: str, side: str, ctx: AnalysisContext, risk: dict) -
         out.append(f"Expunere corelată: {conflict} (max {ctx.corr_limit} pe monedă și direcție).")
     if ctx.news_block:
         out.append(ctx.news_block + ".")
+    # rollover / loss cooldown need a reference time: only applied when the caller passes now_ts (live, backtest)
+    cooldown = loss_cooldown_blocker(ctx.last_loss_ts, ctx.now_ts, int(risk.get("cooldown_after_loss_minutes", 0) or 0))
+    if cooldown:
+        out.append(cooldown + ".")
+    rollover = rollover_blocker(ctx.now_ts, int(risk.get("rollover_blackout_minutes", 0) or 0))
+    if rollover:
+        out.append(rollover + ".")
     max_sig = int(risk.get("max_signals_per_symbol_per_session", 5))
     if ctx.signals_this_session >= max_sig:
         out.append(f"Limita de semnale pe sesiune atinsă ({ctx.signals_this_session}/{max_sig}).")

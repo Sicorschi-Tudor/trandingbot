@@ -1,4 +1,4 @@
-"""Break-even / trailing / time-stop / session-end close for bot-owned positions. Never widens SL."""
+"""Break-even / trailing / time-stop / session-end / rescue close for bot-owned positions. Never widens SL."""
 from __future__ import annotations
 
 import time
@@ -12,12 +12,59 @@ FAIL_MAX_ATTEMPTS = 6
 # closes that must happen even on a stale tick (EA closes at market) and are never abandoned
 FORCED_CLOSE_REASONS = ("SESSION_END", "TIME_STOP")
 NEWS_BE_MIN_R = 0.3
+BE_LOCK_MIN_POINTS = 2  # break-even lock with be_lock_r = 0 (old behaviour): entry ± 2 points
+BE_LOCK_SPREAD_POINTS = 3  # smart lock: at least the current spread + 3 points beyond the entry
+
+
+def be_lock_distance(be_lock_r: float, spread_px: float, risk_dist: float, point: float) -> float:
+    """Distance of the break-even SL beyond the entry: 2 points when be_lock_r <= 0 (old behaviour), else
+    max(spread now + 3 points, be_lock_r × initial risk distance). Shared with exits/labeler for parity."""
+    if not be_lock_r or be_lock_r <= 0:
+        return BE_LOCK_MIN_POINTS * point
+    return max(spread_px + BE_LOCK_SPREAD_POINTS * point, be_lock_r * risk_dist)
+
+
+def rescue_due(cfg: dict, st: dict | None, r_now: float, now_ts: float) -> bool:
+    """Rescue exit (same semantics as exits 'rescue'): armed after rescue_minutes open, MAE ≥ rescue_mae_r and at
+    least rescue_neg_frac of the 1-min samples with r < 0; due when the current r ≥ rescue_close_r.
+    st: {"opened_ts", "mae_r", "n", "neg"} from the live trade-path tracker (None -> never)."""
+    if not cfg.get("rescue_enabled") or not st:
+        return False
+    opened, n = st.get("opened_ts"), int(st.get("n") or 0)
+    if not opened or n <= 0:
+        return False
+    if now_ts - float(opened) < float(cfg.get("rescue_minutes", 30)) * 60:
+        return False
+    if float(st.get("mae_r") or 0) < float(cfg.get("rescue_mae_r", 0.3)):
+        return False
+    if int(st.get("neg") or 0) / n < float(cfg.get("rescue_neg_frac", 0.6)):
+        return False
+    return r_now >= float(cfg.get("rescue_close_r", 0.1))
+
+
+def rescue_close(pos: dict, info: dict, cfg: dict, now_ts: float, initial_sl: float | None,
+                 rescue_state: dict | None) -> dict | None:
+    """The rescue market CLOSE when rescue_due at the current bid/ask (SL never touched), else None."""
+    bid, ask = info.get("bid"), info.get("ask")
+    if rescue_state is None or not bid or not ask or not initial_sl:
+        return None
+    open_px = float(pos["price_open"])
+    init_risk = abs(open_px - float(initial_sl))
+    if init_risk <= 0:
+        return None
+    sign = 1 if pos["side"] == "BUY" else -1
+    cur = bid if pos["side"] == "BUY" else ask
+    if rescue_due(cfg, rescue_state, (cur - open_px) * sign / init_risk, now_ts):
+        return {"type": "CLOSE", "reason": "RESCUE"}
+    return None
 
 
 def plan(pos: dict, info: dict, cfg: dict, now_ts: float, session_open: bool,
-         initial_sl: float | None = None, atr: float | None = None, news_event: dict | None = None) -> list[dict]:
+         initial_sl: float | None = None, atr: float | None = None, news_event: dict | None = None,
+         rescue_state: dict | None = None) -> list[dict]:
     """pos keys: side, price_open, sl, tp, opened_ts. Returns list of actions.
-    news_event: imminent high-impact event for the position's currencies -> break-even from +0.3R (NEWS_BE)."""
+    news_event: imminent high-impact event for the position's currencies -> break-even from +0.3R (NEWS_BE).
+    rescue_state: trade-path stats for the rescue exit (see rescue_due); the caller passes it only on a fresh quote."""
     bid, ask = info.get("bid"), info.get("ask")
     if not bid or not ask:
         return []
@@ -36,6 +83,9 @@ def plan(pos: dict, info: dict, cfg: dict, now_ts: float, session_open: bool,
         return [{"type": "CLOSE", "reason": "TIME_STOP"}]
     if cfg.get("close_at_session_end") and not session_open:
         return [{"type": "CLOSE", "reason": "SESSION_END"}]
+    rescue_a = rescue_close(pos, info, cfg, now_ts, initial_sl, rescue_state)
+    if rescue_a is not None:
+        return [rescue_a]
 
     freeze = float(info.get("freeze_level") or 0) * point
     if freeze > 0 and ((sl and abs(cur - sl) <= freeze) or (tp and abs(cur - tp) <= freeze)):
@@ -58,7 +108,8 @@ def plan(pos: dict, info: dict, cfg: dict, now_ts: float, session_open: bool,
     best: tuple[float, str] | None = None
     be_r = float(cfg.get("break_even_at_r") or 0)
     if be_r > 0 and risk_dist > 0 and profit_dist >= be_r * risk_dist - point / 2:
-        be_sl = round(open_px + sign * 2 * point, digits)
+        lock = be_lock_distance(float(cfg.get("be_lock_r") or 0), spread, risk_dist, point)
+        be_sl = round(open_px + sign * lock, digits)
         if improves(be_sl) and valid(be_sl):
             best = (be_sl, "BREAK_EVEN")
     if cfg.get("trailing_enabled") and atr and atr > 0 and profit_dist > 0:
@@ -124,6 +175,16 @@ class PositionManager:
             return {"type": "CLOSE", "reason": "ML_EXIT"}
         return None
 
+    def _rescue_state(self, source: str, pos: dict) -> dict | None:
+        """Minutes open / MAE in R / 1-min samples under water of a bot position, from the engine's live trade-path
+        tracker (resumed from trade_paths after a restart). None while the position is not tracked yet."""
+        paths = getattr(self.engine, "_paths", None) or {}
+        st = paths.get((source, str(pos["ticket"])))
+        if not st or not st.get("risk"):
+            return None
+        return {"opened_ts": st.get("opened_ts") or pos.get("opened_ts"), "mae_r": float(st.get("mae") or 0),
+                "n": int(st.get("n") or 0), "neg": int(st.get("neg") or 0)}
+
     def run(self, now_ts: float | None = None) -> None:
         eng = self.engine
         rt = eng.rt
@@ -156,13 +217,18 @@ class PositionManager:
             stale = age is None or age > float(rt.risk.get("max_tick_age_seconds", 10)) * 3
             atr = self._atr(pos["symbol"]) if cfg.get("trailing_enabled") and not stale else None
             news_ev = eng.news_event_near(pos["symbol"], now_ts) if hasattr(eng, "news_event_near") else None
+            rescue_st = None
+            if cfg.get("rescue_enabled") and age is not None and age <= float(rt.risk.get("max_tick_age_seconds", 10)):
+                rescue_st = self._rescue_state(source, pos)
+            # plan() without the rescue state: the rescue CLOSE is arbitrated below like ML_EXIT
             actions = plan(pos, info, cfg, now_ts, session_open, init_sl, atr, news_ev)
             if not stale and not any(a["type"] == "CLOSE" for a in actions) and (ticket, "CLOSE") not in self.gave_up:
-                ml_a = self._ml_exit(source, pos, now_ts)
-                # an early close supersedes this round's SL move only when it can actually be sent: while a failed
-                # CLOSE is backing off (or was abandoned) the break-even / trailing / NEWS_BE MODIFY still goes out
-                if ml_a is not None and not self._backing_off(ticket, ml_a, now_ts):
-                    actions = [ml_a]
+                # an early close (RESCUE first, then ML_EXIT) supersedes this round's SL move only when it can actually
+                # be sent: while a failed CLOSE is backing off (or was abandoned) the break-even / trailing / NEWS_BE
+                # MODIFY still goes out
+                early = rescue_close(pos, info, cfg, now_ts, init_sl, rescue_st) or self._ml_exit(source, pos, now_ts)
+                if early is not None and not self._backing_off(ticket, early, now_ts):
+                    actions = [early]
             if stale:
                 # no SL moves on stale prices, but session-end / time-stop closes still go out (EA closes at market)
                 actions = [a for a in actions if a["type"] == "CLOSE" and a.get("reason") in FORCED_CLOSE_REASONS]

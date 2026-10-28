@@ -27,6 +27,19 @@ rollover (17:00 New York = 21:00/22:00 UTC, the D1 bar boundary) strictly inside
 Wednesday ×3; an exit at a bar close = broker midnight does not pay that night) on the full volume, converted to USD with the trade's tick value and to R
 with its initial risk; trades carry swap_usd/swap_r/rollovers and the summary the totals.
 
+Live-parity pack (same setting keys as the live bot, read from the resolved strategy/risk config). resolve() fills
+them from the live Settings defaults / saved settings like every other key (BE_LOCK_R 0.1, RESCUE_ENABLED, cooldown 30,
+rollover 20), so a run that wants the old behaviour must switch them off explicitly (strategy rescue_enabled false,
+be_lock_r 0; risk cooldown_after_loss_minutes 0, rollover_blackout_minutes 0):
+- strategy rescue_enabled + rescue_* -> the live RESCUE exit, exits 'rescue' combined with the run's exit policy
+  (exits.with_rescue; base -> rescue, X -> combo [X, rescue]) for the live strategy; research plugins with their own
+  RUN_DEFAULTS / default_exit are left as they are; strategy {"rescue_enabled": false} turns it off; strategy be_lock_r -> smart break-even lock in SimPosition / exits._try_be;
+- risk cooldown_after_loss_minutes -> no entry on a symbol for N minutes after a trade on it closed at a loss
+  (net < 0 and |net| ≥ 0.1R, same neutral band as live; AnalysisContext.last_loss_ts = that trade's exit time); risk rollover_blackout_minutes -> no entry within ±N
+  minutes of 17:00 America/New_York — both are strategy.context_blockers (phase 2, before sizing; live: before Claude);
+- pre-AI arbitration order: candidates on the same bar close are processed HTF-aligned first, then by the lowest
+  spread / SL-distance cost ratio (symbol order on ties); each sees the exposure of the ones admitted before it.
+
 CLI: python -m app.backtest --symbols EURUSD,GBPUSD --days 90
 """
 from __future__ import annotations
@@ -70,7 +83,9 @@ SWAP_DEFAULT_PTS = (-5.0, -5.0)  # -0.5 pip/day long and short (5 points on 5-di
 ROLLOVER_UTC_H = 22  # legacy constant (winter value); rollovers() uses ROLLOVER_TZ / ROLLOVER_LOCAL_H
 ROLLOVER_TZ = ZoneInfo("America/New_York")  # New-York-close broker: rollover at broker midnight = 17:00 NY
 ROLLOVER_LOCAL_H = 17
-INTRABAR_REASONS = ("SL", "TP", "BE", "TRAIL")  # exits somewhere inside the bar (stamped with the bar open)
+INTRABAR_REASONS = ("SL", "TP", "BE", "TRAIL", "RESCUE")  # exits somewhere inside the bar (stamped with the bar open)
+PHASE2_STRATEGY_KEYS = ("be_lock_r", "rescue_enabled") + exits.RESCUE_KEYS
+PHASE2_RISK_KEYS = ("cooldown_after_loss_minutes", "rollover_blackout_minutes")  # neutral-context blockers in phase 1
 APPROX_USD = {"EUR": 1.08, "GBP": 1.27, "JPY": 1 / 150.0, "CHF": 1.12, "CAD": 0.73, "AUD": 0.65, "NZD": 0.59,
               "SEK": 0.095, "NOK": 0.092, "SGD": 0.74, "HKD": 0.128}
 
@@ -247,6 +262,12 @@ def resolve(db, params: dict) -> dict:
         exit_policy = exits.ExitPolicy.from_spec(plugin.default_exit(strat))
     else:
         exit_policy = exits.ExitPolicy.from_spec(params.get("exit"))
+    # live RESCUE exit (strategy rescue_enabled): an overlay on the run's exit policy for the live strategy (trend-v1 and
+    # plugins without backtest-only RUN_DEFAULTS / their own default_exit); cfg["exit"] stays the policy as given
+    live_rescue = None
+    if strat.get("rescue_enabled") and not run_def and not callable(getattr(plugin, "default_exit", None)):
+        live_rescue = {k: float(strat[k] if strat.get(k) is not None else exits.LIVE_RESCUE_DEFAULTS[k])
+                       for k in exits.RESCUE_KEYS}
     if "signal_flip" in exit_policy.modes and not callable(getattr(plugin, "bias", None)):
         raise ValueError(f"exit signal_flip: strategia {strategy_name} nu oferă bias() (direcția pe fiecare bară)")
     max_hold_s = None  # None -> strategy max_hold_minutes, exactly as before
@@ -262,7 +283,7 @@ def resolve(db, params: dict) -> dict:
             "specs": params.get("specs") or {}, "tz": (sched or {}).get("tz") or s.DEFAULT_TIMEZONE,
             "workers": params.get("workers"), "strategy_name": strategy_name,
             "strategy_version": getattr(plugin, "VERSION", None) if plugin is not None else strategy.STRATEGY_VERSION,
-            "exit": exit_policy, "record_paths": bool(params.get("record_paths")),
+            "exit": exit_policy, "live_rescue": live_rescue, "record_paths": bool(params.get("record_paths")),
             "paths_out": params.get("paths_out"), "max_hold_s": max_hold_s}
 
 
@@ -372,7 +393,8 @@ def symbol_spec(symbol: str, price: float, specs: dict) -> dict:
 
 def scan_symbol(job: dict) -> dict:
     """Run strategy.analyze on every requested closed bar with a neutral context (process-pool safe).
-    Returns {"symbol", "decisions": {i: (side, entry, sl, tp, score, market_blockers)}, "n": analyses run}."""
+    Returns {"symbol", "decisions": {i: (side, entry, sl, tp, score, market_blockers)}, "n": analyses run,
+    "aligned": {i: 1 for HTF-aligned decisions}}."""
     symbol, cfg, rsk = job["symbol"], job["strategy"], job["risk"]
     sec, hsec = TF_SECONDS[cfg["signal_timeframe"]], TF_SECONDS.get(cfg["htf_timeframe"], 0)
     point, digits, stops_level = job["point"], job["digits"], job["stops_level"]
@@ -383,6 +405,7 @@ def scan_symbol(job: dict) -> dict:
     corr = int(rsk.get("max_same_currency_direction", 1))
     analyze = get_analyzer(job.get("strategy_name"))
     out: dict[int, tuple] = {}
+    aligned: dict[int, int] = {}  # decisions whose side agrees with the HTF trend (pre-AI arbitration order)
     n = 0
     for i in job["idx"]:
         b = sig[i]
@@ -403,7 +426,22 @@ def scan_symbol(job: dict) -> dict:
         market = tuple(x for x in cand["blockers"] if x not in neutral)
         out[job.get("offset", 0) + i] = (cand["side"], cand["entry"], cand["stop_loss"], cand["take_profit"],
                                           cand["score"], market)
-    return {"symbol": symbol, "decisions": out, "n": n}
+        if htf_aligned(cand["side"], a):
+            aligned[job.get("offset", 0) + i] = 1
+    return {"symbol": symbol, "decisions": out, "n": n, "aligned": aligned}
+
+
+def htf_aligned(side: str, a: dict) -> int:
+    """1 when the higher-timeframe trend of the analysis agrees with the side (BUY+UP / SELL+DOWN), else 0."""
+    htf = str(((a or {}).get("indicators") or {}).get("htf_trend") or "").upper()
+    return 1 if (side == "BUY" and htf == "UP") or (side == "SELL" and htf == "DOWN") else 0
+
+
+def arbitration_key(aligned: int, spread_px: float, entry: float, sl: float) -> tuple[int, float]:
+    """Pre-AI arbitration order of candidates on the same bar close (live engine rule): HTF-aligned first, then the
+    lowest cost ratio spread / SL distance. Sort ascending; ties keep the incoming (symbol) order."""
+    dist = abs(float(entry) - float(sl))
+    return (0 if aligned else 1, spread_px / dist if dist > 0 else math.inf)
 
 
 def _scan_in_subprocess(batch: list[dict]) -> list[dict]:
@@ -650,7 +688,10 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
     # phase 1: chunks of decisions (with their own 400/200-bar lookback) spread over worker processes
     scan_key = None
     if cache is not None:
-        scan_key = ("scan", cfg["strategy_name"], _digest([strat, rsk, cfg["symbols"], start, end, tf, htf_tf,
+        # phase-2-only keys (exits, BE lock, context blockers) do not change the analyses: sweeps over them reuse phase 1
+        p1_strat = {k: v for k, v in strat.items() if k not in PHASE2_STRATEGY_KEYS}
+        p1_rsk = {k: v for k, v in rsk.items() if k not in PHASE2_RISK_KEYS}
+        scan_key = ("scan", cfg["strategy_name"], _digest([p1_strat, p1_rsk, cfg["symbols"], start, end, tf, htf_tf,
                                                            cfg["schedule"], cfg["tz"], specs, spreads]), data_key)
     hit = cache.get(scan_key) if scan_key is not None else None
     workers = cfg["workers"]
@@ -690,8 +731,9 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
         scans: dict[str, dict] = {}
         w0 = len(warnings)
         for r in _run_scans(jobs, int(workers), warnings, progress):
-            cur = scans.setdefault(r["symbol"], {"symbol": r["symbol"], "decisions": {}, "n": 0})
+            cur = scans.setdefault(r["symbol"], {"symbol": r["symbol"], "decisions": {}, "n": 0, "aligned": {}})
             cur["decisions"].update(r["decisions"])
+            cur["aligned"].update(r.get("aligned") or {})
             cur["n"] += r["n"]
         t_scan = time.time() - t1
         if scan_key is not None:
@@ -711,6 +753,9 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
                         + " (pereche de conversie neîncărcată) — valorile USD sunt estimate.")
     if strat.get("trailing_enabled"):
         warnings.append("Trailing stop nu este simulat (doar break-even și time stop).")
+    if (cfg.get("live_rescue") or "rescue" in cfg["exit"].modes) and sec > 300:
+        warnings.append(f"Ieșirea RESCUE e simulată pe închiderile barelor {strat['signal_timeframe']} (live: eșantioane "
+                        "de 1 minut) — modelul e valid doar pentru M5 sau mai mic; rezultatele RESCUE nu sunt concludente.")
     warnings.append("Fără calendar economic în backtest: blocările pe știri nu sunt simulate.")
     if len(trades) < 30:
         warnings.append(f"Doar {len(trades)} tranzacții — rezultatele nu sunt semnificative statistic.")
@@ -765,7 +810,7 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
                    "risk_pct": rsk.get("max_risk_per_trade_pct"), "size_mode": cfg["size_mode"],
                    "strategy": {k: v for k, v in strat.items() if k != "symbols"},
                    "risk": rsk, "strategy_name": cfg["strategy_name"], "strategy_version": cfg["strategy_version"],
-                   "exit": cfg["exit"].to_dict()},
+                   "exit": cfg["exit"].to_dict(), "live_rescue": cfg.get("live_rescue")},
         "timing": {"total_s": round(time.time() - t0, 2), "analyze_s": round(t_scan, 2), "workers": int(workers),
                    "simulate_s": round(time.time() - t2, 2), "phase1_cached": hit is not None},
     }
@@ -810,6 +855,7 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
     swap_on = bool(cost.get("swap_mode"))
     t_index: dict[str, dict[int, int]] = {}
     be_r = float(strat.get("break_even_at_r") or 0)
+    be_lock_r = float(strat.get("be_lock_r") or 0)  # smart BE lock (0 = entry ± 2 points)
     expiry = int(strat.get("signal_expiry_minutes") or 15) * 60
     session_end_close = bool(strat.get("close_at_session_end"))
     comm_lot = float(cost.get("commission_per_lot_usd") or 0)
@@ -818,6 +864,8 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
     pause_s = int(rsk.get("loss_streak_pause_minutes", 90) or 0) * 60
     r_only = cfg["size_mode"] == "r_only"
     policy: exits.ExitPolicy = cfg.get("exit") or exits.ExitPolicy()
+    if cfg.get("live_rescue"):
+        policy = exits.with_rescue(policy, {"rescue_enabled": True, **cfg["live_rescue"]})
     record = bool(cfg.get("record_paths"))
     paths: list[dict] = []
 
@@ -831,6 +879,7 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
     day_opens: dict[float, int] = {}
     day_start_eq: dict[float, float] = {}
     streak, last_loss = 0, None
+    last_loss_sym: dict[str, float] = {}  # symbol -> exit time of its last loss ≥ 0.1R (cooldown)
     counts = {"blocked_market": 0, "blocked_context": {}, "signals": 0, "risk_rejected": {}, "filled": 0,
               "skipped_gap": 0, "expired_unfilled": 0, "closed_at_end": 0}
     if "partial" in policy.modes:
@@ -862,6 +911,10 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
             swap_usd = swap_points(cost, sym, sp.side) * spec["point"] / spec["tick_size"] * tv * vol * n_roll
             net += swap_usd
         r = net / risk_usd if risk_usd > 0 else 0.0
+        if net < 0 and abs(net) >= NEUTRAL_R * risk_usd:
+            # loss cooldown (live rule: |net| < 0.1R is neutral, no cooldown) from the real close time: an intrabar exit (stamped with the bar open) happened by the bar
+            # end at the latest, which on a bar grid gives exactly the live first allowed decision
+            last_loss_sym[sym] = t + sec if reason in INTRABAR_REASONS else t
         equity += net
         peak = max(peak, equity)
         if pause_s > 0 and streak >= max_cl and last_loss is not None and t >= last_loss + pause_s:
@@ -928,7 +981,8 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
                 side = pos["side"]
                 entry = b["o"] + (sp_px + slip if side == "BUY" else -slip)
                 sim = SimPosition(side, entry, pos["sl0"], pos["tp0"], spec["point"], int(b["t"]), be_at_r=be_r,
-                                  slip_px=slip, stops_px=float(spec.get("stops_level") or 0) * spec["point"])
+                                  slip_px=slip, stops_px=float(spec.get("stops_level") or 0) * spec["point"],
+                                  be_lock_r=be_lock_r)
                 if not sim.valid or (sim.tp - entry) * sim.sign <= 0:
                     counts["skipped_gap"] += 1  # broker would reject stops on the wrong side of the price
                     del book[sym]
@@ -967,21 +1021,28 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
         T = t + sec
         if T < start or T > end:
             continue
+        cands = []
         for _, s_idx, i in group:
             sym = cfg["symbols"][s_idx]
             scan = scans.get(sym)
             rec = scan["decisions"].get(i) if scan else None
             if rec is None:
                 continue
-            side, entry, sl, tp, score, market = rec
-            if market:
+            if rec[5]:
                 counts["blocked_market"] += 1
                 continue
+            cands.append((sym, i, rec, (scan.get("aligned") or {}).get(i, 0)))
+        if len(cands) > 1:  # pre-AI arbitration order (live): HTF-aligned first, then the cheapest spread/SL distance
+            cands.sort(key=lambda c: arbitration_key(c[3], spreads[c[0]][c[1]] * specs[c[0]]["point"], c[2][1], c[2][2]))
+        for sym, i, rec, _al in cands:
+            side, entry, sl, tp, score = rec[:5]
             s_start = sess.start(T)
             ctx = strategy.AnalysisContext(
                 session_open=True, has_bot_position=sym in book,
                 signals_this_session=sig_count.get((sym, s_start), 0), tick_age=0.0, now_ts=T,
-                open_exposures=[(s, p["side"]) for s, p in book.items()], corr_limit=corr)
+                open_exposures=[(s, p["side"]) for s, p in book.items()], corr_limit=corr,
+                last_loss_ts=last_loss_sym.get(sym))
+            # live rules incl. risk cooldown_after_loss_minutes and rollover_blackout_minutes (17:00 New York)
             cb = strategy.context_blockers(sym, side, ctx, rsk)
             if cb:
                 key = cb[0].split(" ")[0].strip(":.")

@@ -63,15 +63,28 @@ class Settings(BaseSettings):
     NEWS_MIN_IMPORTANCE: int = 3
     MAX_TOTAL_OPEN_RISK_PCT: float = 2.0
     LOSS_STREAK_PAUSE_MINUTES: int = 90
+    # no new entry on a symbol within N minutes after a bot trade on it closed at a loss (0 = off)
+    COOLDOWN_AFTER_LOSS_MINUTES: int = 30
+    # no new entries within ±N minutes of the 17:00 America/New_York rollover (DST-safe; 0 = off)
+    ROLLOVER_BLACKOUT_MINUTES: int = 20
     ATR_SL_MULT: float = 1.5
     ATR_TP_MULT: float = 2.5
     MIN_SL_POINTS: int = 60
     MIN_SCORE_COMPONENTS: int = 4
     SIGNAL_EXPIRY_MINUTES: int = 15
     BREAK_EVEN_AT_R: float = 1.0
+    # break-even SL = entry ± max(spread now + 3 points, BE_LOCK_R × initial risk); 0 = old entry ± 2 points
+    BE_LOCK_R: float = 0.1
     TRAILING_ENABLED: bool = False
     MAX_HOLD_MINUTES: int = 240
     CLOSE_AT_SESSION_END: bool = False
+    # rescue exit: after RESCUE_MINUTES open, MAE ≥ RESCUE_MAE_R and ≥ RESCUE_NEG_FRAC of the 1-min samples under
+    # water, close at the first r ≥ RESCUE_CLOSE_R (CLOSE reason RESCUE; never moves the SL)
+    RESCUE_ENABLED: bool = True
+    RESCUE_MINUTES: int = 30
+    RESCUE_MAE_R: float = 0.3
+    RESCUE_NEG_FRAC: float = 0.6
+    RESCUE_CLOSE_R: float = 0.1
     PAPER_START_BALANCE: float = 10000
     ANTHROPIC_API_KEY: str = ""
     CLAUDE_ENABLED: bool = True
@@ -145,6 +158,8 @@ class Settings(BaseSettings):
             "news_min_importance": self.NEWS_MIN_IMPORTANCE,
             "max_total_open_risk_pct": self.MAX_TOTAL_OPEN_RISK_PCT,
             "loss_streak_pause_minutes": self.LOSS_STREAK_PAUSE_MINUTES,
+            "cooldown_after_loss_minutes": self.COOLDOWN_AFTER_LOSS_MINUTES,
+            "rollover_blackout_minutes": self.ROLLOVER_BLACKOUT_MINUTES,
         }
 
     def default_schedule(self) -> dict:
@@ -170,6 +185,12 @@ class Settings(BaseSettings):
             "trailing_enabled": self.TRAILING_ENABLED,
             "max_hold_minutes": self.MAX_HOLD_MINUTES,
             "close_at_session_end": self.CLOSE_AT_SESSION_END,
+            "be_lock_r": self.BE_LOCK_R,
+            "rescue_enabled": self.RESCUE_ENABLED,
+            "rescue_minutes": self.RESCUE_MINUTES,
+            "rescue_mae_r": self.RESCUE_MAE_R,
+            "rescue_neg_frac": self.RESCUE_NEG_FRAC,
+            "rescue_close_r": self.RESCUE_CLOSE_R,
         }
 
     def chart_timeframes(self) -> list[str]:

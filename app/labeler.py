@@ -5,7 +5,9 @@ Shared bar-by-bar trade simulation, also used by app/backtest.py:
 - BUY exits on bid (bar l/h), SELL exits on ask (bar l/h + spread),
 - SL and TP touched in the same bar -> SL first (conservative),
 - break-even at `break_even_at_r`: SL locked at entry ± 2 points from the NEXT bar (same level as
-  position_manager.plan), only when the bar's favourable price is ≥ spread/stops level + 1 point beyond it,
+  position_manager.plan), only when the bar's favourable price is ≥ spread/stops level + 1 point beyond it;
+  with `be_lock_r` > 0 (smart BE lock) the level is entry ± max(spread + 3 points, be_lock_r × initial risk) —
+  be_lock_r = 0 is the old 2-point lock exactly,
 - time stop after `max_hold_minutes` at the close of the bar containing the deadline; with max_hold_minutes=0
   (no live time stop) labels stop at a 24 h horizon with outcome HORIZON (not a live exit).
 Shadow labels (label_pending) price entries/ask exits with the live spread statistics (bar `sp` is the bar's MINIMUM
@@ -17,7 +19,8 @@ from dataclasses import dataclass, field
 
 from .config import TF_SECONDS
 
-BE_LOCK_MIN_POINTS = 2  # position_manager.plan: open ± 2 points
+BE_LOCK_MIN_POINTS = 2  # position_manager.plan: open ± 2 points (be_lock_r = 0)
+BE_LOCK_SPREAD_POINTS = 3  # smart BE lock (be_lock_r > 0): at least spread + 3 points beyond the entry
 NODATA_GRACE_S = 6 * 3600  # deadline passed this long ago and still no bars -> NODATA (keeps the queue moving)
 LABEL_HORIZON_S = 24 * 3600  # labeling horizon when there is no time stop (max_hold_minutes=0)
 LABEL_SLIPPAGE_PTS = 1.0  # = backtest.DEFAULT_SLIPPAGE
@@ -37,6 +40,14 @@ def guess_point(symbol: str, price: float | None = None) -> float:
     return 0.00001
 
 
+def be_lock_level(entry: float, sign: int, point: float, r_dist: float, spread_px: float, be_lock_r: float = 0.0) -> float:
+    """Break-even SL level (same rule as position_manager.plan): be_lock_r = 0 -> entry ± 2 points (old behaviour);
+    be_lock_r > 0 -> entry ± max(spread now + 3 points, be_lock_r × initial risk distance)."""
+    if be_lock_r and be_lock_r > 0:
+        return entry + sign * max(spread_px + BE_LOCK_SPREAD_POINTS * point, be_lock_r * r_dist)
+    return entry + sign * BE_LOCK_MIN_POINTS * point
+
+
 @dataclass
 class SimPosition:
     side: str
@@ -50,6 +61,7 @@ class SimPosition:
     stops_px: float = 0.0  # broker stops level (price): BE needs this much room, like position_manager.plan
     r_dist: float = 0.0
     be_done: bool = False
+    be_lock_r: float = 0.0  # smart BE lock (strategy be_lock_r); 0 = entry ± 2 points
     mfe: float = 0.0  # price distance, favourable
     mae: float = 0.0  # price distance, adverse
     extra: dict = field(default_factory=dict)
@@ -113,7 +125,7 @@ class SimPosition:
         if hit_tp:
             return "TP", self.tp
         if self.be_at_r > 0 and not self.be_done and self.r_dist > 0 and favour >= self.be_at_r * self.r_dist - self.point / 2:
-            lock = self.entry + sg * BE_LOCK_MIN_POINTS * self.point
+            lock = be_lock_level(self.entry, sg, self.point, self.r_dist, spread_px, self.be_lock_r)
             if (lock - self.sl) * sg <= 0:
                 self.be_done = True  # stop already at/after the lock: nothing to move
             elif ((hi if sg > 0 else lo) - lock) * sg >= max(spread_px, self.stops_px) + self.point:
@@ -137,6 +149,7 @@ def simulate(side: str, sl: float, tp: float, bars: list[dict], point: float, de
     max_hold = int(cfg.get("max_hold_minutes") or 0) * 60
     horizon = int(cfg.get("_horizon_s") or 0)  # labeling cap when there is no time stop -> outcome HORIZON
     be_r = float(cfg.get("break_even_at_r") or 0)
+    be_lock_r = float(cfg.get("be_lock_r") or 0)
     after = [b for b in bars if b["t"] >= decision_ts]
     if not after:
         return None
@@ -144,7 +157,7 @@ def simulate(side: str, sl: float, tp: float, bars: list[dict], point: float, de
     sp0 = spread_fn(eb)
     entry = eb["o"] + (sp0 if side == "BUY" else 0.0)
     pos = SimPosition(side, entry, sl, tp, point, int(eb["t"]), be_at_r=be_r, slip_px=slip_px,
-                      stops_px=float(cfg.get("_stops_px") or 0))
+                      stops_px=float(cfg.get("_stops_px") or 0), be_lock_r=be_lock_r)
     if exit_policy:
         from .exits import WARMUP_BARS, ExitPolicy, attach
         before = [b for b in bars if b["t"] < decision_ts][-WARMUP_BARS:]
@@ -222,7 +235,7 @@ def label_pending(db, get_bars, cfg: dict, now_ts: float, limit: int = 500) -> i
         bars = [b for b in bars if b["t"] + lsec <= now_ts]
         point, spread_fn = None, None
         lcfg = {"max_hold_minutes": cfg.get("max_hold_minutes"), "break_even_at_r": cfg.get("break_even_at_r"),
-                "_bar_sec": lsec, "_horizon_s": LABEL_HORIZON_S if max_hold <= 0 else 0}
+                "be_lock_r": cfg.get("be_lock_r"), "_bar_sec": lsec, "_horizon_s": LABEL_HORIZON_S if max_hold <= 0 else 0}
         points = cfg.get("points") or {}
         for r in items:
             decision = int(r["bar_time"]) + sig_sec
@@ -249,4 +262,4 @@ def _spread_fn(stats: dict | None, sym: str, point: float):
     return lambda b: stats.get((sym, int(b["t"] % 86400 // 3600)), max(float(b.get("sp") or 0), 1.0)) * point
 
 
-__all__ = ["SimPosition", "simulate", "label_pending", "guess_point"]
+__all__ = ["SimPosition", "simulate", "label_pending", "guess_point", "be_lock_level"]

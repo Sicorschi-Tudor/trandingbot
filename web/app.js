@@ -959,6 +959,7 @@ const RISK_LABELS = {
   min_free_margin_pct: 'Marjă liberă min (%)', max_tick_age_seconds: 'Vechime max tick (s)', max_signals_per_symbol_per_session: 'Semnale max / simbol / sesiune',
   news_blackout_minutes: 'Blocare știri ± minute (0 = dezactivat)', news_min_importance: 'Importanță minimă știre (1–3)',
   max_total_open_risk_pct: 'Risc total deschis max (% equity)', loss_streak_pause_minutes: 'Pauză după pierderi consecutive (min, 0 = restul zilei)',
+  cooldown_after_loss_minutes: 'Pauză pe simbol după o pierdere (min, 0 = dezactivat)', rollover_blackout_minutes: 'Blocare rollover 17:00 New York ± minute (0 = dezactivat)',
   live_trading_allowed: 'LIVE permis', paper_start_balance: 'Balanță start PAPER',
 };
 const RISK_READONLY = new Set(['must_have_sl_tp', 'live_trading_allowed']);
@@ -966,6 +967,9 @@ const STRAT_LABELS = {
   signal_timeframe: 'Interval semnal', htf_timeframe: 'Interval HTF', symbols: 'Simboluri (separate prin virgulă)', atr_sl_mult: 'Multiplicator ATR pentru SL',
   atr_tp_mult: 'Multiplicator ATR pentru TP', min_sl_points: 'SL minim (puncte)', min_score: 'Scor minim (componente)', signal_expiry_minutes: 'Expirare semnal (min)', break_even_at_r: 'Break-even la R',
   trailing_enabled: 'Trailing stop', max_hold_minutes: 'Durată max poziție (min)', close_at_session_end: 'Închide la final de sesiune',
+  be_lock_r: 'Profit blocat la break-even (R; 0 = intrare ± 2 puncte)', rescue_enabled: 'Ieșire „rescue” (închide la profit mic după timp lung pe minus)',
+  rescue_minutes: 'Rescue: minute minime deschisă', rescue_mae_r: 'Rescue: MAE minim (R)', rescue_neg_frac: 'Rescue: fracție minimă de minute pe minus (0–1)',
+  rescue_close_r: 'Rescue: închide la profit ≥ (R)',
 };
 let riskOrig = null, stratOrig = null, schedOrig = null;
 

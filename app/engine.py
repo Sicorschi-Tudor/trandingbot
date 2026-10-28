@@ -42,6 +42,9 @@ LABEL_EVERY_S = 60.0
 DEFAULT_STRATEGY = "trend-v1"
 PATH_EVERY_S = 60  # live trade path rows: one per position per minute
 PATH_SOURCE = "live"
+# pre-AI arbitration: risk checks that may clear while Claude reviews (not a reason to skip the review)
+PRE_AI_TRANSIENT_CHECKS = ("quote_fresh", "account_settled")
+PRE_AI_PREFIX = "Respins înainte de AI: "
 
 
 class EngineError(Exception):
@@ -87,6 +90,9 @@ class Engine:
         self._perf_warned: set[str] = set()
         # live trade paths: (source, ticket) -> {"entry","risk","side","symbol","opened_ts","mfe","mae"}
         self._paths: dict[tuple[str, str], dict] = {}
+        # pre-AI arbitration: signals admitted and still waiting for Claude / execution -> reserved exposure
+        self._pending_ai: dict[str, dict] = {}
+        self._bar_batch: list[tuple[dict, dict]] | None = None
         self._last_path_ts = 0
         self.backtests: dict[str, dict] = {}  # run id -> {"progress": 0..1}
         self._bt_lock = threading.Lock()
@@ -461,6 +467,28 @@ class Engine:
             return streak, until
         return streak, None
 
+    def last_loss_ts(self, symbol: str, now: float | None = None) -> float | None:
+        """Close time of the latest bot trade on `symbol` (any mode) closed at a loss within the
+        cooldown_after_loss_minutes window; wins and break-evens (|net| < 0.1R) do not count. None = no cooldown."""
+        minutes = int(self.rt.risk.get("cooldown_after_loss_minutes", 0) or 0)
+        if minutes <= 0:
+            return None
+        now = now or time.time()
+        try:
+            rows = self.db.query("SELECT ticket, symbol, side, volume, price_open, profit, commission, swap, mode, "
+                                 "closed_at_utc FROM trades WHERE symbol=? AND closed_at_utc >= ? "
+                                 "ORDER BY closed_at_utc DESC, id DESC LIMIT 50", (symbol, iso(now - minutes * 60)))
+        except sqlite3.Error:
+            return None
+        equity = {}
+        for r in rows:
+            m = "DEMO" if r["mode"] == "DEMO" else "PAPER"
+            if m not in equity:
+                equity[m] = float((self.risk_account(m)[1] or {}).get("equity") or 0)
+            if self._trade_outcome(r, equity[m]) < 0:
+                return _ts(r["closed_at_utc"])
+        return None
+
     def update_equity_marks(self) -> None:
         for mode in ("PAPER", "DEMO"):
             key, acc = self.risk_account(mode)
@@ -500,8 +528,11 @@ class Engine:
 
     # ---- risk ------------------------------------------------------------
     def risk_check(self, symbol: str, side: str, entry: float, sl: float, tp: float, test_order: bool = False,
-                   mode: str | None = None, size_factor: float = 1.0) -> dict:
+                   mode: str | None = None, size_factor: float = 1.0, reserved: list[dict] | None = None) -> dict:
+        """reserved: [{"symbol","side","risk_money"}] of candidates not yet in the book (pre-AI arbitration dry run);
+        they count as open positions / exposures / trades today / open risk."""
         mode = mode or self.mode()
+        reserved = list(reserved or [])
         self.update_equity_marks()
         key, acc = self.risk_account(mode)
         streak, pause_until = self.loss_streak(mode)
@@ -511,17 +542,20 @@ class Engine:
         n_open = len(bots)
         if mode == "DEMO":
             n_open += self.executor.count_pending_open("DEMO", {int(p["ticket"]) for p in bots})
+        fallback = float((acc or {}).get("equity") or 0) * float(self.rt.risk.get("max_risk_per_trade_pct", 0.25)) / 100.0
+        res_risk = sum(fallback if r.get("risk_money") is None else float(r["risk_money"]) for r in reserved)
         ctx = risk_mod.RiskContext(
             mode=mode, execution_enabled=self.rt.trading["execution_enabled"],
             entries_paused=self.rt.trading["entries_paused"], side=side, entry=entry, sl=sl, tp=tp,
             symbol_info=dict(self.rt.quotes.get(symbol) or {}), account=acc, risk=self.rt.risk,
             bridge_connected=self.rt.bridge_connected(), terminal=self.rt.bridge.get("terminal"),
             mt5_account=self.rt.mt5_account, tick_age=self.rt.tick_age(symbol),
-            symbol=symbol, open_exposures=self.open_exposures(mode),
-            open_bot_positions=n_open, ea_magic_ok=self.rt.bridge.get("magic_ok") is True, has_bot_position_on_symbol=self.has_bot_position(symbol, mode),
-            trades_today=self.trades_today(mode), day_start_equity=marks.get("day_start_equity"),
+            symbol=symbol, open_exposures=self.open_exposures(mode) + [(r["symbol"], r["side"]) for r in reserved],
+            open_bot_positions=n_open + len(reserved), ea_magic_ok=self.rt.bridge.get("magic_ok") is True,
+            has_bot_position_on_symbol=self.has_bot_position(symbol, mode) or any(r["symbol"] == symbol for r in reserved),
+            trades_today=self.trades_today(mode) + len(reserved), day_start_equity=marks.get("day_start_equity"),
             peak_equity=marks.get("peak_equity"), consecutive_losses=streak, loss_pause_until=pause_until,
-            open_risk_money=self.open_risk_money(mode), news_block=news_block, news_note=news_note, test_order=test_order,
+            open_risk_money=self.open_risk_money(mode) + res_risk, news_block=news_block, news_note=news_note, test_order=test_order,
             account_settling=mode == "DEMO" and self.account_settling(),
             size_factor=size_factor, size_cap_pct=float(self.settings.ML_MAX_RISK_PCT),
         )
@@ -804,13 +838,16 @@ class Engine:
         risk = abs(float(entry) - float(init_sl))
         if risk <= 0:
             return None
+        # n / neg: 1-min samples written and those with r < 0 (rescue exit); last_ts: latest sample minute
         st = {"entry": float(entry), "risk": risk, "side": pos["side"], "symbol": pos["symbol"],
-              "opened_ts": pos.get("opened_ts"), "mfe": 0.0, "mae": 0.0}
+              "opened_ts": pos.get("opened_ts"), "mfe": 0.0, "mae": 0.0, "n": 0, "neg": 0, "last_ts": 0}
         try:
-            r = self.db.query_one("SELECT MAX(mfe_r) AS mfe, MAX(mae_r) AS mae FROM trade_paths "
+            r = self.db.query_one("SELECT MAX(mfe_r) AS mfe, MAX(mae_r) AS mae, COUNT(*) AS n, "
+                                  "SUM(CASE WHEN r_now < 0 THEN 1 ELSE 0 END) AS neg, MAX(ts) AS last_ts FROM trade_paths "
                                   "WHERE source=? AND trade_id=? AND symbol=?", (PATH_SOURCE, str(ticket), pos["symbol"]))
             if r and r["mfe"] is not None:
                 st["mfe"], st["mae"] = float(r["mfe"]), float(r["mae"] or 0)
+                st["n"], st["neg"], st["last_ts"] = int(r["n"] or 0), int(r["neg"] or 0), int(r["last_ts"] or 0)
         except sqlite3.Error:
             pass
         return st
@@ -855,6 +892,10 @@ class Engine:
             st["mae"] = max(st["mae"], -r_now)
             if not write:
                 continue
+            if ts > int(st.get("last_ts") or 0):
+                st["last_ts"] = ts
+                st["n"] = int(st.get("n") or 0) + 1
+                st["neg"] = int(st.get("neg") or 0) + (1 if r_now < 0 else 0)
             if st["symbol"] not in ind_cache:
                 ind_cache[st["symbol"]] = self._path_indicators(st["symbol"])
             atr, ema = ind_cache[st["symbol"]]
@@ -891,7 +932,7 @@ class Engine:
             session_open=self.session()["open_now"], has_bot_position=self.has_bot_position(symbol, "ALL"),
             signals_this_session=self.signals_this_session(symbol), tick_age=rt.tick_age(symbol, now), now_ts=now,
             open_exposures=self.open_exposures("ALL"), corr_limit=int(rt.risk.get("max_same_currency_direction", 1)),
-            news_block=news_block,
+            news_block=news_block, last_loss_ts=self.last_loss_ts(symbol, now),
         )
         name, fn, cfg = self.active_strategy()
         a = fn(symbol, sig_bars, htf_bars, rt.quotes.get(symbol), cfg, rt.risk, ctx)
@@ -914,21 +955,121 @@ class Engine:
                 if sig:
                     self._perf_exec("UPDATE analyses SET signal_id=? WHERE symbol=? AND tf=? AND bar_time=? AND signal_id IS NULL",
                                     (sig["id"], a["symbol"], a["timeframe"], a["bar_time"]), "analysis_signal")
-                    try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        loop = None
-                    if loop is None:
-                        asyncio.run(self.signal_pipeline(sig))
+                    if self._bar_batch is not None:
+                        self._bar_batch.append((sig, a))  # loop_once arbitrates every signal of this pass together
                     else:
-                        task = loop.create_task(self.signal_pipeline(sig))
-                        self.signal_tasks.add(task)
-                        task.add_done_callback(self.signal_tasks.discard)
+                        self.dispatch_signals([(sig, a)])
             else:
                 a["reasons"].append("Bara este prea veche pentru a emite un semnal nou (doar analiză).")
         return a
 
+    def _spawn_pipeline(self, sig: dict) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            asyncio.run(self.signal_pipeline(sig))
+        else:
+            task = loop.create_task(self.signal_pipeline(sig))
+            self.signal_tasks.add(task)
+            task.add_done_callback(self.signal_tasks.discard)
+
+    # ---- pre-AI arbitration ------------------------------------------------
+    @staticmethod
+    def _arb_key(item: tuple[dict, dict], quotes: dict) -> tuple:
+        """HTF-aligned first, then the lowest spread / SL-distance cost ratio, then the symbol (deterministic)."""
+        sig, a = item
+        side = sig["direction"]
+        htf = (a.get("indicators") or {}).get("htf_trend")
+        aligned = htf == ("UP" if side == "BUY" else "DOWN")
+        q = quotes.get(sig["symbol"]) or {}
+        sl_dist = abs(float(sig.get("entry") or 0) - float(sig.get("stop_loss") or 0))
+        spread = None
+        if q.get("bid") and q.get("ask"):
+            spread = float(q["ask"]) - float(q["bid"])
+        elif sig.get("spread_points") is not None and q.get("point"):
+            spread = float(sig["spread_points"]) * float(q["point"])
+        cost = spread / sl_dist if spread is not None and sl_dist > 0 else float("inf")
+        return (0 if aligned else 1, cost, sig["symbol"])
+
+    def reserved_exposures(self) -> list[dict]:
+        return [dict(r) for r in self._pending_ai.values()]
+
+    def pre_ai_check(self, sig: dict, mode: str, reserved: list[dict]) -> tuple[bool, dict, dict | None]:
+        """Deterministic dry run of the Risk Engine (+ correlation) for a candidate, counting `reserved` candidates
+        as already open. Returns (admitted, risk check, reservation). Checks that may clear during the review
+        (PRE_AI_TRANSIENT_CHECKS) never reject."""
+        sym, side = sig["symbol"], sig["direction"]
+        q = self.rt.quotes.get(sym) or {}
+        entry = (q.get("ask") if side == "BUY" else q.get("bid")) or sig.get("entry")
+        rc = self.risk_check(sym, side, float(entry), sig["stop_loss"], sig["take_profit"], mode=mode, reserved=reserved)
+        bad = [c for c in rc["checks"] if not c["ok"] and c["name"] not in PRE_AI_TRANSIENT_CHECKS]
+        if bad:
+            return False, {**rc, "checks": bad, "passed": False}, None
+        rm = None
+        if rc.get("volume"):
+            rm = risk_mod.position_risk_money(side, float(entry), sig["stop_loss"], float(rc["volume"]), q)
+        return True, rc, {"signal_id": sig["id"], "symbol": sym, "side": side, "risk_money": rm}
+
+    def arbitrate(self, items: list[tuple[dict, dict]]) -> list[dict]:
+        """Order this bar's new signals and admit them one by one with a risk dry run that reserves the exposure of
+        candidates admitted before them and of signals still waiting for Claude. Only admitted signals go on to
+        Claude; the others become NO_TRADE with ai.status SKIPPED. Applies only when an entry could actually be
+        taken (PAPER/DEMO armed) and the signals are waiting for Claude; otherwise only the order changes."""
+        quotes = self.rt.quotes
+        items = sorted(items, key=lambda it: self._arb_key(it, quotes))
+        mode = self.mode()
+        if (mode not in ("PAPER", "DEMO") or not self.rt.trading["execution_enabled"]
+                or not any(sig["ai"].get("status") == "PENDING" for sig, _ in items)):
+            return [sig for sig, _ in items]
+        reserved = self.reserved_exposures()
+        out = []
+        for sig, _ in items:
+            if sig["ai"].get("status") != "PENDING":
+                out.append(sig)
+                continue
+            try:
+                ok, rc, res = self.pre_ai_check(sig, mode, reserved)
+            except Exception as e:  # a dry-run failure never blocks the normal path (final risk check stays)
+                self._perf_warn_once("pre_ai", f"arbitraj pre-AI eșuat — semnalul continuă normal: {e!r}")
+                out.append(sig)
+                continue
+            if ok:
+                reserved.append(res)
+                self._pending_ai[sig["id"]] = res
+                out.append(sig)
+            else:
+                self._reject_pre_ai(sig, rc)
+        return out
+
+    def _reject_pre_ai(self, sig: dict, rc: dict) -> None:
+        reason = PRE_AI_PREFIX + risk_mod.failed_summary(rc)
+        sig["status"], sig["status_reason"] = "NO_TRADE", reason[:600]
+        sig["ai"] = {**sig["ai"], "status": "SKIPPED", "verdict": None,
+                     "explanation": "Claude nu a fost apelat: semnalul a fost respins de verificarea de risc dinaintea AI."}
+        self.save_signal(sig)
+        self.add_signal_event(sig["id"], "PRE_AI_REJECTED", sig["status_reason"])
+        self._perf_exec("UPDATE analyses SET ai_verdict=? WHERE signal_id=?", ("SKIPPED", sig["id"]), "analysis_verdict")
+        self.rt.log("INFO", "strategy", f"Semnal {sig['direction']} {sig['symbol']} respins înainte de AI: "
+                                        f"{risk_mod.failed_summary(rc)[:200]}")
+
+    def dispatch_signals(self, items: list[tuple[dict, dict]]) -> None:
+        try:
+            admitted = self.arbitrate(items)
+        except Exception as e:  # never strand a PENDING signal: fall back to the old path (final risk check)
+            self.rt.log("ERROR", "engine", f"arbitraj pre-AI eșuat: {e!r}")
+            admitted = [sig for sig, _ in items if sig.get("status") == "NEW"]
+        for sig in admitted:
+            self._spawn_pipeline(sig)
+
     async def signal_pipeline(self, sig: dict) -> None:
+        try:
+            await self._signal_pipeline(sig)
+        finally:
+            self._pending_ai.pop(sig.get("id"), None)  # reservation ends: executed (now in the book) or dropped
+
+    async def _signal_pipeline(self, sig: dict) -> None:
         try:
             if sig["ai"]["status"] == "PENDING":
                 ai = await self.ai.review(sig, self._ai_context(sig["symbol"]))
@@ -1715,20 +1856,30 @@ class Engine:
         tf = rt.strategy["signal_timeframe"]
         htf = rt.strategy["htf_timeframe"]
         sec = TF_SECONDS.get(tf, 300)
-        for sym in rt.active_symbols():
-            if (sym, tf) in rt.hist_force or (sym, htf) in rt.hist_force:
-                continue  # waiting for a history refill after a gap
-            closed = rt.closed_bars(sym, tf, now)
-            if not closed:
-                continue
-            t = closed[-1]["t"]
-            if self.last_analyzed_bar.get(sym) != t:
-                self.last_analyzed_bar[sym] = t
-                fresh = now - (t + sec) < SIGNAL_FRESH_S
-                try:
-                    self.analyze_symbol(sym, allow_signal=fresh)
-                except Exception as e:
-                    rt.log("ERROR", "strategy", f"analiză {sym} eșuată: {e!r}")
+        # new signals of this pass (same bar close) are collected, then arbitrated together before Claude
+        self._bar_batch = []
+        try:
+            for sym in rt.active_symbols():
+                if (sym, tf) in rt.hist_force or (sym, htf) in rt.hist_force:
+                    continue  # waiting for a history refill after a gap
+                closed = rt.closed_bars(sym, tf, now)
+                if not closed:
+                    continue
+                t = closed[-1]["t"]
+                if self.last_analyzed_bar.get(sym) != t:
+                    self.last_analyzed_bar[sym] = t
+                    fresh = now - (t + sec) < SIGNAL_FRESH_S
+                    try:
+                        self.analyze_symbol(sym, allow_signal=fresh)
+                    except Exception as e:
+                        rt.log("ERROR", "strategy", f"analiză {sym} eșuată: {e!r}")
+        finally:
+            batch, self._bar_batch = self._bar_batch, None
+        if batch:
+            try:
+                self.dispatch_signals(batch)
+            except Exception as e:
+                rt.log("ERROR", "engine", f"arbitraj semnale eșuat: {e!r}")
         try:
             self.pm.run(now)
         except Exception as e:

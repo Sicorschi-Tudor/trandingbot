@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
+from zoneinfo import ZoneInfo
+
+ROLLOVER_TZ = ZoneInfo("America/New_York")
+ROLLOVER_HOUR = 17  # FX daily rollover: 17:00 New York (EST/EDT handled by zoneinfo)
 
 
 def currency_legs(symbol: str, side: str) -> list[tuple[str, int]]:
@@ -54,6 +58,43 @@ def news_blocker(symbol: str, events: list, now_ts: float, minutes: int, min_imp
     mins = round(abs(t - now_ts) / 60)
     when = f"peste {mins} min" if t >= now_ts else f"acum {mins} min"
     return f"Știre {name} ({ccy}, impact {imp}) {when} — blocare ±{minutes} min"
+
+
+def nearest_rollover_ts(now_ts: float) -> float:
+    """UTC timestamp of the 17:00 America/New_York rollover nearest to now_ts (DST-safe)."""
+    local = datetime.fromtimestamp(now_ts, timezone.utc).astimezone(ROLLOVER_TZ)
+    best = None
+    for d in (-1, 0, 1):
+        day = (local + timedelta(days=d)).date()
+        t = datetime(day.year, day.month, day.day, ROLLOVER_HOUR, tzinfo=ROLLOVER_TZ).timestamp()
+        if best is None or abs(t - now_ts) < abs(best - now_ts):
+            best = t
+    return best
+
+
+def rollover_blocker(now_ts: float | None, minutes: int) -> str | None:
+    """Reason text when now_ts is within ±minutes of the 17:00 New York rollover, else None."""
+    if now_ts is None or minutes <= 0:
+        return None
+    t = nearest_rollover_ts(now_ts)
+    if abs(t - now_ts) > minutes * 60:
+        return None
+    mins = round(abs(t - now_ts) / 60)
+    when = f"peste {mins} min" if t >= now_ts else f"acum {mins} min"
+    utc = datetime.fromtimestamp(t, timezone.utc)
+    return f"Rollover 17:00 New York ({utc:%H:%M} UTC) {when} — fără intrări noi ±{minutes} min"
+
+
+def loss_cooldown_blocker(last_loss_ts: float | None, now_ts: float | None, minutes: int) -> str | None:
+    """Reason text while now_ts is less than `minutes` after the last losing bot trade on the symbol, else None."""
+    if last_loss_ts is None or now_ts is None or minutes <= 0:
+        return None
+    left = last_loss_ts + minutes * 60 - now_ts
+    if left <= 0:
+        return None
+    ago = max(0, round((now_ts - last_loss_ts) / 60))
+    return (f"Pauză după pierdere pe simbol: ultima tranzacție a închis pe minus acum {ago} min "
+            f"(încă {math.ceil(left / 60)} min din {minutes})")
 
 
 def position_risk_money(side: str, price_open: float, sl: float | None, volume: float, info: dict) -> float | None:

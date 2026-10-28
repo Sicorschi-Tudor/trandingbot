@@ -283,10 +283,11 @@ def test_break_even_lock(db):
     bars[1] = {"t": T0 + 300, "o": 1.1, "h": 1.10115, "l": 1.09995, "c": 1.1011, "sp": 0}  # +1R (bid) reached
     bars[2] = {"t": T0 + 600, "o": 1.1011, "h": 1.1012, "l": 1.0990, "c": 1.0992, "sp": 0}  # falls back
     res, _ = sim_case(db, {"EURUSD": {0: ("BUY", 1.10010, 1.09910, 1.10210, 0.8, ())}}, {"EURUSD": bars},
-                      cost={"slippage_pts": 0, "commission_per_lot_usd": 0})
+                      cost={"slippage_pts": 0, "commission_per_lot_usd": 0}, strategy={"be_lock_r": 0})
     (t,) = res["trades"]
     assert t["outcome"] == "BE"
-    assert t["gross_r"] == pytest.approx(0.02, abs=1e-6)  # lock = entry + 2 pts (position_manager.plan)
+    # be_lock_r 0 (the default is now 0.1 -> smart lock): lock = entry + 2 pts (position_manager.plan)
+    assert t["gross_r"] == pytest.approx(0.02, abs=1e-6)
 
 
 def test_time_stop_and_end(db):

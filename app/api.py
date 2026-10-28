@@ -68,6 +68,8 @@ RISK_RULES: dict[str, tuple[type, float, float]] = {
     "news_min_importance": (int, 1, 3),
     "max_total_open_risk_pct": (float, 0.1, 20),
     "loss_streak_pause_minutes": (int, 0, 1440),
+    "cooldown_after_loss_minutes": (int, 0, 1440),
+    "rollover_blackout_minutes": (int, 0, 240),
 }
 STRATEGY_NUM: dict[str, tuple[type, float, float]] = {
     "atr_sl_mult": (float, 0.1, 20),
@@ -77,6 +79,11 @@ STRATEGY_NUM: dict[str, tuple[type, float, float]] = {
     "signal_expiry_minutes": (int, 1, 1440),
     "break_even_at_r": (float, 0, 20),
     "max_hold_minutes": (int, 0, 100000),
+    "be_lock_r": (float, 0, 1),
+    "rescue_minutes": (int, 1, 1440),
+    "rescue_mae_r": (float, 0, 1),
+    "rescue_neg_frac": (float, 0, 1),
+    "rescue_close_r": (float, 0, 1),
 }
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9._#-]{2,20}$")
 
@@ -120,7 +127,7 @@ def validate_strategy_update(body: dict, current: dict) -> dict:
     for k, v in body.items():
         if k in STRATEGY_NUM:
             out[k] = _num(k, v, *STRATEGY_NUM[k])
-        elif k in ("trailing_enabled", "close_at_session_end"):
+        elif k in ("trailing_enabled", "close_at_session_end", "rescue_enabled"):
             out[k] = _bool(k, v)
         elif k in ("signal_timeframe", "htf_timeframe"):
             tf = str(v).upper()

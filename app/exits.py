@@ -10,7 +10,8 @@ Indicators used by exits (EMA20, MACD(12,26,9) histogram, ATR14) are updated inc
 step (seeded with closed bars before the entry), on the timeframe of those bars — no lookahead.
 
 Modes:
-- base: SL/TP, BE at break_even_at_r (lock entry ± 2 pts), time stop (handled by the caller) = live behaviour.
+- base: SL/TP, BE at break_even_at_r (lock entry ± 2 pts, or the smart lock entry ± max(spread + 3 pts,
+  be_lock_r × R) when the position has be_lock_r > 0 — labeler.be_lock_level), time stop (caller) = live behaviour.
 - trailing: once the best close is ≥ trail_start_r, SL = best close ∓ max(trail_atr_mult×ATR, trail_min_r×R);
   only tightens, needs spread/stops level + 1 pt of room like a live MODIFY.
 - partial: close partial_frac at +partial_r (level price), move the rest to BE, keep TP. Result in R is
@@ -20,6 +21,12 @@ Modes:
   or the MACD histogram flips sign against it.
 - stall: at the first closed bar ≥ stall_minutes after the entry, close if -stall_band_r ≤ R ≤ +stall_band_r.
 - giveback: once MFE ≥ gb_arm_r, close at a bar close where R ≤ MFE×(1-gb_frac).
+- rescue: after rescue_minutes, with MAE ≥ rescue_mae_r and ≥ rescue_neg_frac of the closed bars below 0R, close at
+  the first +rescue_close_r (intrabar at that level once armed, or at a bar close ≥ it). Never moves the SL. The live
+  RESCUE exit (strategy rescue_* keys) is modelled with with_rescue(policy, strategy_cfg). Approximation: live samples
+  r every minute and re-checks arming on every loop; here neg_frac / arming use signal-bar closes only, so the model
+  is meaningful only for signal timeframes ≤ M5 (on H1 the first bar close already passes 30 min with a 0/1 or 1/1
+  fraction). The intrabar exit pays slip_px (live = market close).
 - combo: params.modes = list of the modes above, applied together (shared params).
 Stage C2 (higher timeframes, long holds):
 - channel: Turtle-style exit at the bar close: BUY closes when the close is below the lowest low of the previous
@@ -35,6 +42,8 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+
+from .labeler import be_lock_level
 
 MODES = ("base", "trailing", "partial", "invalidation", "stall", "giveback", "channel", "signal_flip", "rescue", "combo")
 DEFAULT_PARAMS: dict[str, dict] = {
@@ -190,6 +199,29 @@ class ExitPolicy:
         return d
 
 
+RESCUE_KEYS = ("rescue_minutes", "rescue_mae_r", "rescue_neg_frac", "rescue_close_r")
+# defaults of the live strategy rescue_* settings (the research mode keeps its own DEFAULT_PARAMS['rescue'])
+LIVE_RESCUE_DEFAULTS = {"rescue_minutes": 30, "rescue_mae_r": 0.3, "rescue_neg_frac": 0.6, "rescue_close_r": 0.1}
+
+
+def with_rescue(policy: "ExitPolicy | None", strat: dict | None) -> "ExitPolicy":
+    """`policy` plus the live RESCUE exit when the strategy settings have rescue_enabled (strategy rescue_* keys,
+    LIVE_RESCUE_DEFAULTS for missing ones). base -> mode 'rescue'; another mode -> combo [mode, rescue]; a combo gets
+    'rescue' appended. A policy that already has 'rescue' (explicit research params) is returned unchanged, and so is
+    any policy when rescue_enabled is false/missing (old behaviour)."""
+    policy = ExitPolicy.from_spec(policy)
+    strat = strat or {}
+    if not strat.get("rescue_enabled") or "rescue" in policy.modes:
+        return policy
+    rp = {k: (strat[k] if strat.get(k) is not None else LIVE_RESCUE_DEFAULTS[k]) for k in RESCUE_KEYS}
+    if policy.is_base:
+        return ExitPolicy("rescue", {**policy.p, **rp})  # keeps a time stop set in the base params
+    params = {k: v for k, v in policy.p.items()}
+    params.update(rp)
+    params["modes"] = list(policy.modes) + ["rescue"]
+    return ExitPolicy("combo", params)
+
+
 def attach(pos, policy: ExitPolicy | None, history: list[dict] | None = None, bar_sec: int = 60,
            partial_frac: float | None = None, bias_fn=None) -> None:
     """Arm a SimPosition with a non-base policy (base -> the labeler's own code path, bit-identical).
@@ -215,7 +247,7 @@ def attach(pos, policy: ExitPolicy | None, history: list[dict] | None = None, ba
 
 def _try_be(pos, fav_px: float, spread_px: float) -> None:
     sg = pos.sign
-    lock = pos.entry + sg * BE_LOCK_POINTS * pos.point
+    lock = be_lock_level(pos.entry, sg, pos.point, pos.r_dist, spread_px, getattr(pos, "be_lock_r", 0.0))
     if (lock - pos.sl) * sg <= 0:
         pos.be_done = True
     elif (fav_px - lock) * sg >= max(spread_px, pos.stops_px) + pos.point:
@@ -259,7 +291,8 @@ def step(pos, bar: dict, spread_px: float) -> tuple[str, float] | None:
         return "TP", pos.tp
     # rescue: armed by previous closed bars only; exits intrabar at the small profit level
     if xs.get("rescue_armed") and r_dist > 0 and favour >= p["rescue_close_r"] * r_dist:
-        return "RESCUE", pos.entry + sg * p["rescue_close_r"] * r_dist
+        # live closes at market once the level trades: adverse slippage like the stop exits
+        return "RESCUE", pos.entry + sg * p["rescue_close_r"] * r_dist - sg * pos.slip_px
     if pos.be_at_r > 0 and not pos.be_done and r_dist > 0 and favour >= pos.be_at_r * r_dist - pos.point / 2:
         _try_be(pos, fav_px, spread_px)
     if xs["be_pending"] and not pos.be_done:
@@ -318,5 +351,5 @@ def step(pos, bar: dict, spread_px: float) -> tuple[str, float] | None:
     return None
 
 
-__all__ = ["ExitPolicy", "IncIndicators", "attach", "step", "MODES", "DEFAULT_PARAMS", "AT_CLOSE_REASONS",
+__all__ = ["ExitPolicy", "IncIndicators", "attach", "step", "with_rescue", "RESCUE_KEYS", "LIVE_RESCUE_DEFAULTS", "MODES", "DEFAULT_PARAMS", "AT_CLOSE_REASONS",
            "WARMUP_BARS", "HOLD_KEYS", "MAX_HOLD_MINUTES"]
