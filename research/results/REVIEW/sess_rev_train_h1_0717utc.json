@@ -1,0 +1,120 @@
+{
+ "strategy": "trend-v1",
+ "tf": "H1",
+ "htf": "H4",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "min_sl_points": 150,
+  "atr_sl_mult": 3.0,
+  "atr_tp_mult": 4.5,
+  "max_hold_minutes": 1440,
+  "rescue_enabled": false
+ },
+ "risk_params": {
+  "max_open_positions": 1,
+  "max_trades_per_day": 20,
+  "max_spread_points": 100,
+  "max_daily_loss_pct": 100,
+  "max_consecutive_losses": 1000,
+  "cooldown_after_loss_minutes": 0,
+  "rollover_blackout_minutes": 0
+ },
+ "exit": null,
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0
+ },
+ "elapsed_s": 9.6,
+ "summary": {
+  "trades": 1429,
+  "win_rate": 0.4864,
+  "avg_r": -0.0025,
+  "expectancy_r": -0.0025,
+  "profit_factor": 0.994,
+  "max_dd_r": 26.99,
+  "max_consec_losses": 9,
+  "net_r": -3.53,
+  "net_usd": -27.89,
+  "ci90_avg_r": [
+   -0.0427,
+   0.0392
+  ],
+  "sample_days": 2037.8
+ },
+ "by_year": {
+  "2013": {
+   "n": 142,
+   "avg_r": 0.076,
+   "sum_r": 10.8
+  },
+  "2014": {
+   "n": 256,
+   "avg_r": -0.0134,
+   "sum_r": -3.43
+  },
+  "2015": {
+   "n": 264,
+   "avg_r": 0.0075,
+   "sum_r": 1.98
+  },
+  "2016": {
+   "n": 259,
+   "avg_r": -0.0221,
+   "sum_r": -5.72
+  },
+  "2017": {
+   "n": 257,
+   "avg_r": 0.05,
+   "sum_r": 12.85
+  },
+  "2018": {
+   "n": 251,
+   "avg_r": -0.0797,
+   "sum_r": -20.0
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 1429,
+   "win_rate": 0.4864,
+   "avg_r": -0.0025,
+   "expectancy_r": -0.0025,
+   "profit_factor": 0.994,
+   "max_dd_r": 26.99,
+   "max_consec_losses": 9,
+   "net_r": -3.53,
+   "net_usd": -27.89
+  }
+ },
+ "by_outcome": {
+  "SL": 474,
+  "TIME": 615,
+  "TP": 252,
+  "BE": 87,
+  "END": 1
+ },
+ "counts": {
+  "blocked_market": 0,
+  "blocked_context": {
+   "Exist\u0103": 6333
+  },
+  "signals": 1429,
+  "risk_rejected": {},
+  "filled": 1429,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 1,
+  "analyses": 14383,
+  "candidates": 7762
+ },
+ "warnings": [
+  "Drawdown 3% atins la 2015-05-11T14:00:00Z \u2014 \u00een live intr\u0103rile s-ar fi oprit (backtestul continu\u0103; halt_on_drawdown=true pentru oprire).",
+  "1 pozi\u021bii \u00eenchise for\u021bat la sf\u00e2r\u0219itul datelor (END).",
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate."
+ ]
+}

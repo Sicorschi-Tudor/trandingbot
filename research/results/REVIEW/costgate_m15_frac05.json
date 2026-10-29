@@ -1,0 +1,107 @@
+{
+ "strategy": "disc-rev-costgate",
+ "tf": "M15",
+ "htf": "H1",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "min_sl_points": 150,
+  "max_spread_sl_frac": 0.05
+ },
+ "risk_params": {
+  "max_open_positions": 1,
+  "max_trades_per_day": 20,
+  "max_spread_points": 100,
+  "max_daily_loss_pct": 100,
+  "max_consecutive_losses": 1000,
+  "cooldown_after_loss_minutes": 0,
+  "rollover_blackout_minutes": 0
+ },
+ "exit": null,
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0
+ },
+ "elapsed_s": 43.7,
+ "summary": {
+  "trades": 123,
+  "win_rate": 0.6341,
+  "avg_r": 0.0309,
+  "expectancy_r": 0.0309,
+  "profit_factor": 1.094,
+  "max_dd_r": 5.388,
+  "max_consec_losses": 3,
+  "net_r": 3.804,
+  "net_usd": 93.05,
+  "ci90_avg_r": [
+   -0.1032,
+   0.1555
+  ],
+  "sample_days": 2037.9
+ },
+ "by_year": {
+  "2013": {
+   "n": 62,
+   "avg_r": 0.0201,
+   "sum_r": 1.24
+  },
+  "2014": {
+   "n": 13,
+   "avg_r": 0.1434,
+   "sum_r": 1.86
+  },
+  "2015": {
+   "n": 12,
+   "avg_r": -0.0691,
+   "sum_r": -0.83
+  },
+  "2016": {
+   "n": 36,
+   "avg_r": 0.0424,
+   "sum_r": 1.52
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 123,
+   "win_rate": 0.6341,
+   "avg_r": 0.0309,
+   "expectancy_r": 0.0309,
+   "profit_factor": 1.094,
+   "max_dd_r": 5.388,
+   "max_consec_losses": 3,
+   "net_r": 3.804,
+   "net_usd": 93.05
+  }
+ },
+ "by_outcome": {
+  "SL": 37,
+  "RESCUE": 33,
+  "TP": 21,
+  "TIME": 17,
+  "BE": 15
+ },
+ "counts": {
+  "blocked_market": 66537,
+  "blocked_context": {
+   "Exist\u0103": 283,
+   "Limita": 92
+  },
+  "signals": 123,
+  "risk_rejected": {},
+  "filled": 123,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 0,
+  "analyses": 130964,
+  "candidates": 67035
+ },
+ "warnings": [
+  "Ie\u0219irea RESCUE e simulat\u0103 pe \u00eenchiderile barelor M15 (live: e\u0219antioane de 1 minut) \u2014 modelul e valid doar pentru M5 sau mai mic; rezultatele RESCUE nu sunt concludente.",
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate."
+ ]
+}
