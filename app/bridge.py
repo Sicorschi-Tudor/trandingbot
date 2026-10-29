@@ -375,7 +375,14 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
     # EA >= 1.14: economic-calendar history (ingests "calendar_hist", at most one CALHIST in flight; never raises)
     commands = commands + calendar_hist.on_sync(engine, payload, commands, now,
                                                 hist_pending=bool(hist) or bool(rt.hist_force))
-    return build_response(int(now), symbols, tfs, hist, commands)
+    # keep quoting symbols of open bot positions that are no longer active, so they stay managed (BE/rescue/time stop)
+    magic = int(engine.settings.MT5_MAGIC)
+    quote_symbols = list(symbols)
+    for p in rt.mt5_positions or []:
+        sym = p.get("symbol")
+        if sym and sym not in quote_symbols and int(p.get("magic") or 0) == magic:
+            quote_symbols.append(sym)
+    return build_response(int(now), quote_symbols, tfs, hist, commands)
 
 
 @router.post("/bridge/v1/sync")
