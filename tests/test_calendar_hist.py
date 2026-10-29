@@ -354,16 +354,16 @@ def test_clock_skew_removed_from_times_and_added_to_request(tmp_path):
     eng.db.close()
 
 
-def test_broker_dst_rule_applied_to_old_values(tmp_path):
+def test_broker_dst_rule_not_applied_to_calendar_times(tmp_path):
+    # MT5 shifts every calendar value by the server's CURRENT offset (unlike bars): ToUtc(value.time) is already the
+    # real UTC in both seasons, so the broker DST rule must not move old values (see tests/test_calendar_dst.py)
     eng = make_engine(tmp_path, MT5_SERVER_TZ="NY")
     rt = eng.rt
     rt.bridge["srv_offset"] = 3 * 3600  # summer: GMT+3
     line = ch.next_request(rt, NOW)
-    # a January release at 13:30 UTC = 15:30 broker time (GMT+2 then); the EA stamps it with today's +3 h -> 12:30
     t_jan = ts(2026, 1, 9, 13, 30)
     t_jul = ts(2026, 6, 5, 12, 30)
-    ea_items = [item(1, t_jan - 3600), item(2, t_jul)]
-    ch.ingest_payload(rt, reply_for(line, ea_items, srv_off=3 * 3600), NOW)
+    ch.ingest_payload(rt, reply_for(line, [item(1, t_jan), item(2, t_jul)], srv_off=3 * 3600), NOW)
     got = {r["event_id"]: r["t"] for r in rows(eng)}
     assert got == {1: t_jan, 2: t_jul}
     eng.db.close()

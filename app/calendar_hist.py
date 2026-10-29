@@ -151,17 +151,90 @@ def _rekey_old_table(conn: sqlite3.Connection) -> None:
 
 
 def migrate(conn: sqlite3.Connection) -> list[str]:
-    """CREATE TABLE IF NOT EXISTS, plus a one-time re-key of an old (event_id, t)-keyed calendar_history.
-    Never raises (a failure here must not stop the server)."""
+    """CREATE TABLE IF NOT EXISTS, a one-time re-key of an old (event_id, t)-keyed calendar_history and the one-time
+    DST repair of times stored by the old _fix_time. Never raises (a failure here must not stop the server)."""
     try:
         before = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         if "calendar_history" in before:
             _rekey_old_table(conn)
         conn.executescript(SCHEMA)
-        return [t for t in ("calendar_history", "calendar_history_windows") if t not in before]
+        created = [t for t in ("calendar_history", "calendar_history_windows") if t not in before]
     except Exception as ex:  # pragma: no cover - defensive
         log.error("[calendar_hist] migrare eșuată: %r", ex)
         return []
+    try:
+        repair_dst_times(conn)
+    except Exception as ex:  # pragma: no cover - defensive
+        log.error("[calendar_hist] reparare DST eșuată: %r", ex)
+    return created
+
+
+DST_FIX_KEY = "calendar_history_dst_fix_v1"  # settings flag: the one-time repair below already ran
+
+
+def _saved_rule(conn: sqlite3.Connection) -> str | None:
+    """The broker DST rule the old code converted with: the one archive.server_tz_rule saved (auto mode)."""
+    import json
+    from . import archive
+    row = conn.execute("SELECT value_json FROM settings WHERE key=?", (archive.TZ_SETTING_KEY,)).fetchone()
+    try:
+        saved = json.loads(row[0]) if row else {}
+    except Exception:
+        saved = {}
+    rules = {str(v) for v in (saved.values() if isinstance(saved, dict) else []) if v}
+    if len(rules) != 1:
+        return None
+    rule = rules.pop()
+    return rule if archive.rule_offset_utc(rule, time.time()) is not None else None
+
+
+def _undo_old_fix(rule: str, t_stored: int, t_ingest: float) -> int | None:
+    """Inverse of the old conversion t_stored = t_ea + off - rule_offset_local(rule, t_ea + off), off = the rule's
+    offset when the row was written (the old code applied the rule only when it matched today's offset).
+    Returns t_ea (= real UTC, see _fix_time), or None when no offset of the rule reproduces t_stored."""
+    from . import archive
+    off = archive.rule_offset_utc(rule, t_ingest)
+    if off is None:
+        return None
+    cands = {archive.rule_offset_utc(rule, t_stored + d) for d in (0, -3 * 3600, 3 * 3600, -DAY, DAY)}
+    for ro in sorted(c for c in cands if c is not None):
+        t_ea = t_stored - off + ro
+        if t_ea + off - archive.rule_offset_local(rule, t_ea + off) == t_stored:
+            return t_ea
+    return None
+
+
+def repair_dst_times(conn: sqlite3.Connection, rule: str | None = None) -> int:
+    """One-time repair (guarded by settings[DST_FIX_KEY]) of rows written by the old _fix_time, which applied the
+    broker DST rule to calendar times: each t is moved back to the EA's UTC (the real release time). The flag is
+    set even when nothing can be repaired (no saved rule = the old code fell back to the plain offset, already
+    correct), so rows written by the new code are never touched. Returns the number of rows moved."""
+    if conn.execute("SELECT 1 FROM settings WHERE key=?", (DST_FIX_KEY,)).fetchone():
+        return 0
+    rule = rule or _saved_rule(conn)
+    rows = conn.execute("SELECT value_id, t, updated_ts FROM calendar_history WHERE updated_ts IS NOT NULL"
+                        ).fetchall() if rule else []
+    upd = []
+    for vid, t, ts_ in rows:
+        t_new = _undo_old_fix(rule, int(t), float(ts_))
+        if t_new is not None and t_new != int(t):
+            upd.append((t_new, vid))
+    import json
+    conn.execute("BEGIN")
+    try:
+        for i in range(0, len(upd), WRITE_CHUNK):
+            conn.executemany("UPDATE calendar_history SET t=? WHERE value_id=?", upd[i:i + WRITE_CHUNK])
+        conn.execute("INSERT INTO settings(key, value_json) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET "
+                     "value_json=excluded.value_json",
+                     (DST_FIX_KEY, json.dumps({"rule": rule, "moved": len(upd), "rows": len(rows),
+                                               "ts": time.time()})))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    if upd:
+        log.warning("[calendar_hist] calendar_history: %d ore de publicare corectate (DST, regula %s)", len(upd), rule)
+    return len(upd)
 
 
 # ---- helpers ---------------------------------------------------------------------
@@ -268,9 +341,9 @@ def _bot_positions_open(rt) -> bool:
 
 
 def _ea_shift(rt, t: int, now: float) -> int:
-    """UTC instant -> EA UTC frame (its skewed TimeGMT() and today's server offset), like HISTX end_utc."""
-    from . import archive
-    return t + int(rt.bridge.get("clock_skew_s") or 0) + archive._end_delta(rt, t, now)
+    """UTC instant -> EA UTC frame (its skewed TimeGMT()). Calendar times carry today's offset for every value
+    (see _fix_time), so unlike HISTX end_utc no broker DST rule shift applies here."""
+    return t + int(rt.bridge.get("clock_skew_s") or 0)
 
 
 def next_request(rt, now: float, commands_pending: bool = False, hist_pending: bool = False,
@@ -353,17 +426,15 @@ def _note_error(rt, now: float, why: str) -> None:
 
 # ---- ingestion -------------------------------------------------------------------------
 def _fix_time(rt, t_ea: int, srv_off: int | None, now: float) -> int:
-    """EA UTC (today's offset, skewed TimeGMT) -> real UTC with the broker DST rule valid at that instant."""
-    from . import archive
-    skew = int(rt.bridge.get("clock_skew_s") or 0)
-    if srv_off is not None:
-        rule = archive.server_tz_rule(rt, now)
-        if rule is not None and archive.rule_offset_utc(rule, now) == srv_off + skew:
-            t_srv = t_ea + srv_off
-            ro = archive.rule_offset_local(rule, t_srv)
-            if ro is not None:
-                return t_srv - ro
-    return t_ea - skew
+    """EA UTC (ToUtc(value.time) = value.time - today's offset, skewed TimeGMT) -> real UTC.
+
+    Unlike bar open times, MT5 calendar times are NOT historical broker-local times: the terminal keeps calendar
+    values in UTC and shifts every one of them by the server's CURRENT offset (TimeTradeServer() - TimeGMT()), so
+    value.time - today's offset is already the real UTC instant in both seasons. Applying the broker DST rule here
+    (as archive._dst_fix_bars does for bars) moved every release on the other side of the broker's last DST switch
+    by one hour (e.g. US NFP stored at 11:30 instead of 12:30 UTC in EU summer when ingested in winter).
+    Only the EA clock skew is removed. srv_off / now are kept for the call signature (and future checks)."""
+    return t_ea - int(rt.bridge.get("clock_skew_s") or 0)
 
 
 def clean_items(rt, raw, srv_off: int | None, now: float) -> list[tuple]:
