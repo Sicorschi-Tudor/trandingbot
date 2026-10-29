@@ -1,0 +1,115 @@
+FILE research/results/GOLDCFG/A01.trades.jsonl
+N=6682 avg_r=-0.1858 sd=0.942 CI90=[-0.2047,-0.1668] sum_r=-1241.5
+
+== by entry hour UTC ==
+             0: n=  242 avg=-0.2133 CI90=[-0.3084,-0.1182] sum=  -51.6  z_vs_random=-0.46
+             1: n=  339 avg=-0.2523 CI90=[-0.3309,-0.1737] sum=  -85.5  z_vs_random=-1.33
+             2: n=  242 avg=-0.2897 CI90=[-0.3724,-0.2069] sum=  -70.1  z_vs_random=-1.75
+             3: n=  152 avg=-0.2132 CI90=[-0.3214,-0.1050] sum=  -32.4  z_vs_random=-0.36
+             4: n=  125 avg=-0.2351 CI90=[-0.3562,-0.1140] sum=  -29.4  z_vs_random=-0.59
+             5: n=  177 avg=-0.1415 CI90=[-0.2627,-0.0204] sum=  -25.0  z_vs_random=+0.63
+             6: n=  326 avg=-0.1938 CI90=[-0.2827,-0.1050] sum=  -63.2  z_vs_random=-0.16
+             7: n=  493 avg=-0.2661 CI90=[-0.3366,-0.1956] sum= -131.2  z_vs_random=-1.97
+             8: n=  570 avg=-0.2088 CI90=[-0.2720,-0.1455] sum= -119.0  z_vs_random=-0.61
+             9: n=  541 avg=-0.1238 CI90=[-0.1875,-0.0602] sum=  -67.0  z_vs_random=+1.60
+            10: n=  439 avg=-0.1639 CI90=[-0.2370,-0.0908] sum=  -72.0  z_vs_random=+0.50
+            11: n=  478 avg=-0.1110 CI90=[-0.1868,-0.0352] sum=  -53.1  z_vs_random=+1.80
+            12: n=  640 avg=-0.2000 CI90=[-0.2685,-0.1316] sum= -128.0  z_vs_random=-0.40
+            13: n=  556 avg=-0.1325 CI90=[-0.2041,-0.0610] sum=  -73.7  z_vs_random=+1.39
+            14: n=  412 avg=-0.0948 CI90=[-0.1737,-0.0159] sum=  -39.1  z_vs_random=+2.03
+            15: n=  272 avg=-0.1420 CI90=[-0.2408,-0.0433] sum=  -38.6  z_vs_random=+0.78
+            16: n=  174 avg=-0.1583 CI90=[-0.2636,-0.0531] sum=  -27.5  z_vs_random=+0.39
+            17: n=  141 avg=-0.2557 CI90=[-0.3642,-0.1472] sum=  -36.0  z_vs_random=-0.89
+            18: n=  101 avg=-0.2400 CI90=[-0.3674,-0.1126] sum=  -24.2  z_vs_random=-0.58
+            19: n=   67 avg=-0.1155 CI90=[-0.2964,+0.0653] sum=   -7.7  z_vs_random=+0.61
+            20: n=   26 avg=-0.3314 CI90=[-0.5827,-0.0800] sum=   -8.6  z_vs_random=-0.79
+            21: n=    2 avg=-0.4688 CI90=[-1.1040,+0.1664] sum=   -0.9  z_vs_random=-0.43
+            22: n=   26 avg=-0.1636 CI90=[-0.4681,+0.1408] sum=   -4.3  z_vs_random=+0.12
+            23: n=  141 avg=-0.3777 CI90=[-0.4834,-0.2720] sum=  -53.3  z_vs_random=-2.45
+
+== by weekday ==
+           Mon: n= 1257 avg=-0.2037 CI90=[-0.2465,-0.1609] sum= -256.0  z_vs_random=-0.75
+           Tue: n= 1357 avg=-0.1587 CI90=[-0.2016,-0.1158] sum= -215.3  z_vs_random=+1.19
+           Wed: n= 1387 avg=-0.1702 CI90=[-0.2125,-0.1279] sum= -236.1  z_vs_random=+0.69
+           Thu: n= 1357 avg=-0.1667 CI90=[-0.2083,-0.1250] sum= -226.2  z_vs_random=+0.84
+           Fri: n= 1269 avg=-0.2311 CI90=[-0.2742,-0.1880] sum= -293.3  z_vs_random=-1.91
+           Sun: n=   55 avg=-0.2639 CI90=[-0.4434,-0.0843] sum=  -14.5  z_vs_random=-0.62
+
+== by month of year ==
+             1: n=  513 avg=-0.2640 CI90=[-0.3296,-0.1985] sum= -135.4  z_vs_random=-1.96
+             2: n=  479 avg=-0.1491 CI90=[-0.2203,-0.0778] sum=  -71.4  z_vs_random=+0.89
+             3: n=  521 avg=-0.1196 CI90=[-0.1890,-0.0502] sum=  -62.3  z_vs_random=+1.67
+             4: n=  494 avg=-0.1649 CI90=[-0.2348,-0.0950] sum=  -81.5  z_vs_random=+0.51
+             5: n=  511 avg=-0.1840 CI90=[-0.2515,-0.1165] sum=  -94.0  z_vs_random=+0.05
+             6: n=  579 avg=-0.1487 CI90=[-0.2155,-0.0818] sum=  -86.1  z_vs_random=+0.99
+             7: n=  611 avg=-0.1796 CI90=[-0.2403,-0.1189] sum= -109.7  z_vs_random=+0.17
+             8: n=  627 avg=-0.2144 CI90=[-0.2752,-0.1537] sum= -134.4  z_vs_random=-0.80
+             9: n=  599 avg=-0.1708 CI90=[-0.2361,-0.1055] sum= -102.3  z_vs_random=+0.41
+            10: n=  624 avg=-0.1706 CI90=[-0.2327,-0.1084] sum= -106.4  z_vs_random=+0.42
+            11: n=  588 avg=-0.2032 CI90=[-0.2664,-0.1399] sum= -119.5  z_vs_random=-0.47
+            12: n=  536 avg=-0.2583 CI90=[-0.3250,-0.1915] sum= -138.4  z_vs_random=-1.86
+
+== by year ==
+          2013: n=  737 avg=-0.1954 CI90=[-0.2524,-0.1383] sum= -144.0  z_vs_random=-0.29
+          2014: n= 1219 avg=-0.1757 CI90=[-0.2218,-0.1295] sum= -214.1  z_vs_random=+0.42
+          2015: n= 1223 avg=-0.2030 CI90=[-0.2475,-0.1586] sum= -248.3  z_vs_random=-0.71
+          2016: n= 1242 avg=-0.1748 CI90=[-0.2186,-0.1310] sum= -217.1  z_vs_random=+0.46
+          2017: n= 1116 avg=-0.1905 CI90=[-0.2357,-0.1454] sum= -212.6  z_vs_random=-0.18
+          2018: n= 1145 avg=-0.1793 CI90=[-0.2241,-0.1345] sum= -205.3  z_vs_random=+0.26
+
+== by spread/SL ratio ==
+   [0.00,0.05): n=   14 avg=+0.1247 CI90=[-0.3023,+0.5517] sum=   +1.7  z_vs_random=+1.23
+   [0.05,0.08): n=  188 avg=-0.0922 CI90=[-0.2026,+0.0182] sum=  -17.3  z_vs_random=+1.38
+   [0.08,0.10): n=  424 avg=-0.0994 CI90=[-0.1738,-0.0250] sum=  -42.2  z_vs_random=+1.95
+   [0.10,0.12): n=  752 avg=-0.1482 CI90=[-0.2054,-0.0910] sum= -111.4  z_vs_random=+1.16
+   [0.12,0.15): n= 1766 avg=-0.2024 CI90=[-0.2389,-0.1659] sum= -357.4  z_vs_random=-0.86
+   [0.15,0.20): n= 3191 avg=-0.1923 CI90=[-0.2198,-0.1648] sum= -613.6  z_vs_random=-0.54
+   [0.20,9.00): n=  347 avg=-0.2920 CI90=[-0.3747,-0.2094] sum= -101.3  z_vs_random=-2.16
+
+== by ATR14/price % tercile (signal TF) ==
+  T1 low(<0.0971): n= 2227 avg=-0.1647 CI90=[-0.1991,-0.1303] sum= -366.8  z_vs_random=+1.29
+        T2 mid: n= 2227 avg=-0.2111 CI90=[-0.2437,-0.1784] sum= -470.0  z_vs_random=-1.55
+  T3 high(>=0.125): n= 2228 avg=-0.1816 CI90=[-0.2129,-0.1503] sum= -404.7  z_vs_random=+0.26
+
+== by ATR14 USD tercile (signal TF) ==
+  T1 low(<1.21): n= 2224 avg=-0.1712 CI90=[-0.2054,-0.1369] sum= -380.7  z_vs_random=+0.90
+        T2 mid: n= 2230 avg=-0.2055 CI90=[-0.2383,-0.1727] sum= -458.3  z_vs_random=-1.21
+  T3 high(>=1.56): n= 2228 avg=-0.1807 CI90=[-0.2121,-0.1493] sum= -402.5  z_vs_random=+0.31
+
+== by HTF EMA50 slope/ATR_htf aligned to trade (tercile) ==
+  T1 low(<0.0548): n= 2227 avg=-0.1724 CI90=[-0.2049,-0.1398] sum= -383.8  z_vs_random=+0.82
+        T2 mid: n= 2226 avg=-0.1854 CI90=[-0.2182,-0.1526] sum= -412.7  z_vs_random=+0.02
+  T3 high(>=0.11): n= 2229 avg=-0.1996 CI90=[-0.2327,-0.1665] sum= -445.0  z_vs_random=-0.85
+
+== by HTF trend vs trade dir (thr 0.05 ATR) ==
+    with trend: n= 4706 avg=-0.1903 CI90=[-0.2130,-0.1677] sum= -895.8  z_vs_random=-0.61
+          flat: n= 1974 avg=-0.1741 CI90=[-0.2087,-0.1395] sum= -343.7  z_vs_random=+0.66
+       against: n=    2 avg=-1.0165 CI90=[-1.0202,-1.0128] sum=   -2.0  z_vs_random=-1.25
+
+== by |score| (net conditions/5) ==
+           0.6: n= 1193 avg=-0.1586 CI90=[-0.2033,-0.1138] sum= -189.2  z_vs_random=+1.10
+           0.8: n= 4397 avg=-0.1960 CI90=[-0.2191,-0.1728] sum= -861.6  z_vs_random=-1.22
+           1.0: n= 1092 avg=-0.1747 CI90=[-0.2232,-0.1261] sum= -190.7  z_vs_random=+0.43
+
+== by outcome ==
+            BE: n=  689 avg=+0.1060 CI90=[+0.1005,+0.1115] sum=  +73.0  z_vs_random=+8.59
+        RESCUE: n= 1648 avg=+0.0623 CI90=[+0.0618,+0.0629] sum= +102.7  z_vs_random=+12.32
+            SL: n= 3007 avg=-1.0423 CI90=[-1.0454,-1.0392] sum=-3134.2  z_vs_random=-67.25
+          TIME: n=  281 avg=+0.0514 CI90=[-0.0039,+0.1067] sum=  +14.5  z_vs_random=+4.31
+            TP: n= 1057 avg=+1.6107 CI90=[+1.6071,+1.6142] sum=+1702.5  z_vs_random=+67.60
+
+== by side ==
+           BUY: n= 3157 avg=-0.1903 CI90=[-0.2175,-0.1631] sum= -600.9  z_vs_random=-0.37
+          SELL: n= 3525 avg=-0.1817 CI90=[-0.2081,-0.1553] sum= -640.6  z_vs_random=+0.37
+
+SL floor (150 pts) binding share: 0.09383418138281951
+  window 07-17 UTC: n= 4575 avg=-0.1637 CI90=[-0.1874,-0.1401] sum= -749.1  z_vs_random=+2.82
+  window 08-16 UTC: n= 3908 avg=-0.1511 CI90=[-0.1768,-0.1253] sum= -590.4  z_vs_random=+3.58
+  window 12-17 UTC: n= 2054 avg=-0.1494 CI90=[-0.1859,-0.1129] sum= -306.9  z_vs_random=+2.10
+  window 07-12 UTC: n= 2521 avg=-0.1754 CI90=[-0.2063,-0.1445] sum= -442.2  z_vs_random=+0.70
+  window 13-17 UTC: n= 1414 avg=-0.1265 CI90=[-0.1695,-0.0835] sum= -178.9  z_vs_random=+2.67
+  window 07-21 UTC: n= 4910 avg=-0.1682 CI90=[-0.1907,-0.1456] sum= -825.7  z_vs_random=+2.55
+  window 01-20 UTC: n= 6245 avg=-0.1798 CI90=[-0.1995,-0.1601] sum=-1122.8  z_vs_random=+1.97
+  window 00-24 UTC: n= 6682 avg=-0.1858 CI90=[-0.2047,-0.1668] sum=-1241.5  z_vs_random=+0.00
+
+top5% (334 trades) sum=+557.1  share of gross profit=28.4%  net=-1241.5  avg_r without top5%=-0.2833

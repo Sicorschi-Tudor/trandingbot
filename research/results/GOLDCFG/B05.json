@@ -1,0 +1,123 @@
+{
+ "strategy": "breakout-v1",
+ "tf": "H1",
+ "htf": "H4",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "rescue_enabled": false,
+  "sl_mode": "opposite",
+  "tp_range_mult": 2.5,
+  "range_max_atr": 2.0
+ },
+ "risk_params": {
+  "max_open_positions": 1,
+  "max_trades_per_day": 20,
+  "max_spread_points": 100,
+  "max_daily_loss_pct": 100,
+  "max_consecutive_losses": 1000,
+  "cooldown_after_loss_minutes": 0,
+  "rollover_blackout_minutes": 0
+ },
+ "exit": {
+  "mode": "base",
+  "params": {
+   "max_hold_hours": 24
+  }
+ },
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0
+ },
+ "elapsed_s": 5.2,
+ "summary": {
+  "trades": 335,
+  "win_rate": 0.4985,
+  "avg_r": 0.0831,
+  "expectancy_r": 0.0831,
+  "profit_factor": 1.183,
+  "max_dd_r": 9.656,
+  "max_consec_losses": 8,
+  "net_r": 27.844,
+  "net_usd": 669.47,
+  "ci90_avg_r": [
+   -0.0196,
+   0.1813
+  ],
+  "sample_days": 2037.8
+ },
+ "by_year": {
+  "2013": {
+   "n": 41,
+   "avg_r": -0.0153,
+   "sum_r": -0.63
+  },
+  "2014": {
+   "n": 54,
+   "avg_r": 0.0539,
+   "sum_r": 2.91
+  },
+  "2015": {
+   "n": 66,
+   "avg_r": 0.1804,
+   "sum_r": 11.91
+  },
+  "2016": {
+   "n": 43,
+   "avg_r": -0.038,
+   "sum_r": -1.63
+  },
+  "2017": {
+   "n": 68,
+   "avg_r": 0.2718,
+   "sum_r": 18.49
+  },
+  "2018": {
+   "n": 63,
+   "avg_r": -0.0508,
+   "sum_r": -3.2
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 335,
+   "win_rate": 0.4985,
+   "avg_r": 0.0831,
+   "expectancy_r": 0.0831,
+   "profit_factor": 1.183,
+   "max_dd_r": 9.656,
+   "max_consec_losses": 8,
+   "net_r": 27.844,
+   "net_usd": 669.47
+  }
+ },
+ "by_outcome": {
+  "SL": 140,
+  "TIME": 51,
+  "TP": 88,
+  "BE": 55,
+  "END": 1
+ },
+ "counts": {
+  "blocked_market": 0,
+  "blocked_context": {
+   "Exist\u0103": 5
+  },
+  "signals": 335,
+  "risk_rejected": {},
+  "filled": 335,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 1,
+  "analyses": 32761,
+  "candidates": 340
+ },
+ "warnings": [
+  "1 pozi\u021bii \u00eenchise for\u021bat la sf\u00e2r\u0219itul datelor (END).",
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate."
+ ]
+}

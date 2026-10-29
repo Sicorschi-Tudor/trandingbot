@@ -1,0 +1,119 @@
+{
+ "strategy": "breakout-v1",
+ "tf": "H1",
+ "htf": "H4",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "rescue_enabled": false,
+  "sl_mode": "opposite",
+  "tp_range_mult": 2.5
+ },
+ "risk_params": {
+  "max_open_positions": 1,
+  "max_trades_per_day": 20,
+  "max_spread_points": 100,
+  "max_daily_loss_pct": 100,
+  "max_consecutive_losses": 1000,
+  "cooldown_after_loss_minutes": 0,
+  "rollover_blackout_minutes": 0
+ },
+ "exit": {
+  "mode": "base",
+  "params": {
+   "max_hold_hours": 8
+  }
+ },
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0
+ },
+ "elapsed_s": 6.0,
+ "summary": {
+  "trades": 527,
+  "win_rate": 0.4915,
+  "avg_r": 0.065,
+  "expectancy_r": 0.065,
+  "profit_factor": 1.175,
+  "max_dd_r": 13.62,
+  "max_consec_losses": 8,
+  "net_r": 34.27,
+  "net_usd": 739.24,
+  "ci90_avg_r": [
+   -0.0047,
+   0.1359
+  ],
+  "sample_days": 2037.8
+ },
+ "by_year": {
+  "2013": {
+   "n": 52,
+   "avg_r": 0.0375,
+   "sum_r": 1.95
+  },
+  "2014": {
+   "n": 80,
+   "avg_r": 0.0464,
+   "sum_r": 3.71
+  },
+  "2015": {
+   "n": 97,
+   "avg_r": 0.1175,
+   "sum_r": 11.4
+  },
+  "2016": {
+   "n": 82,
+   "avg_r": 0.0313,
+   "sum_r": 2.57
+  },
+  "2017": {
+   "n": 98,
+   "avg_r": 0.2414,
+   "sum_r": 23.66
+  },
+  "2018": {
+   "n": 118,
+   "avg_r": -0.0765,
+   "sum_r": -9.02
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 527,
+   "win_rate": 0.4915,
+   "avg_r": 0.065,
+   "expectancy_r": 0.065,
+   "profit_factor": 1.175,
+   "max_dd_r": 13.62,
+   "max_consec_losses": 8,
+   "net_r": 34.27,
+   "net_usd": 739.24
+  }
+ },
+ "by_outcome": {
+  "SL": 158,
+  "TIME": 257,
+  "TP": 69,
+  "BE": 43
+ },
+ "counts": {
+  "blocked_market": 0,
+  "blocked_context": {},
+  "signals": 527,
+  "risk_rejected": {},
+  "filled": 527,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 0,
+  "analyses": 32761,
+  "candidates": 527
+ },
+ "warnings": [
+  "Drawdown 3% atins la 2018-11-29T08:00:00Z \u2014 \u00een live intr\u0103rile s-ar fi oprit (backtestul continu\u0103; halt_on_drawdown=true pentru oprire).",
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate."
+ ]
+}

@@ -1,0 +1,119 @@
+{
+ "strategy": "breakout-v1",
+ "tf": "H1",
+ "htf": "H4",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "rescue_enabled": false,
+  "sl_mode": "opposite",
+  "tp_range_mult": 2.0,
+  "range_max_atr": 1.5
+ },
+ "risk_params": {
+  "max_open_positions": 1,
+  "max_trades_per_day": 20,
+  "max_spread_points": 100,
+  "max_daily_loss_pct": 100,
+  "max_consecutive_losses": 1000,
+  "cooldown_after_loss_minutes": 0,
+  "rollover_blackout_minutes": 0
+ },
+ "exit": {
+  "mode": "base",
+  "params": {
+   "max_hold_hours": 24
+  }
+ },
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0
+ },
+ "elapsed_s": 5.7,
+ "summary": {
+  "trades": 153,
+  "win_rate": 0.549,
+  "avg_r": 0.1693,
+  "expectancy_r": 0.1693,
+  "profit_factor": 1.388,
+  "max_dd_r": 6.574,
+  "max_consec_losses": 7,
+  "net_r": 25.904,
+  "net_usd": 624.64,
+  "ci90_avg_r": [
+   0.0247,
+   0.3141
+  ],
+  "sample_days": 2037.8
+ },
+ "by_year": {
+  "2013": {
+   "n": 23,
+   "avg_r": 0.0448,
+   "sum_r": 1.03
+  },
+  "2014": {
+   "n": 30,
+   "avg_r": 0.1229,
+   "sum_r": 3.69
+  },
+  "2015": {
+   "n": 37,
+   "avg_r": 0.2294,
+   "sum_r": 8.49
+  },
+  "2016": {
+   "n": 13,
+   "avg_r": 0.2382,
+   "sum_r": 3.1
+  },
+  "2017": {
+   "n": 24,
+   "avg_r": 0.2332,
+   "sum_r": 5.6
+  },
+  "2018": {
+   "n": 26,
+   "avg_r": 0.154,
+   "sum_r": 4.0
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 153,
+   "win_rate": 0.549,
+   "avg_r": 0.1693,
+   "expectancy_r": 0.1693,
+   "profit_factor": 1.388,
+   "max_dd_r": 6.574,
+   "max_consec_losses": 7,
+   "net_r": 25.904,
+   "net_usd": 624.64
+  }
+ },
+ "by_outcome": {
+  "SL": 62,
+  "TIME": 15,
+  "TP": 64,
+  "BE": 12
+ },
+ "counts": {
+  "blocked_market": 0,
+  "blocked_context": {},
+  "signals": 153,
+  "risk_rejected": {},
+  "filled": 153,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 0,
+  "analyses": 32761,
+  "candidates": 153
+ },
+ "warnings": [
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate."
+ ]
+}
