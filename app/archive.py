@@ -609,6 +609,11 @@ def ingest_payload(rt, items, now: float | None = None) -> list[Future]:
         _entry(rt, sym, tf, now)
         if e["done"] and not was_done:
             rt.log("INFO", "archive", f"Arhivă {sym} {tf} completă până la {iso(e['oldest_ts'])}")
+        else:
+            days = round((now - float(e["oldest_ts"])) / 86400) if e.get("oldest_ts") else 0
+            target = round((now - float(e["target_ts"])) / 86400) if e.get("target_ts") else 0
+            rt.log("INFO", "archive", f"Arhivă {sym} {tf}: +{len(rows)} bare ({e['bars']} în total, acoperă {days} din {target} zile; "
+                                      f"cea mai veche {iso(e['oldest_ts'])[:10] if e.get('oldest_ts') else '—'})")
         futures.append(submit(_write_rows, rt, sym, tf, rows))
     return futures
 

@@ -29,7 +29,7 @@ AI_TRADER_MANAGE_MODE=shadow
 AI_TRADER_TIMEFRAME=M15
 ```
 
-`TRADE_SYMBOLS` și `trade_symbols` se pot seta și din API (`PUT /api/v1/strategy`), fără repornire. Istoricul extins se descarcă treptat (o cerere la 60 s, niciodată cât botul are poziții deschise); progresul e în *Sistem & Loguri → Arhivă*. Contextul de termen lung al AI-ului devine complet după ce arhiva D1 acoperă câțiva ani.
+`TRADE_SYMBOLS` și `trade_symbols` se pot seta și din API (`PUT /api/v1/strategy`), fără repornire. Istoricul extins se descarcă treptat (o cerere de până la 3 000 de bare la 60 s; cu profilul gold continuă și cât ai poziții deschise — SL/TP sunt la broker): D1 pe 20 de ani în ~2 minute, H4 pe 10 ani în ~10 minute, H1 pe 5 ani în ~15 minute, M15 pe 2 ani în ~20 de minute, în această ordine. Progresul e în *Sistem & Loguri → Arhivă* (`GET /api/v1/archive/status`). Cele „300 bare” din loguri sunt doar prima livrare a EA-ului (`InpHistoryBars`), ca analiza să pornească imediat; AI-ul citește contextul de termen lung din arhivă. Contextul de termen lung al AI-ului devine complet după ce arhiva D1 acoperă câțiva ani.
 
 ## 1. Simbolul
 

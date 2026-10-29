@@ -263,7 +263,10 @@ class Executor:
         if not rc["passed"]:
             it["state"] = "REJECTED_RISK"
             self._save(it, comment=comment, reason="RISK", insert=True)
-            self.rt.log("WARN", "risk", f"Intent OPEN {symbol} {side} respins de Risk Engine")
+            failed = [f"{c.get('name')} ({c.get('detail')})" if c.get("detail") else str(c.get("name"))
+                      for c in rc["checks"] if not c.get("ok")]
+            self.rt.log("WARN", "risk", f"Intent OPEN {symbol} {side} respins de Risk Engine"
+                                        + (": " + "; ".join(failed[:6]) if failed else ""))
             self._emit(it, None)
             return it
         if mode == "PAPER":

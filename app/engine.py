@@ -85,6 +85,7 @@ class Engine:
         self._positions_sig: str | None = None
         self._equity_cache: dict[str, dict] = {}
         self._warmup_done = False
+        self._bridge_down_ts: float | None = None
         self._cal_warn_ts = 0.0
         self._no_quote_warn_ts = 0.0
         # performance tracking (analyses / equity snapshots / labeler / backtests)
@@ -1928,6 +1929,10 @@ class Engine:
             run_params = dict(params)
             if not run_params.get("specs"):
                 run_params["specs"] = self.symbol_specs()
+            if run_params.get("workers") is None and self.settings.data_source == "mt5_bridge":
+                # a live bridge shares the process: many analysis threads starve the event loop (GIL) and the
+                # EA sync is reported as "disconnected" for a few seconds -> one worker while the bot trades
+                run_params["workers"] = 1
             # own read-only connection: the bar loads never hold the shared DB.lock the event loop uses
             ro = None
             ro_cls = getattr(bt, "ReadOnlyDB", None)
@@ -2019,11 +2024,20 @@ class Engine:
         if self.settings.data_source == "mt5_bridge":
             connected = rt.bridge_connected()
             if self._prev_bridge_connected and not connected:
-                msg = "Bridge-ul MT5 s-a deconectat — intrările noi sunt blocate."
+                self._bridge_down_ts = now
+                busy = [r for r in self.backtests.values() if not r.get("done")]
+                msg = ("Bridge-ul MT5 s-a deconectat — intrările noi sunt blocate."
+                       + (" (un backtest din dashboard rulează acum și încarcă procesorul)" if busy else ""))
                 if self.mode() == "DEMO":
                     self.risk_alert(msg, key=f"bridge_down:{int(now // 60)}")
                 else:
                     rt.log("WARN", "bridge", msg)
+            elif connected and self._prev_bridge_connected is False and self._bridge_down_ts is not None:
+                gap = now - self._bridge_down_ts
+                self._bridge_down_ts = None
+                rt.log("INFO", "bridge", f"Bridge-ul MT5 s-a reconectat după {gap:.0f} s fără sincronizări "
+                                         "(EA-ul trimite de 2 ori pe secundă; pauzele lungi înseamnă terminal MT5 ocupat "
+                                         "cu descărcări de istoric, mai multe EA-uri active sau server încărcat)")
             self._prev_bridge_connected = connected
         self.warmup_reason("", now)
         self._check_calendar(now)

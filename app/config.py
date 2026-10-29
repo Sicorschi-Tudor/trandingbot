@@ -18,6 +18,7 @@ PROFILES: dict[str, dict] = {
         "MAX_SPREAD_POINTS": 60.0, "MIN_SL_POINTS": 150, "MAX_VOLUME_LOTS": 0.05, "NEWS_BLACKOUT_MINUTES": 45,
         "MAX_OPEN_POSITIONS": 3, "MAX_POSITIONS_PER_SYMBOL": 3, "PYRAMID_MIN_R": 0.5, "PYRAMID_MIN_DISTANCE_ATR": 1.0,
         "MAX_SAME_CURRENCY_DIRECTION": 3, "ARCHIVE_EXTRA": "M15:730,H1:1825,H4:3650,D1:7300",
+        "ARCHIVE_EXTRA_WITH_POSITIONS": True,  # keep downloading history while gold positions are open (SL/TP sit at the broker)
         "AI_TRADER_ENTRY_MODE": "shadow", "AI_TRADER_MANAGE_MODE": "shadow", "AI_TRADER_TIMEFRAME": "M15",
         "AI_TRADER_SYMBOLS": "XAUUSD",
     },
