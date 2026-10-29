@@ -130,6 +130,8 @@ class RiskContext:
     open_bot_positions: int = 0
     ea_magic_ok: bool = True
     has_bot_position_on_symbol: bool = False
+    # TRADE_SYMBOLS: the symbol may receive orders at all (context-only symbols never do, whatever produced the intent)
+    symbol_tradable: bool = True
     # pyramiding (risk.max_positions_per_symbol > 1): True when the rule allows one more position on the symbol
     pyramid_ok: bool = False
     pyramid_note: str = ""
@@ -219,6 +221,8 @@ def evaluate(ctx: RiskContext) -> dict:
         f"mod={mode}, execuție={'armată' if ctx.execution_enabled else 'dezarmată'}"
         + (" (LIVE este dezactivat în v1)" if mode == "LIVE" else ""))
     add("entries_not_paused", not ctx.entries_paused, "intrări în pauză" if ctx.entries_paused else "intrări active")
+    add("symbol_tradable", ctx.symbol_tradable,
+        "simbol permis la tranzacționare" if ctx.symbol_tradable else "simbol doar pentru context (TRADE_SYMBOLS) — fără ordine")
     if mode == "DEMO":
         add("bridge_connected", ctx.bridge_connected, "bridge MT5 conectat" if ctx.bridge_connected else "bridge MT5 deconectat")
         tm = (ctx.mt5_account or {}).get("trade_mode")

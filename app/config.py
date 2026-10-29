@@ -187,7 +187,12 @@ class Settings(BaseSettings):
     def _apply_profile(self):
         prof = PROFILES.get(str(self.PROFILE or "").strip().lower())
         if prof:
+            # the broker's own name for gold (XAUUSD.a, GOLD, XAUUSDm, XAUUSD.cash ...) wins over the profile's "XAUUSD"
+            gold = next((s for s in split_symbols(self.TRADE_SYMBOLS) + split_symbols(self.ACTIVE_SYMBOLS)
+                         if "XAU" in s.upper() or "GOLD" in s.upper()), None)
             for k, v in prof.items():
+                if gold and k in ("ACTIVE_SYMBOLS", "TRADE_SYMBOLS", "AI_TRADER_SYMBOLS"):
+                    v = gold
                 setattr(self, k, v)
         return self
 
@@ -248,8 +253,8 @@ class Settings(BaseSettings):
         return {
             "signal_timeframe": self.SIGNAL_TIMEFRAME.upper(),
             "htf_timeframe": self.HTF_TIMEFRAME.upper(),
-            "symbols": split_csv(self.ACTIVE_SYMBOLS),
-            "trade_symbols": [s for s in split_csv(self.TRADE_SYMBOLS) if s in split_csv(self.ACTIVE_SYMBOLS)],
+            "symbols": split_symbols(self.ACTIVE_SYMBOLS),
+            "trade_symbols": [s for s in split_symbols(self.TRADE_SYMBOLS) if s in split_symbols(self.ACTIVE_SYMBOLS)],
             "atr_sl_mult": self.ATR_SL_MULT,
             "atr_tp_mult": self.ATR_TP_MULT,
             "min_sl_points": self.MIN_SL_POINTS,
@@ -284,6 +289,16 @@ class Settings(BaseSettings):
 
 def split_csv(s: str) -> list[str]:
     return [x.strip().upper() for x in (s or "").split(",") if x.strip()]
+
+
+def split_symbols(s: str) -> list[str]:
+    """Symbol lists keep the broker's exact spelling: MT5 symbol names are case-sensitive (XAUUSD.a, EURUSDm)."""
+    out = []
+    for x in (s or "").split(","):
+        x = x.strip()
+        if x and x not in out:
+            out.append(x)
+    return out
 
 
 _settings: Settings | None = None

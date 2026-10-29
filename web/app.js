@@ -539,7 +539,17 @@ async function loadChartData({ keepRange = false } = {}) {
   CH.s.emaF.setData(cleanLine(d && d.ema_fast));
   CH.s.emaS.setData(cleanLine(d && d.ema_slow));
   if (!CH.bars.length) {
-    showChartOverlay('Nu există bare pentru ' + sym + ' ' + tf, 'Așteaptă sincronizarea istoricului de la EA (sau feed-ul simulat).');
+    const b = (S.status && S.status.bridge) || {};
+    const info = symInfo(sym);
+    if ((b.unknown_symbols || []).includes(sym)) {
+      showChartOverlay(sym + ' nu există la brokerul tău', 'EA-ul nu a putut selecta simbolul. Deschide Market Watch în MT5, copiază numele exact (ex. XAUUSD.a, GOLD, XAUUSDm) în ACTIVE_SYMBOLS din .env și repornește serverul.');
+    } else if ((b.no_quote_symbols || []).includes(sym) || (info && info.quality === 'NO_DATA' && b.connected)) {
+      showChartOverlay('EA-ul nu trimite cotații pentru ' + sym, 'Cel mai des numele simbolului diferă la broker (XAUUSD.a, GOLD, XAUUSDm). Verifică în MT5 → Market Watch și pune numele exact în ACTIVE_SYMBOLS; vezi și jurnalul Experts din MT5 („simbolul nu exista la acest broker”).');
+    } else if (!b.connected && S.status && S.status.data_source !== 'sim') {
+      showChartOverlay('Bridge-ul MT5 nu este conectat', 'Pornește EA-ul AIBridgeEA pe un grafic în MT5 (Algo Trading activ, URL-ul serverului permis la WebRequest).');
+    } else {
+      showChartOverlay('Nu există bare pentru ' + sym + ' ' + tf, 'Așteaptă sincronizarea istoricului de la EA (câteva secunde după conectare).');
+    }
   } else hideChartOverlay();
   if (range) CH.chart.timeScale().setVisibleLogicalRange(range);
   else if (CH.bars.length) CH.chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, CH.bars.length - 120), to: CH.bars.length + 6 });

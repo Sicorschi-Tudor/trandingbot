@@ -96,7 +96,7 @@ class AITrader:
             elif k == "timeframe" and str(v).upper() in TF_SECONDS:
                 self.conf[k] = str(v).upper()
             elif k == "symbols":
-                self.conf[k] = ",".join(x.strip().upper() for x in str(v or "").split(",") if x.strip())
+                self.conf[k] = ",".join(x.strip() for x in str(v or "").split(",") if x.strip())
             elif k == "manage_every_min":
                 self.conf[k] = max(1, min(240, int(v)))
             elif k == "max_calls_per_day":
