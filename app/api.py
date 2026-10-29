@@ -70,6 +70,8 @@ RISK_RULES: dict[str, tuple[type, float, float]] = {
     "loss_streak_pause_minutes": (int, 0, 1440),
     "cooldown_after_loss_minutes": (int, 0, 1440),
     "rollover_blackout_minutes": (int, 0, 240),
+    "max_positions_per_symbol": (int, 1, 10),
+    "pyramid_min_r": (float, 0, 20),
 }
 STRATEGY_NUM: dict[str, tuple[type, float, float]] = {
     "atr_sl_mult": (float, 0.1, 20),

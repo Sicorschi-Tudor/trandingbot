@@ -258,6 +258,48 @@ class Engine:
             return True
         return self.executor.has_pending_open(symbol)
 
+    def symbol_positions(self, symbol: str, mode: str | None = None) -> list[dict]:
+        """Open bot positions on `symbol` as [{"side", "open_r", "ticket"}] for the pyramiding rule (open_r = open
+        profit in R of the initial risk; None when the initial SL is unknown or an OPEN is still in flight)."""
+        out = []
+        for p in self.bot_positions(mode):
+            if p["symbol"] != symbol:
+                continue
+            src = "PAPER" if p.get("source") == "PAPER" else "MT5"
+            st = self._paths.get((src, str(p["ticket"])))
+            risk = float(st["risk"]) if st and st.get("risk") else None
+            if risk is None:
+                sl0 = None
+                if src == "PAPER":
+                    pos = self.paper.positions.get(int(p["ticket"])) or {}
+                    sl0 = pos.get("initial_sl") or pos.get("sl")
+                else:
+                    oi = self.executor.open_intent_for_ticket(int(p["ticket"])) or \
+                        self.executor.open_intent_by_comment(p.get("comment") or "")
+                    sl0 = (oi or {}).get("sl")
+                if sl0 and p.get("price_open"):
+                    risk = abs(float(p["price_open"]) - float(sl0))
+            open_r = None
+            if risk and p.get("price_current") and p.get("price_open"):
+                sign = 1 if p["side"] == "BUY" else -1
+                open_r = round((float(p["price_current"]) - float(p["price_open"])) * sign / risk, 3)
+            out.append({"side": p["side"], "open_r": open_r, "ticket": p["ticket"]})
+        if self.executor.has_pending_open(symbol):
+            out.append({"side": None, "open_r": None, "ticket": None})
+        return out
+
+    def pyramid_status(self, symbol: str, side: str, mode: str | None = None) -> tuple[bool, str]:
+        """(one more position allowed, note) under risk.max_positions_per_symbol / pyramid_min_r."""
+        rk = self.rt.risk
+        max_per = int(rk.get("max_positions_per_symbol", 1) or 1)
+        if max_per <= 1:
+            return False, "o singură poziție pe simbol"
+        positions = self.symbol_positions(symbol, mode)
+        reason = strategy.pyramid_blocker(side, positions, max_per, float(rk.get("pyramid_min_r", 0.5) or 0))
+        if reason:
+            return False, reason.rstrip(".")
+        return True, f"piramidare: {len(positions)}/{max_per} poziții, toate ≥ {float(rk.get('pyramid_min_r', 0.5)):g}R"
+
     def set_mt5_positions(self, positions: list[dict]) -> None:
         self.rt.mt5_positions = positions
         self.rt.mt5_positions_ts = time.time()
@@ -549,6 +591,7 @@ class Engine:
             n_open += self.executor.count_pending_open("DEMO", {int(p["ticket"]) for p in bots})
         fallback = float((acc or {}).get("equity") or 0) * float(self.rt.risk.get("max_risk_per_trade_pct", 0.25)) / 100.0
         res_risk = sum(fallback if r.get("risk_money") is None else float(r["risk_money"]) for r in reserved)
+        pyr_ok, pyr_note = self.pyramid_status(symbol, side, mode)
         ctx = risk_mod.RiskContext(
             mode=mode, execution_enabled=self.rt.trading["execution_enabled"],
             entries_paused=self.rt.trading["entries_paused"], side=side, entry=entry, sl=sl, tp=tp,
@@ -558,6 +601,7 @@ class Engine:
             symbol=symbol, open_exposures=self.open_exposures(mode) + [(r["symbol"], r["side"]) for r in reserved],
             open_bot_positions=n_open + len(reserved), ea_magic_ok=self.rt.bridge.get("magic_ok") is True,
             has_bot_position_on_symbol=self.has_bot_position(symbol, mode) or any(r["symbol"] == symbol for r in reserved),
+            pyramid_ok=pyr_ok and not any(r["symbol"] == symbol for r in reserved), pyramid_note=pyr_note,
             trades_today=self.trades_today(mode) + len(reserved), day_start_equity=marks.get("day_start_equity"),
             peak_equity=marks.get("peak_equity"), consecutive_losses=streak, loss_pause_until=pause_until,
             open_risk_money=self.open_risk_money(mode) + res_risk, news_block=news_block, news_note=news_note, test_order=test_order,
@@ -938,6 +982,8 @@ class Engine:
             signals_this_session=self.signals_this_session(symbol), tick_age=rt.tick_age(symbol, now), now_ts=now,
             open_exposures=self.open_exposures("ALL"), corr_limit=int(rt.risk.get("max_same_currency_direction", 1)),
             news_block=news_block, last_loss_ts=self.last_loss_ts(symbol, now),
+            symbol_positions=self.symbol_positions(symbol, "ALL")
+            if int(rt.risk.get("max_positions_per_symbol", 1) or 1) > 1 else None,
         )
         name, fn, cfg = self.active_strategy()
         a = fn(symbol, sig_bars, htf_bars, rt.quotes.get(symbol), cfg, rt.risk, ctx)

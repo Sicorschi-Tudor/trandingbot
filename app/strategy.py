@@ -25,6 +25,9 @@ class AnalysisContext:
     news_block: str | None = None  # economic-calendar blackout reason (blocks before any Claude call)
     # close time (UTC ts) of the latest bot trade on this symbol that closed at a loss (risk.cooldown_after_loss_minutes)
     last_loss_ts: float | None = None
+    # pyramiding (risk.max_positions_per_symbol > 1): open bot positions on this symbol as [{'side', 'open_r'}]
+    # (open_r None = unknown / order in flight); None = caller does not support pyramiding (backtest, forward tests)
+    symbol_positions: list | None = None
 
 
 def probabilities(score: float) -> dict:
@@ -44,15 +47,41 @@ def _r(x, nd=6):
     return None if x is None else round(float(x), nd)
 
 
+def pyramid_blocker(side: str, positions: list | None, max_per: int, min_r: float) -> str | None:
+    """Reason a further position on the symbol is NOT allowed under the pyramiding rule, else None.
+    positions: [{"side", "open_r"}] of the bot's open positions on the symbol (open_r None = order in flight)."""
+    if not positions:
+        return None
+    n = len(positions)
+    if n >= max_per:
+        return f"Limita de poziții pe simbol atinsă ({n}/{max_per})."
+    for p in positions:
+        r = p.get("open_r")
+        if p.get("side") is None or r is None:
+            return "Un ordin pe acest simbol este încă în curs — nu se adaugă peste el."
+        if p.get("side") != side:
+            return f"Poziția existentă este {p.get('side')} — nu se adaugă în direcția opusă."
+        if r < min_r:
+            return f"Piramidare doar peste poziții pe profit: {r:+.2f}R < {min_r:g}R."
+    return None
+
+
 def context_blockers(symbol: str, side: str, ctx: AnalysisContext, risk: dict) -> list[str]:
     """Blockers that depend on the bot's state (session, book, exposures, news, signal count), not on the market.
     Shared with the backtest so simulated decisions use exactly the live rules."""
     out: list[str] = []
     if not ctx.session_open:
         out.append("Sesiunea de tranzacționare este închisă.")
-    if ctx.has_bot_position:
+    max_per = int(risk.get("max_positions_per_symbol", 1) or 1)
+    pyramid = pyramid_blocker(side, ctx.symbol_positions, max_per, float(risk.get("pyramid_min_r", 0.5) or 0))
+    if ctx.has_bot_position and (max_per <= 1 or ctx.symbol_positions is None):
         out.append("Există deja o poziție a botului pe acest simbol.")
-    conflict = currency_conflict(symbol, side, ctx.open_exposures, ctx.corr_limit)
+    elif pyramid:
+        out.append(pyramid)
+    exposures = ctx.open_exposures
+    if max_per > 1:  # same-symbol, same-direction positions are the pyramid itself, not a correlated exposure
+        exposures = [e for e in exposures if not (e[0] == symbol and e[1] == side)]
+    conflict = currency_conflict(symbol, side, exposures, ctx.corr_limit)
     if conflict:
         out.append(f"Expunere corelată: {conflict} (max {ctx.corr_limit} pe monedă și direcție).")
     if ctx.news_block:
