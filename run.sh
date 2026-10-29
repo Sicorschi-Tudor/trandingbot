@@ -15,4 +15,5 @@ fi
 HOST="$(python -c 'from app.config import get_settings as g; print(g().HOST)')"
 PORT="$(python -c 'from app.config import get_settings as g; print(g().PORT)')"
 echo "Pornesc pe http://${HOST}:${PORT}"
-exec uvicorn app.main:app --host "$HOST" --port "$PORT"
+# caffeinate keeps the Mac awake while the bot runs (positions need live management)
+exec caffeinate -i uvicorn app.main:app --host "$HOST" --port "$PORT"

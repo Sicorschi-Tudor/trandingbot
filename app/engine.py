@@ -305,6 +305,8 @@ class Engine:
             if sl0 and tr.get("price_open") and tr.get("volume"):
                 rm = risk_mod.position_risk_money(tr.get("side") or "BUY", float(tr["price_open"]), float(sl0),
                                                   float(tr["volume"]), self.rt.quotes.get(tr.get("symbol") or "") or {})
+                if rm is None:
+                    rm = risk_money_from_fill(tr, float(sl0))
             net = (tr.get("profit") or 0) + (tr.get("commission") or 0) + (tr.get("swap") or 0)
             r_mult = round(net / rm, 3) if rm else None
             tr.update({"account_key": key, "signal_entry": sig_entry, "initial_sl": sl0,
@@ -367,7 +369,7 @@ class Engine:
                     "price_open": price_open, "price_close": d.get("price"), "profit": float(d.get("profit") or 0),
                     "commission": float(d.get("commission") or 0), "swap": float(d.get("swap") or 0),
                     "opened_at_utc": iso(opened_t) if opened_t else None, "closed_at_utc": iso(d.get("time") or time.time()),
-                    "close_reason": DEAL_REASON.get(int(d.get("reason", -1)), "UNKNOWN"), "mode": "DEMO",
+                    "close_reason": self._deal_close_reason(pos_id, int(d.get("reason", -1))), "mode": "DEMO",
                     "signal_id": (oi or {}).get("signal_id"),
                 }
                 if self._insert_trade(f"MT5:{int(d['ticket'])}", tr, open_intent=oi):
@@ -375,6 +377,21 @@ class Engine:
                     self._announce_trade(tr, notify=recent)
             except (KeyError, ValueError, TypeError) as e:
                 self.rt.log("WARN", "bridge", f"deal invalid ignorat: {e!r}")
+
+    def _deal_close_reason(self, pos_id: int, deal_reason: int) -> str:
+        """Broker deal reason (SL/TP/SO/MANUAL); an EA-sent close (DEAL_REASON_EXPERT = "BOT") is named after the
+        bot's latest (non-failed) CLOSE intent for the position (RESCUE, TIME_STOP, ML_EXIT, SESSION_END, MANUAL, ...)."""
+        reason = DEAL_REASON.get(deal_reason, "UNKNOWN")
+        if reason != "BOT" or not pos_id:
+            return reason
+        try:
+            # the deal can arrive in the same sync as (and before) the intent result: any non-failed CLOSE counts
+            row = self.db.query_one("SELECT reason FROM intents WHERE kind='CLOSE' AND ticket=? AND mode='DEMO' AND "
+                                    "state IN ('FILLED','QUEUED','DELIVERED','UNKNOWN') "
+                                    "ORDER BY created_at_utc DESC LIMIT 1", (int(pos_id),))
+        except sqlite3.Error:
+            return reason
+        return str(row["reason"]) if row and row["reason"] else reason
 
     def _is_bot_position_id(self, pos_id: int, bot_in: set[int]) -> bool:
         if not pos_id:
@@ -1933,6 +1950,23 @@ class Engine:
 # ---- performance math (shared by /stats and /shadow) ------------------------
 SHADOW_MIN_N = 30
 Z90 = 1.645
+
+
+def risk_money_from_fill(tr: dict, sl0: float) -> float | None:
+    """Money at risk of a closed trade from its own fill when no quote/tick value is known (e.g. deals ingested on the
+    first sync after a restart, before the EA sent symbol specs): |profit| × |entry − initial SL| / |close − entry|.
+    The tick value cancels out. None when the trade closed at its entry price or without profit."""
+    try:
+        po, pc, profit = float(tr["price_open"]), float(tr["price_close"]), float(tr.get("profit") or 0)
+    except (KeyError, TypeError, ValueError):
+        return None
+    move = abs(pc - po)
+    if move <= 0 or not profit or not sl0:
+        return None
+    sign = 1 if (tr.get("side") or "BUY") == "BUY" else -1
+    if (float(sl0) - po) * sign >= 0:
+        return 0.0
+    return abs(profit) * abs(po - float(sl0)) / move
 
 
 def mean_ci90(xs: list[float]) -> tuple[float | None, list[float] | None]:

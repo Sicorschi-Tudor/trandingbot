@@ -114,9 +114,14 @@ def plan(pos: dict, info: dict, cfg: dict, now_ts: float, session_open: bool,
 
     best: tuple[float, str] | None = None
     be_r = float(cfg.get("break_even_at_r") or 0)
-    be_done = bool(sl) and (sl - open_px) * sign >= 0  # SL already at/above entry: break-even applied once
+    be_lock_r = float(cfg.get("be_lock_r") or 0)
+    # break-even applied once: SL already at/beyond the entry (old 2-point lock) or, with the smart lock, at least
+    # be_lock_r × R beyond it. The spread part of the lock is ignored here, so a widening spread never re-sends the
+    # MODIFY, while a NEWS_BE (entry ± 2 points) still gets the proper +be_lock_r lock once +1R is reached.
+    be_min = be_lock_r * risk_dist - point if be_lock_r > 0 and risk_dist > 0 else 0.0
+    be_done = bool(sl) and (sl - open_px) * sign >= max(be_min, 0.0)
     if be_r > 0 and risk_dist > 0 and not be_done and profit_dist >= be_r * risk_dist - point / 2:
-        lock = be_lock_distance(float(cfg.get("be_lock_r") or 0), spread, risk_dist, point)
+        lock = be_lock_distance(be_lock_r, spread, risk_dist, point)
         be_sl = round(open_px + sign * lock, digits)
         if improves(be_sl) and valid(be_sl):
             best = (be_sl, "BREAK_EVEN")
@@ -209,7 +214,9 @@ class PositionManager:
                     continue
                 pos = {"ticket": int(p["ticket"]), "symbol": p["symbol"], "side": "BUY" if int(p.get("type", 0)) == 0 else "SELL",
                        "price_open": p.get("price_open"), "sl": p.get("sl"), "tp": p.get("tp"), "opened_ts": p.get("time"),
-                       "volume": p.get("volume")}
+                       "volume": p.get("volume"),
+                       # accrued swap/commission (EA positions payload) so the rescue "net profit" test counts them
+                       "swap": p.get("swap"), "commission": p.get("commission")}
                 oi = eng.executor.open_intent_for_ticket(pos["ticket"]) or eng.executor.open_intent_by_comment(p.get("comment") or "")
                 items.append(("MT5", pos, (oi or {}).get("sl")))
         for source, pos, init_sl in items:
