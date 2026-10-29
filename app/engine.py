@@ -26,6 +26,7 @@ from .position_manager import PositionManager
 from .simfeed import SimFeed
 from .state import Runtime
 from . import trade_review as trade_review_mod
+from .ai_trader import AITrader
 from .trade_review import TradeReviewer
 from .telegram import (TelegramNotifier, fmt_daily_start, fmt_intent, fmt_modify, fmt_risk_alert, fmt_signal,
                        fmt_trade)
@@ -106,6 +107,8 @@ class Engine:
         self.ml = MLLive(self)
         # Claude as trade analyst: post-trade + daily reviews (text only, never touches trading)
         self.trade_reviews = TradeReviewer(self)
+        # AI trader: Claude decides on the chart; off by default, shadow-first, live only through the normal pipeline
+        self.ai_trader = AITrader(self)
 
     # ---- lifecycle -------------------------------------------------------
     def startup(self) -> None:
@@ -132,6 +135,10 @@ class Engine:
             self.ml.startup()
         except Exception as e:
             self.rt.log("ERROR", "ml", f"ML neinițializat: {e!r}")
+        try:
+            self.ai_trader.startup()
+        except Exception as e:
+            self.rt.log("ERROR", "ai", f"AI trader neinițializat: {e!r}")
 
     async def start(self) -> None:
         if self.sim:
@@ -280,13 +287,31 @@ class Engine:
                 if sl0 and p.get("price_open"):
                     risk = abs(float(p["price_open"]) - float(sl0))
             open_r = None
+            dist_atr = None
             if risk and p.get("price_current") and p.get("price_open"):
                 sign = 1 if p["side"] == "BUY" else -1
                 open_r = round((float(p["price_current"]) - float(p["price_open"])) * sign / risk, 3)
-            out.append({"side": p["side"], "open_r": open_r, "ticket": p["ticket"]})
+            atr = self._atr14(symbol)
+            if atr and p.get("price_current") and p.get("price_open"):
+                dist_atr = round(abs(float(p["price_current"]) - float(p["price_open"])) / atr, 3)
+            out.append({"side": p["side"], "open_r": open_r, "ticket": p["ticket"], "entry": p.get("price_open"),
+                        "distance_atr": dist_atr})
         if self.executor.has_pending_open(symbol):
             out.append({"side": None, "open_r": None, "ticket": None})
         return out
+
+    def _atr14(self, symbol: str) -> float | None:
+        bars = self.rt.closed_bars(symbol, self.rt.strategy["signal_timeframe"])[-120:]
+        if len(bars) < 16:
+            return None
+        return ind.last(ind.atr([b["h"] for b in bars], [b["l"] for b in bars], [b["c"] for b in bars], 14))
+
+    def trade_symbols(self) -> list[str]:
+        """Symbols that may receive signals/orders: strategy.trade_symbols (settings/.env TRADE_SYMBOLS) ∩ active;
+        empty = every active symbol. The rest are context only (quoted, analysed, shadow-labelled)."""
+        act = self.rt.active_symbols()
+        ts = [s for s in (self.rt.strategy.get("trade_symbols") or []) if s in act]
+        return ts or act
 
     def pyramid_status(self, symbol: str, side: str, mode: str | None = None) -> tuple[bool, str]:
         """(one more position allowed, note) under risk.max_positions_per_symbol / pyramid_min_r."""
@@ -295,7 +320,8 @@ class Engine:
         if max_per <= 1:
             return False, "o singură poziție pe simbol"
         positions = self.symbol_positions(symbol, mode)
-        reason = strategy.pyramid_blocker(side, positions, max_per, float(rk.get("pyramid_min_r", 0.5) or 0))
+        reason = strategy.pyramid_blocker(side, positions, max_per, float(rk.get("pyramid_min_r", 0.5) or 0),
+                                          float(rk.get("pyramid_min_distance_atr", 0) or 0))
         if reason:
             return False, reason.rstrip(".")
         return True, f"piramidare: {len(positions)}/{max_per} poziții, toate ≥ {float(rk.get('pyramid_min_r', 0.5)):g}R"
@@ -1016,6 +1042,9 @@ class Engine:
         rt.bus.publish("analysis", a)
         if a["direction"] in ("BUY", "SELL"):
             warm = self.warmup_reason(symbol, now) if allow_signal else None
+            if symbol not in self.trade_symbols():
+                a["reasons"].append("Simbol doar pentru context (TRADE_SYMBOLS): analiză și etichete în umbră, fără semnal.")
+                allow_signal = False
             if warm:
                 a["reasons"].append(f"Încălzire după pornire ({warm}) — doar analiză, fără semnal nou.")
             elif allow_signal:
@@ -1991,6 +2020,10 @@ class Engine:
             self.ml.tick(now)
         except Exception as e:
             self._perf_warn_once("ml_tick", f"ML tick: {e!r}")
+        try:
+            self.ai_trader.tick(now)
+        except Exception as e:
+            self._perf_warn_once("ai_trader_tick", f"AI trader tick: {e!r}")
 
     async def _loop(self) -> None:
         while True:

@@ -81,6 +81,58 @@ Răspunde doar cu obiectul JSON cerut."""
 
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
+# ---- AI trader (discretionary decisions on the chart; shadow by default, executed only when the owner enables it) --
+TRADER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": ["NONE", "BUY", "SELL"]},
+        "stop_loss": {"type": ["number", "null"], "description": "Preț SL (obligatoriu pentru BUY/SELL)."},
+        "take_profit": {"type": ["number", "null"], "description": "Preț TP (obligatoriu pentru BUY/SELL)."},
+        "hold_minutes": {"type": ["integer", "null"], "description": "Cât ține poziția cel mult (15–1440 minute)."},
+        "confidence": {"type": "number", "description": "0–1, încrederea ta în setup."},
+        "setup": {"type": "string", "description": "Numele setup-ului (ex: breakout, pullback, range, fără setup)."},
+        "reasoning": {"type": "string", "description": "Raționament în română, max 600 de caractere: ce vezi pe lumânări."},
+        "invalidation": {"type": "string", "description": "Condiția care anulează setup-ul."},
+    },
+    "required": ["action", "stop_loss", "take_profit", "hold_minutes", "confidence", "setup", "reasoning", "invalidation"],
+    "additionalProperties": False,
+}
+
+TRADER_PROMPT = """Ești un trader discreționar care citește graficul unui instrument (lumânări închise pe mai multe timeframe-uri,
+indicatori, spread, sesiune, știri, pozițiile deja deschise, istoricul recent) și decide DACĂ merită o tranzacție ACUM, la piață.
+Reguli:
+- Implicit răspunsul este NONE. Intră doar când vezi un setup concret pe lumânări (structură, nivel, impuls, respingere,
+  confluență între timeframe-uri) cu un stop logic și un raport câștig/risc de cel puțin 1,5. Nu tranzacționa zgomot.
+- BUY/SELL cer OBLIGATORIU stop_loss și take_profit ca prețuri absolute, de partea corectă a prețului curent
+  (BUY: SL < ask < TP; SELL: TP < bid < SL). Distanța SL ≥ constraints.min_sl_distance (dată în date). Intrarea e la piață.
+- hold_minutes: cât ții cel mult poziția dacă nu atinge SL/TP (15–1440). Alege-l după timeframe-ul setup-ului.
+- Folosește doar datele primite. Nu inventa niveluri, știri sau prețuri. Dacă spread-ul e mare față de stop sau o știre
+  majoră e aproape, preferă NONE.
+- Dacă există deja o poziție pe simbol, propune o nouă intrare doar în aceeași direcție și doar dacă datele o justifică
+  (constraints.pyramiding spune dacă e permisă).
+- Ține cont de propriile statistici (self_stats: cum au ieșit deciziile tale anterioare); dacă sunt negative, fii mai selectiv.
+- confidence onest: 0,5 = monedă aruncată. Totul în română. Răspunde doar cu obiectul JSON cerut."""
+
+MANAGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": ["HOLD", "TIGHTEN_SL", "CLOSE"]},
+        "new_sl": {"type": ["number", "null"], "description": "Noul SL (doar pentru TIGHTEN_SL), mai aproape de preț decât cel curent."},
+        "confidence": {"type": "number"},
+        "reasoning": {"type": "string", "description": "Română, max 400 de caractere."},
+    },
+    "required": ["action", "new_sl", "confidence", "reasoning"],
+    "additionalProperties": False,
+}
+
+MANAGE_PROMPT = """Ești managerul unei poziții DESCHISE a unui bot de trading. Primești poziția (direcție, intrare, SL, TP, profit
+curent în R, MFE/MAE, minute deschise, termenul maxim), lumânările recente, cotația, ATR, știrile apropiate.
+Poți doar: HOLD (nimic), TIGHTEN_SL (muți SL-ul mai aproape de preț — niciodată mai departe, niciodată dincolo de prețul
+curent) sau CLOSE (închizi la piață). Nu poți mări poziția, nu poți muta TP-ul mai departe, nu poți lărgi SL-ul.
+Strânge SL-ul când structura o justifică (profit blocat sub un nivel respectat), închide când setup-ul s-a invalidat sau
+când o știre majoră e iminentă și poziția e aproape de zero. Nu reacționa la fiecare lumânare: HOLD este răspunsul implicit.
+Totul în română. Răspunde doar cu obiectul JSON cerut."""
+
 # ---- post-trade analysis (Claude as trade analyst; never changes settings or orders) --------------------------------
 TRADE_REVIEW_SCHEMA = {
     "type": "object",
@@ -259,6 +311,16 @@ class ClaudeReviewer:
                                     "Analizează următoarea tranzacție ÎNCHISĂ a botului.\n\n", payload,
                                     (payload.get("trade") or {}).get("signal_id"))
 
+    async def decide_entry(self, payload: dict) -> dict:
+        """AI trader: discretionary entry decision on the chart (payload built by app.ai_trader)."""
+        return await self._analysis(TRADER_PROMPT, TRADER_SCHEMA,
+                                    "Decide dacă intri ACUM pe acest instrument.\n\n", payload, None)
+
+    async def decide_manage(self, payload: dict) -> dict:
+        """AI trader: management decision for one open bot position (HOLD / TIGHTEN_SL / CLOSE)."""
+        return await self._analysis(MANAGE_PROMPT, MANAGE_SCHEMA,
+                                    "Decide ce faci cu această poziție deschisă.\n\n", payload, None)
+
     async def review_day(self, payload: dict) -> dict:
         """Daily performance review (trades + shadow labels of one local day)."""
         return await self._analysis(DAILY_REVIEW_PROMPT, DAILY_REVIEW_SCHEMA,
@@ -288,6 +350,8 @@ class ClaudeReviewer:
             v = parsed.get(k)
             if spec.get("type") == "array":
                 out[k] = [str(x)[:300] for x in (v or []) if x is not None][:8]
+            elif isinstance(v, bool) or isinstance(v, (int, float)) or v is None and spec.get("type") in ("number", "integer"):
+                out[k] = v
             else:
                 out[k] = str(v or "")[:1200]
         return out

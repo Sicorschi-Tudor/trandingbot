@@ -201,6 +201,37 @@ CREATE TABLE IF NOT EXISTS trade_reviews (
     UNIQUE (kind, ref_id)
 );
 CREATE INDEX IF NOT EXISTS ix_trade_reviews_ts ON trade_reviews(created_ts);
+CREATE TABLE IF NOT EXISTS ai_trader_decisions (
+    id TEXT PRIMARY KEY,
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    tf TEXT,
+    bar_time INTEGER,
+    ticket INTEGER,
+    mode TEXT NOT NULL,
+    action TEXT NOT NULL,
+    side TEXT,
+    entry REAL,
+    sl REAL,
+    tp REAL,
+    hold_minutes INTEGER,
+    confidence REAL,
+    setup TEXT,
+    reasoning TEXT,
+    status TEXT NOT NULL,
+    note TEXT,
+    signal_id TEXT,
+    payload_json TEXT,
+    model TEXT,
+    outcome TEXT,
+    outcome_r REAL,
+    mfe_r REAL,
+    mae_r REAL,
+    labeled_ts REAL,
+    UNIQUE (kind, symbol, tf, bar_time, ticket)
+);
+CREATE INDEX IF NOT EXISTS ix_ai_trader_ts ON ai_trader_decisions(ts);
 CREATE TABLE IF NOT EXISTS forward_meta (
     name TEXT PRIMARY KEY,
     started_ts REAL NOT NULL,

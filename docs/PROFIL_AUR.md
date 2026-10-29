@@ -2,6 +2,27 @@
 
 Cum pornești botul pe aur, pe contul DEMO, cu mai multe poziții permise pe același instrument — și ce înseamnă fiecare setare. Valorile de mai jos se pun în `.env` (apoi repornești serverul) sau, cele de risc, din pagina *Control & Risc*.
 
+## 0. Configurația cerută: „tranzacționează doar aur, restul doar informație”
+
+```
+ACTIVE_SYMBOLS=EURUSD,GBPUSD,USDJPY,XAUUSD   # toate sunt cotate și analizate (context, etichete în umbră)
+TRADE_SYMBOLS=XAUUSD                         # DOAR aurul primește semnale și ordine
+# istoric extins descărcat din MT5 pentru aur (ani de bare), folosit de contextul de termen lung al AI-ului
+ARCHIVE_EXTRA=M15:730,H1:1825,H4:3650,D1:7300
+ARCHIVE_EXTRA_INTERVAL_S=60
+# mai multe poziții pe aur, dar diferite: aceeași direcție, peste poziții pe profit, la ≥ 1 ATR distanță
+MAX_OPEN_POSITIONS=3
+MAX_POSITIONS_PER_SYMBOL=3
+PYRAMID_MIN_R=0.5
+PYRAMID_MIN_DISTANCE_ATR=1.0
+# AI trader: pornește în UMBRĂ (vezi docs/AI_TRADER.md); live doar după ≥ 100 de decizii etichetate pozitive
+AI_TRADER_ENTRY_MODE=shadow
+AI_TRADER_MANAGE_MODE=shadow
+AI_TRADER_TIMEFRAME=M15
+```
+
+`TRADE_SYMBOLS` și `trade_symbols` se pot seta și din API (`PUT /api/v1/strategy`), fără repornire. Istoricul extins se descarcă treptat (o cerere la 60 s, niciodată cât botul are poziții deschise); progresul e în *Sistem & Loguri → Arhivă*. Contextul de termen lung al AI-ului devine complet după ce arhiva D1 acoperă câțiva ani.
+
 ## 1. Simbolul
 
 ```
@@ -33,6 +54,7 @@ MAX_TOTAL_OPEN_RISK_PCT=2.0   # plafonul riscului deschis total rămâne
 ```
 
 Regula implementată (`app/strategy.py: pyramid_blocker`, verificată și de Risk Engine):
+- a doua poziție trebuie să fie la **cel puțin `PYRAMID_MIN_DISTANCE_ATR` × ATR(14)** distanță de fiecare intrare deschisă pe simbol — nu 3–4 tranzacții în același loc, ci la niveluri diferite;
 - a doua poziție se deschide **doar în aceeași direcție** cu cea existentă (fără hedging pe același simbol — plătești spread-ul de două ori pentru nimic);
 - **doar dacă toate pozițiile deschise pe simbol sunt pe profit** cu cel puțin `PYRAMID_MIN_R` din riscul lor inițial — adică se adaugă peste câștigători, nu se mediază pierderi (asta fac boții de tip grid/martingale, care pierd contul);
 - un ordin încă în curs pe simbol blochează adăugarea;
