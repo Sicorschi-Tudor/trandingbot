@@ -135,6 +135,10 @@ Costul estimat al analistului: la `claude-opus-5-5`, o analiză de tranzacție �
 
 ---
 
+## 6b. Actualizare după Etapa F (cercetare pe 9 ani × 12 instrumente) — executată
+
+Etapele 2–3 din plan au fost rulate parțial în această sesiune, pe date publice (2012–2022, M15…D1, 12 instrumente FX + aur, cont standard și ECN), cu protocol pre-înregistrat și verificare adversarială: **138 de configurații din 6 familii** (intraday existente, trend D1/H4 pe portofoliu, 20 de ipoteze de descoperire, strategii noi de sesiune, ML meta-labeling, aur/JPY pe H4). **Rezultat: 0 PROMISING.** Singura configurație care a trecut poarta VALID (compresie ATR → expansiune, H4) a fost respinsă de verificatori (vârf îngust de parametri; artefact de cost în motor, corectat) și nu mai trece nici cu motorul corectat. Detalii: `docs/research/STAGE_F_RESULTS.md`. Concluzia planului rămâne neschimbată și este acum susținută de un eșantion de ~50× mai mare decât etapele C–E: pe prețul FX simplu nu există avantaj după costuri; următorul pas cu șanse reale este universul multi-clasă (indici, obligațiuni, mărfuri) și informația dincolo de preț, care necesită date pe care acest mediu nu le-a putut descărca.
+
 ## 7. Răspunsul final la „sigur 50 USD pe zi”
 
 Nu. Nici acest bot, nici altul, nu poate promite 50 USD **în fiecare zi**. Ce poate promite acest plan este altceva, mai valoros: **să afle adevărul repede și ieftin** — dacă există un avantaj exploatabil pe costurile, datele și universul potrivit, protocolul îl va găsi și îl va valida forward înainte de a risca un dolar real; dacă nu există, botul rămâne pe DEMO și banii rămân în cont. Pe baza tuturor dovezilor din §1, scenariul realist pentru un sistem care trece toate porțile este un randament **mediu** de 5–20 % pe an, cu luni negative — ceea ce înseamnă că 50 USD/zi în medie cere un capital de ordinul **50 000–150 000 USD**, nu un cod mai bun.

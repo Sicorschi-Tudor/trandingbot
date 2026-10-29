@@ -594,6 +594,7 @@ CLI: `python -m app.ml train | list | approve | retire | shadow`.
 | C2 | donchian, ma-trend, tsmom pe H1/H4/D1, multi-an | 9/9 **REJECTED**, toate negative și fără swap, și cu costuri ECN |
 | D | ML: filtru de intrare, model de ieșire, combinat | 4/4 **REJECTED**: pierderea scade de la −0.103R la −0.050R, dar rămâne negativă |
 | E | 20 de ipoteze noi | **0/20** trec validarea |
+| F | 6 familii (138 de configurații) pe 9,3 ani × 12 instrumente, date publice, cont standard și ECN, verificare adversarială | **0/6 PROMISING**; o configurație a trecut VALID la limită și a fost respinsă la verificare; motorul de backtest corectat (spread la momentul deciziei) |
 
 **Concluzie:** pe date de preț simple, pe acest univers de perechi FX, nu există avantaj după costuri. Recomandare: **rămâne pe DEMO**. Direcții care ar putea schimba concluzia: costuri mai mici (cont ECN/raw), mai mult istoric intraday, surse de informație dincolo de preț (calendar macro, poziționare, carry). Detalii: `docs/research/STAGE_*.md`.
 

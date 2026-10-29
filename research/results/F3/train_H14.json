@@ -1,0 +1,75 @@
+{
+ "strategy": "disc-h14",
+ "tf": "H4",
+ "htf": "NONE",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "AUDJPY",
+  "AUDUSD",
+  "EURCHF",
+  "EURGBP",
+  "EURJPY",
+  "EURUSD",
+  "GBPJPY",
+  "GBPUSD",
+  "USDCAD",
+  "USDCHF",
+  "USDJPY",
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "factor_db": "data/research.db"
+ },
+ "risk_params": {
+  "max_open_positions": 6,
+  "max_trades_per_day": 30,
+  "max_same_currency_direction": 3
+ },
+ "exit": null,
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0
+ },
+ "elapsed_s": 7.9,
+ "summary": {
+  "trades": 0,
+  "win_rate": null,
+  "avg_r": null,
+  "expectancy_r": null,
+  "profit_factor": null,
+  "max_dd_r": 0.0,
+  "max_consec_losses": 0,
+  "net_r": 0.0,
+  "net_usd": 0.0,
+  "ci90_avg_r": [
+   null,
+   null
+  ],
+  "swap_r": 0.0,
+  "swap_usd": 0.0,
+  "swap_days": 0,
+  "sample_days": 2037.9
+ },
+ "by_year": {},
+ "by_symbol": {},
+ "by_outcome": {},
+ "counts": {
+  "blocked_market": 0,
+  "blocked_context": {},
+  "signals": 0,
+  "risk_rejected": {},
+  "filled": 0,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 0,
+  "analyses": 103871,
+  "candidates": 0
+ },
+ "warnings": [
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate.",
+  "Doar 0 tranzac\u021bii \u2014 rezultatele nu sunt semnificative statistic.",
+  "Swap estimat (tabel implicit -5/-5 puncte/zi long/short) pentru AUDJPY, AUDUSD, EURCHF, EURGBP, EURJPY, EURUSD, GBPJPY, GBPUSD, USDCAD, USDCHF, USDJPY, XAUUSD \u2014 trimite cost.swap_pts_per_day pentru valorile brokerului."
+ ]
+}

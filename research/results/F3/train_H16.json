@@ -1,0 +1,105 @@
+{
+ "strategy": "disc-h16",
+ "tf": "H1",
+ "htf": "D1",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "AUDJPY",
+  "AUDUSD",
+  "EURCHF",
+  "EURGBP",
+  "EURJPY",
+  "EURUSD",
+  "GBPJPY",
+  "GBPUSD",
+  "USDCAD",
+  "USDCHF",
+  "USDJPY",
+  "XAUUSD"
+ ],
+ "strategy_params": {},
+ "risk_params": {
+  "max_open_positions": 6,
+  "max_trades_per_day": 30,
+  "max_same_currency_direction": 3
+ },
+ "exit": null,
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0
+ },
+ "elapsed_s": 9.1,
+ "summary": {
+  "trades": 2890,
+  "win_rate": 0.4948,
+  "avg_r": 0.0095,
+  "expectancy_r": 0.0095,
+  "profit_factor": 1.076,
+  "max_dd_r": 16.326,
+  "max_consec_losses": 15,
+  "net_r": 27.568,
+  "net_usd": 657.72,
+  "ci90_avg_r": [
+   -0.0018,
+   0.02
+  ],
+  "swap_r": 0.0,
+  "swap_usd": 0.0,
+  "swap_days": 0,
+  "sample_days": 2038.0
+ },
+ "by_year": {
+  "2018": {
+   "n": 300,
+   "avg_r": -0.0022,
+   "sum_r": -0.66
+  }
+ },
+ "by_symbol": {
+  "EURJPY": {
+   "trades": 1445,
+   "win_rate": 0.4927,
+   "avg_r": 0.0012,
+   "expectancy_r": 0.0012,
+   "profit_factor": 1.01,
+   "max_dd_r": 13.162,
+   "max_consec_losses": 12,
+   "net_r": 1.799,
+   "net_usd": 106.86
+  },
+  "EURUSD": {
+   "trades": 1445,
+   "win_rate": 0.4969,
+   "avg_r": 0.0178,
+   "expectancy_r": 0.0178,
+   "profit_factor": 1.145,
+   "max_dd_r": 7.575,
+   "max_consec_losses": 8,
+   "net_r": 25.769,
+   "net_usd": 550.86
+  }
+ },
+ "by_outcome": {
+  "TIME": 2855,
+  "SL": 35
+ },
+ "counts": {
+  "blocked_market": 0,
+  "blocked_context": {},
+  "signals": 2890,
+  "risk_rejected": {},
+  "filled": 2890,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 0,
+  "analyses": 412705,
+  "candidates": 2890
+ },
+ "warnings": [
+  "Drawdown 3% atins la 2018-02-02T07:00:00Z \u2014 \u00een live intr\u0103rile s-ar fi oprit (backtestul continu\u0103; halt_on_drawdown=true pentru oprire).",
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate.",
+  "Swap estimat (tabel implicit -5/-5 puncte/zi long/short) pentru AUDJPY, AUDUSD, EURCHF, EURGBP, EURJPY, EURUSD, GBPJPY, GBPUSD, USDCAD, USDCHF, USDJPY, XAUUSD \u2014 trimite cost.swap_pts_per_day pentru valorile brokerului."
+ ]
+}

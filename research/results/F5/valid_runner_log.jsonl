@@ -1,0 +1,4 @@
+{"strategy": "breakout-v1", "tf": "H1", "split": "valid", "trades": 1706, "avg_r": -0.1387, "ci90": [-0.1851, -0.093], "pf": 0.753, "max_dd_r": 241.543, "net_r": -236.603, "by_year": {"2020": -0.1468}, "elapsed_s": 41.5}
+{"strategy": "disc-f5-ml", "tf": "H1", "split": "valid", "trades": 1366, "avg_r": -0.1092, "ci90": [-0.162, -0.059], "pf": 0.799, "max_dd_r": 157.232, "net_r": -149.106, "by_year": {"2020": -0.1005}, "elapsed_s": 61.8}
+{"strategy": "breakout-v1", "tf": "H1", "split": "valid", "trades": 1953, "avg_r": -0.1106, "ci90": [-0.1527, -0.065], "pf": 0.799, "max_dd_r": 221.311, "net_r": -215.966, "by_year": {"2020": -0.1407}, "elapsed_s": 41.6}
+{"strategy": "disc-f5-ml", "tf": "H1", "split": "valid", "trades": 1054, "avg_r": -0.0445, "ci90": [-0.1028, 0.0114], "pf": 0.913, "max_dd_r": 83.987, "net_r": -46.941, "by_year": {"2020": 0.0457}, "elapsed_s": 223.1}

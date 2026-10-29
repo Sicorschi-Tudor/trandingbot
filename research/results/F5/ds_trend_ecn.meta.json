@@ -1,0 +1,31 @@
+{
+ "base": "trend-v1",
+ "db": "data/research_ecn.db",
+ "out": "research/results/F5/ds_trend_ecn.joblib",
+ "elapsed_s": 386.9,
+ "n_entry": 289874,
+ "n_exit": 152974,
+ "n_trades": 22093,
+ "exit_dropped": {
+  "no_decision": 0,
+  "path_mismatch": 0,
+  "no_bar": 0
+ },
+ "dataset_version": "ds-7c2564488e28",
+ "exit_policy": {
+  "mode": "base",
+  "params": {
+   "max_hold_hours": 24.0
+  }
+ },
+ "cost": {
+  "mode": "stats",
+  "fixed_spread_pts": null,
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0,
+  "per_symbol_spread_pts": {}
+ },
+ "n_entry_train": 212946,
+ "n_entry_valid": 76800,
+ "n_exit_rows_train": 112689
+}

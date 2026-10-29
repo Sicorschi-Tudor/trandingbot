@@ -1,0 +1,141 @@
+{
+ "strategy": "ma-trend-v1",
+ "tf": "H4",
+ "htf": "NONE",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "AUDJPY",
+  "EURJPY",
+  "GBPJPY",
+  "USDJPY"
+ ],
+ "strategy_params": {
+  "ema_slow_n": 100,
+  "sl_atr": 3.0,
+  "trail_atr": 3.0
+ },
+ "risk_params": {
+  "max_open_positions": 12,
+  "max_trades_per_day": 50,
+  "max_same_currency_direction": 4,
+  "max_spread_points": 100,
+  "rollover_blackout_minutes": 0,
+  "cooldown_after_loss_minutes": 0,
+  "max_consecutive_losses": 1000,
+  "max_total_open_risk_pct": 100,
+  "max_daily_loss_pct": 100
+ },
+ "exit": null,
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0,
+  "swap_mode": "table"
+ },
+ "elapsed_s": 8.8,
+ "summary": {
+  "trades": 609,
+  "win_rate": 0.2217,
+  "avg_r": -0.0124,
+  "expectancy_r": -0.0124,
+  "profit_factor": 0.948,
+  "max_dd_r": 14.574,
+  "max_consec_losses": 23,
+  "net_r": -7.554,
+  "net_usd": -143.33,
+  "ci90_avg_r": [
+   -0.0598,
+   0.042
+  ],
+  "swap_r": -6.98,
+  "swap_usd": -137.29,
+  "swap_days": 1624,
+  "sample_days": 2037.9
+ },
+ "by_year": {
+  "2016": {
+   "n": 64,
+   "avg_r": 0.0276,
+   "sum_r": 1.77
+  },
+  "2017": {
+   "n": 122,
+   "avg_r": -0.0173,
+   "sum_r": -2.11
+  },
+  "2018": {
+   "n": 114,
+   "avg_r": -0.0162,
+   "sum_r": -1.85
+  }
+ },
+ "by_symbol": {
+  "AUDJPY": {
+   "trades": 163,
+   "win_rate": 0.1902,
+   "avg_r": -0.0492,
+   "expectancy_r": -0.0492,
+   "profit_factor": 0.78,
+   "max_dd_r": 15.504,
+   "max_consec_losses": 15,
+   "net_r": -8.021,
+   "net_usd": -114.37
+  },
+  "EURJPY": {
+   "trades": 167,
+   "win_rate": 0.2515,
+   "avg_r": 0.0301,
+   "expectancy_r": 0.0301,
+   "profit_factor": 1.133,
+   "max_dd_r": 9.75,
+   "max_consec_losses": 16,
+   "net_r": 5.03,
+   "net_usd": 64.35
+  },
+  "GBPJPY": {
+   "trades": 139,
+   "win_rate": 0.2014,
+   "avg_r": 0.0081,
+   "expectancy_r": 0.0081,
+   "profit_factor": 1.03,
+   "max_dd_r": 7.128,
+   "max_consec_losses": 14,
+   "net_r": 1.131,
+   "net_usd": 28.45
+  },
+  "USDJPY": {
+   "trades": 140,
+   "win_rate": 0.2429,
+   "avg_r": -0.0407,
+   "expectancy_r": -0.0407,
+   "profit_factor": 0.827,
+   "max_dd_r": 8.218,
+   "max_consec_losses": 11,
+   "net_r": -5.695,
+   "net_usd": -121.76
+  }
+ },
+ "by_outcome": {
+  "TRAIL": 167,
+  "FLIP": 435,
+  "SL": 5,
+  "TP": 2
+ },
+ "counts": {
+  "blocked_market": 0,
+  "blocked_context": {},
+  "signals": 609,
+  "risk_rejected": {},
+  "filled": 609,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 0,
+  "analyses": 34675,
+  "candidates": 609
+ },
+ "warnings": [
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate.",
+  "Swap estimat (tabel implicit -5/-5 puncte/zi long/short) pentru AUDJPY, EURJPY, GBPJPY, USDJPY \u2014 trimite cost.swap_pts_per_day pentru valorile brokerului."
+ ]
+}

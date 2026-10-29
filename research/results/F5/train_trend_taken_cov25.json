@@ -1,0 +1,363 @@
+{
+ "tag": "trend_taken_cov25",
+ "config": {
+  "base": "trend-v1",
+  "dataset": "research/results/F5/ds_trend_std.joblib",
+  "min_cov": 0.25,
+  "folds": 4,
+  "taken_only": true,
+  "embargo_h": 48.0,
+  "hgb": {
+   "max_iter": 300,
+   "learning_rate": 0.05,
+   "max_leaf_nodes": 15,
+   "min_samples_leaf": 40,
+   "l2_regularization": 1.0,
+   "early_stopping": false
+  }
+ },
+ "elapsed_s": 7.9,
+ "train_rows": {
+  "n": 16290,
+  "from": 1370210400,
+  "to": 1546286400,
+  "base_rate": 0.2977,
+  "avg_r_all": -0.123
+ },
+ "walk_forward_oos": {
+  "folds": [
+   {
+    "fold": 0,
+    "n_train": 5615,
+    "n_cal": 1280,
+    "n_val": 1235,
+    "n_test": 2002,
+    "threshold": 0.0,
+    "test_from": 1458248400,
+    "test_to": 1480257900,
+    "policy": {
+     "n": 2002,
+     "avg_r": -0.097,
+     "ci90": [
+      -0.1389,
+      -0.0592
+     ],
+     "pf": 0.818,
+     "net_r": -194.286,
+     "win_rate": 0.3112
+    },
+    "baseline": {
+     "n": 2002,
+     "avg_r": -0.097,
+     "ci90": [
+      -0.1389,
+      -0.0592
+     ],
+     "pf": 0.818,
+     "net_r": -194.286,
+     "win_rate": 0.3112
+    }
+   },
+   {
+    "fold": 1,
+    "n_train": 7103,
+    "n_cal": 1538,
+    "n_val": 1490,
+    "n_test": 2000,
+    "threshold": 0.333333,
+    "test_from": 1480257900,
+    "test_to": 1502267400,
+    "policy": {
+     "n": 899,
+     "avg_r": -0.0743,
+     "ci90": [
+      -0.1345,
+      -0.01
+     ],
+     "pf": 0.859,
+     "net_r": -66.772,
+     "win_rate": 0.3115
+    },
+    "baseline": {
+     "n": 2000,
+     "avg_r": -0.1107,
+     "ci90": [
+      -0.1541,
+      -0.0698
+     ],
+     "pf": 0.799,
+     "net_r": -221.351,
+     "win_rate": 0.303
+    }
+   },
+   {
+    "fold": 2,
+    "n_train": 8564,
+    "n_cal": 1796,
+    "n_val": 1800,
+    "n_test": 2041,
+    "threshold": 0.301273,
+    "test_from": 1502267400,
+    "test_to": 1524276900,
+    "policy": {
+     "n": 878,
+     "avg_r": -0.1253,
+     "ci90": [
+      -0.1824,
+      -0.0644
+     ],
+     "pf": 0.766,
+     "net_r": -109.991,
+     "win_rate": 0.2995
+    },
+    "baseline": {
+     "n": 2041,
+     "avg_r": -0.1538,
+     "ci90": [
+      -0.1942,
+      -0.1149
+     ],
+     "pf": 0.727,
+     "net_r": -313.834,
+     "win_rate": 0.2832
+    }
+   },
+   {
+    "fold": 3,
+    "n_train": 9973,
+    "n_cal": 2073,
+    "n_val": 2148,
+    "n_test": 2044,
+    "threshold": 0.298113,
+    "test_from": 1524276900,
+    "test_to": 1546286401,
+    "policy": {
+     "n": 1253,
+     "avg_r": -0.1128,
+     "ci90": [
+      -0.1614,
+      -0.0652
+     ],
+     "pf": 0.787,
+     "net_r": -141.396,
+     "win_rate": 0.3017
+    },
+    "baseline": {
+     "n": 2044,
+     "avg_r": -0.1222,
+     "ci90": [
+      -0.161,
+      -0.0834
+     ],
+     "pf": 0.775,
+     "net_r": -249.815,
+     "win_rate": 0.2935
+    }
+   }
+  ],
+  "hgb": {
+   "policy": {
+    "n": 5032,
+    "avg_r": -0.1018,
+    "ci90": [
+     -0.1263,
+     -0.0764
+    ],
+    "pf": 0.808,
+    "net_r": -512.446,
+    "win_rate": 0.3068
+   },
+   "coverage": 0.6222,
+   "model": {
+    "n": 8087,
+    "base_rate": 0.2976,
+    "mean_p": 0.3039,
+    "brier": 0.20988,
+    "log_loss": 0.61637,
+    "auc": 0.5108,
+    "ece": 0.0182,
+    "calibration": [
+     {
+      "lo": 0.0,
+      "hi": 0.1,
+      "n": 7,
+      "mean_p": 0.0,
+      "frac_pos": 0.1429
+     },
+     {
+      "lo": 0.1,
+      "hi": 0.2,
+      "n": 26,
+      "mean_p": 0.1643,
+      "frac_pos": 0.2308
+     },
+     {
+      "lo": 0.2,
+      "hi": 0.3,
+      "n": 3866,
+      "mean_p": 0.2812,
+      "frac_pos": 0.2928
+     },
+     {
+      "lo": 0.3,
+      "hi": 0.4,
+      "n": 4148,
+      "mean_p": 0.3224,
+      "frac_pos": 0.3016
+     },
+     {
+      "lo": 0.4,
+      "hi": 0.5,
+      "n": 10,
+      "mean_p": 0.4331,
+      "frac_pos": 0.5
+     },
+     {
+      "lo": 0.6,
+      "hi": 0.7,
+      "n": 8,
+      "mean_p": 0.6666,
+      "frac_pos": 0.125
+     },
+     {
+      "lo": 0.7,
+      "hi": 0.8,
+      "n": 2,
+      "mean_p": 0.7656,
+      "frac_pos": 0.5
+     },
+     {
+      "lo": 0.8,
+      "hi": 0.9,
+      "n": 13,
+      "mean_p": 0.8024,
+      "frac_pos": 0.5385
+     },
+     {
+      "lo": 0.9,
+      "hi": 1.0,
+      "n": 7,
+      "mean_p": 0.9918,
+      "frac_pos": 0.4286
+     }
+    ],
+    "brier_climatology": 0.20905
+   },
+   "taken_by_backtest": {
+    "policy": {
+     "n": 5032,
+     "avg_r": -0.1018,
+     "ci90": [
+      -0.1263,
+      -0.0764
+     ],
+     "pf": 0.808,
+     "net_r": -512.446,
+     "win_rate": 0.3068
+    },
+    "baseline": {
+     "n": 8087,
+     "avg_r": -0.1211,
+     "ci90": [
+      -0.1402,
+      -0.1002
+     ],
+     "pf": 0.779,
+     "net_r": -979.287,
+     "win_rate": 0.2976
+    }
+   }
+  },
+  "lr": {
+   "policy": {
+    "n": 3502,
+    "avg_r": -0.1215,
+    "ci90": [
+     -0.1529,
+     -0.0889
+    ],
+    "pf": 0.771,
+    "net_r": -425.494,
+    "win_rate": 0.303
+   },
+   "model": {
+    "n": 8087,
+    "base_rate": 0.2976,
+    "mean_p": 0.2956,
+    "brier": 0.20954,
+    "log_loss": 0.61004,
+    "auc": 0.5166,
+    "ece": 0.0255,
+    "calibration": [
+     {
+      "lo": 0.1,
+      "hi": 0.2,
+      "n": 50,
+      "mean_p": 0.189,
+      "frac_pos": 0.24
+     },
+     {
+      "lo": 0.2,
+      "hi": 0.3,
+      "n": 4358,
+      "mean_p": 0.2672,
+      "frac_pos": 0.2912
+     },
+     {
+      "lo": 0.3,
+      "hi": 0.4,
+      "n": 3631,
+      "mean_p": 0.3297,
+      "frac_pos": 0.3035
+     },
+     {
+      "lo": 0.4,
+      "hi": 0.5,
+      "n": 48,
+      "mean_p": 0.4135,
+      "frac_pos": 0.5
+     }
+    ],
+    "brier_climatology": 0.20905
+   }
+  },
+  "baseline_take_all": {
+   "n": 8087,
+   "avg_r": -0.1211,
+   "ci90": [
+    -0.1402,
+    -0.1002
+   ],
+   "pf": 0.779,
+   "net_r": -979.287,
+   "win_rate": 0.2976
+  }
+ },
+ "final_fit": {
+  "n_train": 11369,
+  "n_cal": 2413,
+  "n_val": 2474,
+  "threshold_hgb": 0.283163,
+  "threshold_lr": 0.310367,
+  "p_hi": 0.343137,
+  "trained_until": 1546290000,
+  "bounds": [
+   [
+    1370210400.0,
+    1493463600.7
+   ],
+   [
+    1493463600.7,
+    1519875000.85
+   ],
+   [
+    1519875000.85,
+    1546286401.0
+   ]
+  ]
+ },
+ "bundles": {
+  "hgb": "/home/user/trandingbot/research/results/F5/bundle_trend_taken_cov25_hgb.joblib",
+  "lr": "/home/user/trandingbot/research/results/F5/bundle_trend_taken_cov25_lr.joblib"
+ }
+}
