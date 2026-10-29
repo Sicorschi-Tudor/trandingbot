@@ -147,7 +147,7 @@ def validate_strategy_update(body: dict, current: dict) -> dict:
                 raise HTTPException(status_code=422, detail="symbols: listă cu 1–20 simboluri")
             syms = []
             for s in v:
-                s = str(s).strip().upper()
+                s = str(s).strip()  # exact broker spelling (case-sensitive in MT5)
                 if not SYMBOL_RE.match(s):
                     raise HTTPException(status_code=422, detail=f"simbol invalid: {s}")
                 if s not in syms:
@@ -162,7 +162,7 @@ def validate_strategy_update(body: dict, current: dict) -> dict:
                 raise HTTPException(status_code=422, detail="trade_symbols: listă cu 0–20 simboluri (gol = toate)")
             out[k] = []
             for s in v:
-                s = str(s).strip().upper()
+                s = str(s).strip()
                 if not SYMBOL_RE.match(s):
                     raise HTTPException(status_code=422, detail=f"simbol invalid: {s}")
                 if s not in out[k]:
@@ -228,10 +228,19 @@ async def get_symbols(request: Request):
 async def get_candles(request: Request, symbol: str, tf: str = "M5", limit: int = Query(300, ge=1, le=2000)):
     eng = get_engine(request)
     tf = tf.upper()
-    symbol = symbol.upper()
+    symbol = eng.resolve_symbol(symbol)
     if tf not in TF_SECONDS:
         raise HTTPException(status_code=422, detail="tf invalid")
     series = list(eng.rt.bars.get((symbol, tf), []))
+    if limit > len(series):  # the live buffer holds the EA's last ~300 bars; older bars come from the archive
+        try:
+            sec = TF_SECONDS[tf]
+            oldest = series[0]["t"] if series else int(eng.now_utc().timestamp())
+            older = eng.get_closed_bars(symbol, tf, oldest - (limit - len(series) + 5) * sec * 2, oldest - 1)
+            seen = {b["t"] for b in series}
+            series = [b for b in older if b["t"] not in seen][-(limit - len(series)):] + series
+        except Exception:
+            pass
     closes = [b["c"] for b in series]
     ef, es = ind.ema(closes, 20), ind.ema(closes, 50)
     start = max(0, len(series) - limit)
@@ -247,7 +256,7 @@ async def get_candles(request: Request, symbol: str, tf: str = "M5", limit: int 
 @router.get("/analysis")
 async def get_analysis(request: Request, symbol: str):
     eng = get_engine(request)
-    symbol = symbol.upper()
+    symbol = get_engine(request).resolve_symbol(symbol)
     a = eng.rt.last_analysis.get(symbol)
     if a is None:
         a = eng.analyze_symbol(symbol, allow_signal=False)
@@ -435,7 +444,7 @@ async def control_test_order(request: Request):
 async def control_analyze_now(request: Request):
     eng = get_engine(request)
     body = await _json(request)
-    symbol = str(body.get("symbol") or "").upper()
+    symbol = eng.resolve_symbol(str(body.get("symbol") or ""))
     if symbol not in eng.rt.active_symbols():
         raise HTTPException(status_code=404, detail="Simbol inactiv")
     return eng.analyze_symbol(symbol, allow_signal=True)
@@ -798,7 +807,7 @@ async def put_ai_trader_settings(request: Request):
 @router.post("/ai-trader/decide/{symbol}", dependencies=[Depends(require_admin)])
 async def ai_trader_decide_now(request: Request, symbol: str):
     eng = get_engine(request)
-    symbol = symbol.upper()
+    symbol = eng.resolve_symbol(symbol)
     if symbol not in eng.rt.active_symbols():
         raise HTTPException(status_code=404, detail="Simbol inactiv")
     if not eng.ai_trader.available:

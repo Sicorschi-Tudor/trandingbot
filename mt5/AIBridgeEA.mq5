@@ -6,14 +6,14 @@
 //+------------------------------------------------------------------+
 #property copyright "AI Trading Bot v1"
 #property link      "http://127.0.0.1:8787"
-#property version   "1.14"
+#property version   "1.15"
 #property description "Punte MT5 <-> server AI Trading Bot (v1)."
 #property description "Trimite cotatii, bare, cont, pozitii si deal-uri catre server"
 #property description "si executa DOAR comenzile primite de la server (OPEN/MODIFY/CLOSE)."
 
 #include <Trade\Trade.mqh>
 
-#define EA_VERSION        "1.14"
+#define EA_VERSION        "1.15"
 #define MAX_DONE_IDS      500
 #define MAX_RESULTS       200
 #define MAX_HIST          64
@@ -44,6 +44,7 @@ string   g_base_url      = "";
 string   g_symbols[];
 string   g_tfs[];
 string   g_symbols_csv   = "";
+string   g_unknown_csv   = "";     // v1.15: symbols the broker does not know (reported to the server)
 string   g_tfs_csv       = "";
 string   g_hist_sym[];
 string   g_hist_tf[];
@@ -1070,6 +1071,7 @@ string BuildRequest(int &n_results)
    j += "\"ea_version\":\"" + EA_VERSION + "\"";
    j += ",\"magic\":" + FmtL(InpMagic);
    j += ",\"instance_id\":" + JStr(g_instance_id);
+   j += ",\"unknown_symbols\":" + JStr(g_unknown_csv);   // v1.15: "" or "SYM1,SYM2" (SymbolSelect failed)
    j += ",\"time_utc\":" + FmtL((long)TimeGMT());
    j += ",\"srv_offset\":" + FmtL(g_offset);   // v1.12: lets the server undo broker DST changes in old bars
    j += ",\"terminal\":" + TerminalJson();
@@ -1468,6 +1470,7 @@ void SetSymbols(const string csv)
    string parts[];
    int n = StringSplit(csv, ',', parts);
    string fresh[];
+   string unknown = "";
    int m = 0;
    for(int i = 0; i < n; i++)
      {
@@ -1478,7 +1481,8 @@ void SetSymbols(const string csv)
          continue;
       if(!SymbolSelect(s, true))
         {
-         Print("ATENTIE: simbolul '", s, "' nu exista la acest broker (verifica numele, ex. EURUSD.a / EURUSDm)");
+         Print("ATENTIE: simbolul '", s, "' nu exista la acest broker (verifica numele, ex. EURUSD.a / EURUSDm / XAUUSD.a / GOLD)");
+         unknown += (unknown == "" ? "" : ",") + s;
          continue;
         }
       ArrayResize(fresh, m + 1);
@@ -1486,6 +1490,7 @@ void SetSymbols(const string csv)
       m++;
      }
    g_symbols_csv = csv;
+   g_unknown_csv = unknown;
    if(m == 0)
      {
       Print("ATENTIE: niciun simbol valid primit de la server, se foloseste ", _Symbol);

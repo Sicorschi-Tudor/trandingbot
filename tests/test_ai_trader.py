@@ -73,7 +73,7 @@ def test_shadow_decision_stored_and_payload(engine):
     t = engine.ai_trader
     t.update_settings({"entry_mode": "shadow"})
     payload = t.build_entry_payload("EURUSD")
-    assert payload["timeframe"] == "M15" and len(payload["candles"]["M15"]) == 60 and payload["candles"]["H1"]
+    assert payload["timeframe"] == "M15" and len(payload["candles"]["M15"]) == 96 and payload["candles"]["H1"]
     assert payload["constraints"]["min_sl_distance"] > 0 and payload["self_stats"]["labeled"] == 0
     row = asyncio.run(t.decide("EURUSD"))
     assert row["status"] == "VALID" and row["action"] == "BUY" and row["mode"] == "shadow" and row["signal_id"] is None

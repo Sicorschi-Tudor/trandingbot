@@ -93,3 +93,37 @@ def test_gold_profile(tmp_path):
     assert eng.ai_trader.conf["entry_mode"] == "shadow" and eng.ai_trader.symbols() == ["XAUUSD"]
     assert Settings(_env_file=None, PROFILE="", ACTIVE_SYMBOLS="EURUSD").ACTIVE_SYMBOLS == "EURUSD"
     db.close()
+
+
+def test_gold_profile_keeps_broker_symbol_name():
+    from app.config import Settings
+    s = Settings(_env_file=None, PROFILE="gold", ACTIVE_SYMBOLS="EURUSD,XAUUSD.a")
+    assert s.ACTIVE_SYMBOLS == "XAUUSD.a" and s.TRADE_SYMBOLS == "XAUUSD.a" and s.AI_TRADER_SYMBOLS == "XAUUSD.a"
+    s = Settings(_env_file=None, PROFILE="gold", ACTIVE_SYMBOLS="GOLD")
+    assert s.ACTIVE_SYMBOLS == "GOLD"
+    s = Settings(_env_file=None, PROFILE="gold", ACTIVE_SYMBOLS="EURUSD")
+    assert s.ACTIVE_SYMBOLS == "XAUUSD"
+
+
+def test_symbol_case_is_preserved(client, engine):
+    from app.config import Settings
+    assert Settings(_env_file=None, PROFILE="", ACTIVE_SYMBOLS="XAUUSD.a, eurusdm").default_strategy()["symbols"] == ["XAUUSD.a", "eurusdm"]
+    assert Settings(_env_file=None, PROFILE="gold", ACTIVE_SYMBOLS="XAUUSD.a").ACTIVE_SYMBOLS == "XAUUSD.a"
+    engine.rt.strategy["symbols"] = ["XAUUSD.a"]
+    assert engine.resolve_symbol("xauusd.A") == "XAUUSD.a" and engine.resolve_symbol("GBPUSD") == "GBPUSD"
+    r = client.get("/api/v1/candles?symbol=xauusd.a&tf=M5")
+    assert r.status_code == 200 and r.json()["symbol"] == "XAUUSD.a"
+    r = client.put("/api/v1/strategy", headers=ADMIN, json={"symbols": ["XAUUSD.a"], "trade_symbols": ["XAUUSD.a"]})
+    assert r.status_code == 200 and r.json()["symbols"] == ["XAUUSD.a"]
+
+
+def test_risk_engine_blocks_context_only_symbols(engine):
+    engine.rt.strategy["symbols"] = ["EURUSD", "XAUUSD"]
+    engine.rt.strategy["trade_symbols"] = ["XAUUSD"]
+    engine.rt.trading.update(mode="PAPER", execution_enabled=True)
+    engine.rt.ingest_quote("EURUSD", quote(bid=1.08000))
+    rc = engine.risk_check("EURUSD", "BUY", 1.0801, 1.0795, 1.0811)
+    chk = next(c for c in rc["checks"] if c["name"] == "symbol_tradable")
+    assert not rc["passed"] and not chk["ok"] and "TRADE_SYMBOLS" in chk["detail"]
+    # even a test order on a context-only symbol is refused
+    assert engine.status()["trading"]["trade_symbols"] == ["XAUUSD"]

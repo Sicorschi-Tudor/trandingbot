@@ -227,7 +227,7 @@ def resolve(db, params: dict) -> dict:
     for tf in (strat["signal_timeframe"], strat["htf_timeframe"]):
         if tf not in TF_SECONDS and (tf != "NONE" or tf == strat["signal_timeframe"]):
             raise ValueError(f"timeframe necunoscut: {tf}")
-    symbols = [str(x).upper() for x in (params.get("symbols") or strat.get("symbols") or [])]
+    symbols = [str(x).strip() for x in (params.get("symbols") or strat.get("symbols") or [])]
     if not symbols:
         raise ValueError("niciun simbol pentru backtest")
     now = float(params.get("now_ts") or time.time())

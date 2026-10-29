@@ -86,6 +86,7 @@ class Engine:
         self._equity_cache: dict[str, dict] = {}
         self._warmup_done = False
         self._cal_warn_ts = 0.0
+        self._no_quote_warn_ts = 0.0
         # performance tracking (analyses / equity snapshots / labeler / backtests)
         self._last_equity_snap = 0.0
         self._last_label_ts = 0.0
@@ -311,6 +312,24 @@ class Engine:
         if len(bars) < 16:
             return None
         return ind.last(ind.atr([b["h"] for b in bars], [b["l"] for b in bars], [b["c"] for b in bars], 14))
+
+    def resolve_symbol(self, name: str | None) -> str:
+        """The active symbol matching `name` (exact, else case-insensitive), else `name` stripped. API inputs are typed
+        by people; the EA and the broker use the exact spelling."""
+        name = (name or "").strip()
+        act = self.rt.active_symbols()
+        if name in act:
+            return name
+        for s in act:
+            if s.upper() == name.upper():
+                return s
+        return name
+
+    def is_tradable(self, symbol: str) -> bool:
+        """False only when TRADE_SYMBOLS is configured and excludes the symbol (the active list already governs analysis)."""
+        act = self.rt.active_symbols()
+        ts = [s for s in (self.rt.strategy.get("trade_symbols") or []) if s in act]
+        return not ts or symbol in ts
 
     def trade_symbols(self) -> list[str]:
         """Symbols that may receive signals/orders: strategy.trade_symbols (settings/.env TRADE_SYMBOLS) ∩ active;
@@ -647,7 +666,8 @@ class Engine:
             symbol_info=dict(self.rt.quotes.get(symbol) or {}), account=acc, risk=self.rt.risk,
             bridge_connected=self.rt.bridge_connected(), terminal=self.rt.bridge.get("terminal"),
             mt5_account=self.rt.mt5_account, tick_age=self.rt.tick_age(symbol),
-            symbol=symbol, open_exposures=self.open_exposures(mode) + [(r["symbol"], r["side"]) for r in reserved],
+            symbol=symbol, symbol_tradable=self.is_tradable(symbol),
+            open_exposures=self.open_exposures(mode) + [(r["symbol"], r["side"]) for r in reserved],
             open_bot_positions=n_open + len(reserved), ea_magic_ok=self.rt.bridge.get("magic_ok") is True,
             has_bot_position_on_symbol=self.has_bot_position(symbol, mode) or any(r["symbol"] == symbol for r in reserved),
             pyramid_ok=pyr_ok and not any(r["symbol"] == symbol for r in reserved), pyramid_note=pyr_note,
@@ -673,7 +693,7 @@ class Engine:
         params: list = []
         if symbol:
             sql += " AND symbol=?"
-            params.append(symbol.upper())
+            params.append(self.resolve_symbol(symbol))
         if direction:
             sql += " AND direction=?"
             params.append(direction.upper())
@@ -821,6 +841,29 @@ class Engine:
         return {"ok": self.calendar_fresh(now), "events_next_24h": n24, "next_high": nxt,
                 "age_s": round(now - ts) if ts is not None else None, "blackout_minutes": minutes,
                 "min_importance": min_imp, "blocked": blocked}
+
+    def _check_symbol_feed(self, now: float) -> None:
+        """An active symbol that never got a quote although the EA has been syncing for 30 s almost always means the
+        broker's symbol name differs (XAUUSD.a, GOLD, XAUUSDm). Warn every 10 min, and keep the list in the status."""
+        rt = self.rt
+        if self.settings.data_source != "mt5_bridge" or not rt.bridge_connected():
+            rt.bridge["no_quote_symbols"] = []
+            return
+        first = rt.bridge.get("first_sync_ts")
+        if not first or now - float(first) < 30:
+            rt.bridge.setdefault("no_quote_symbols", [])
+            return
+        missing = [s for s in rt.active_symbols() if not (rt.quotes.get(s) or {}).get("bid")]
+        rt.bridge["no_quote_symbols"] = missing
+        if not missing:
+            return
+        if now - self._no_quote_warn_ts >= 600:
+            self._no_quote_warn_ts = now
+            unknown = rt.bridge.get("unknown_symbols")
+            hint = (f"EA-ul raportează că brokerul nu le cunoaște: {', '.join(unknown)}" if unknown else
+                    "EA-ul nu trimite cotații pentru ele — numele la broker e probabil diferit (XAUUSD.a, GOLD, XAUUSDm): "
+                    "deschide Market Watch în MT5, copiază numele exact în ACTIVE_SYMBOLS și repornește")
+            rt.log("WARN", "bridge", f"Fără cotații pentru {', '.join(missing)}. {hint}")
 
     def _check_calendar(self, now: float) -> None:
         if (self.settings.data_source != "mt5_bridge" or not self._warmup_done
@@ -1449,7 +1492,7 @@ class Engine:
         side = (side or "").upper()
         if side not in ("BUY", "SELL"):
             raise EngineError(400, "side trebuie să fie BUY sau SELL")
-        symbol = (symbol or "").upper()
+        symbol = self.resolve_symbol(symbol)
         q = self.rt.quotes.get(symbol)
         if not q or not q.get("bid"):
             raise EngineError(409, f"Fără cotație pentru {symbol}")
@@ -1487,6 +1530,8 @@ class Engine:
                 "terminal_connected": bool(term.get("connected")) if term else False,
                 "trade_allowed": bool(term.get("trade_allowed")) if term else False,
                 "ea_version": rt.bridge.get("ea_version"),
+                "unknown_symbols": rt.bridge.get("unknown_symbols") or [],
+                "no_quote_symbols": rt.bridge.get("no_quote_symbols") or [],
                 "clock_skew_s": rt.bridge.get("clock_skew_s", 0),
                 "clock_raw_skew_s": rt.bridge.get("clock_raw_skew_s"),
             },
@@ -1494,6 +1539,7 @@ class Engine:
             "paper_account": paper_acc,
             "session": self.session(),
             "trading": {"mode": mode, "execution_enabled": rt.trading["execution_enabled"],
+                        "trade_symbols": self.trade_symbols(), "profile": s.profile_name or None,
                         "entries_paused": rt.trading["entries_paused"], "live_allowed": False},
             "ai": self.ai.status(),
             "telegram": self.telegram.status(),
@@ -1981,6 +2027,7 @@ class Engine:
             self._prev_bridge_connected = connected
         self.warmup_reason("", now)
         self._check_calendar(now)
+        self._check_symbol_feed(now)
         tf = rt.strategy["signal_timeframe"]
         htf = rt.strategy["htf_timeframe"]
         sec = TF_SECONDS.get(tf, 300)

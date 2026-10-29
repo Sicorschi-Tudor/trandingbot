@@ -97,6 +97,7 @@ Apoi apasă butonul **Algo Trading** din bara de sus a terminalului, astfel înc
 | `Brokerul nu permite tranzactionare prin EA` | Contul nu permite EA | Folosește alt cont demo sau contactează brokerul |
 | `EA refuza OPEN: contul nu este DEMO (v1)` | Ești logat pe cont real | Loghează-te pe contul demo |
 | `simbolul 'EURUSD' nu exista la acest broker` | Brokerul folosește alt nume (ex. `EURUSD.a`, `EURUSDm`) | Pune numele exact din Market Watch în `ACTIVE_SYMBOLS` în `.env` și repornește serverul |
+| Graficul aurului e gol / „EA-ul nu trimite cotații pentru XAUUSD” (dashboard) | Aurul se numește altfel la broker (`XAUUSD.a`, `GOLD`, `XAUUSDm`, `XAUUSD.cash`…) sau nu e în Market Watch | În MT5: Market Watch → click dreapta → *Show All* → caută „XAU”/„GOLD” → copiază numele exact în `ACTIVE_SYMBOLS` (cu `PROFILE=gold` numele tău e preluat automat); repornește serverul. EA ≥ 1.15 raportează singur simbolurile necunoscute în dashboard (recompilare opțională) |
 | Ordin respins: `Unsupported filling mode` | Mod de umplere nesuportat | EA-ul alege automat FOK > IOC > RETURN; raportează-ne simbolul și brokerul |
 | Ordin respins: `Market closed` | Piața e închisă (weekend/sărbătoare) | Așteaptă deschiderea pieței |
 | Ordin respins: `Invalid stops` | SL/TP prea aproape de preț | Normal în condiții de spread mare; serverul verifică `stops_level` |

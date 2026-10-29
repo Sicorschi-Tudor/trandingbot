@@ -247,6 +247,16 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
     rt.bridge["sync_count"] = int(rt.bridge.get("sync_count") or 0) + 1
     rt.bridge["magic"] = payload.get("magic")
     track_instance(rt, payload, now)
+    if rt.bridge.get("first_sync_ts") is None or first:
+        rt.bridge["first_sync_ts"] = now
+    unk = payload.get("unknown_symbols")
+    if isinstance(unk, str):
+        unknown = [s.strip().upper() for s in unk.split(",") if s.strip()]
+        if unknown != (rt.bridge.get("unknown_symbols") or []):
+            rt.bridge["unknown_symbols"] = unknown
+            if unknown:
+                rt.log("ERROR", "bridge", f"Brokerul nu cunoaște simbolurile: {', '.join(unknown)} — pune în ACTIVE_SYMBOLS "
+                                          f"numele exact din Market Watch (ex. XAUUSD.a, GOLD, XAUUSDm) și repornește")
     try:
         ea_magic = int(payload.get("magic") or 0)
     except (TypeError, ValueError):
