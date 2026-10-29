@@ -18,7 +18,7 @@ EURUSD_INFO = {
 
 def make_settings(tmp_path, **kw) -> Settings:
     base = dict(
-        _env_file=None, DATABASE_PATH=str(tmp_path / "test.db"), ADMIN_TOKEN="adm-token", MT5_BRIDGE_KEY="bridge-key",
+        _env_file=None, PROFILE="", DATABASE_PATH=str(tmp_path / "test.db"), ADMIN_TOKEN="adm-token", MT5_BRIDGE_KEY="bridge-key",
         DATA_SOURCE="mt5_bridge", ANTHROPIC_API_KEY="", TELEGRAM_ENABLED=False, TELEGRAM_BOT_TOKEN="",
         TELEGRAM_CHAT_ID="", TRADING_MODE="PAPER", EXECUTION_ENABLED=False, SESSION_ENABLED=False,
     )

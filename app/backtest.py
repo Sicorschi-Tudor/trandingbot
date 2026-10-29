@@ -268,6 +268,11 @@ def resolve(db, params: dict) -> dict:
     if strat.get("rescue_enabled") and not run_def and not callable(getattr(plugin, "default_exit", None)):
         live_rescue = {k: float(strat[k] if strat.get(k) is not None else exits.LIVE_RESCUE_DEFAULTS[k])
                        for k in exits.RESCUE_KEYS}
+    # live PROFIT_LOCK trailing (strategy profit_lock_enabled): same overlay rule as the RESCUE exit
+    live_profit_lock = None
+    if strat.get("profit_lock_enabled") and not run_def and not callable(getattr(plugin, "default_exit", None)):
+        live_profit_lock = {k: float(strat[k] if strat.get(k) is not None else exits.DEFAULT_PARAMS["profit_lock"][k])
+                            for k in exits.PROFIT_LOCK_KEYS}
     if "signal_flip" in exit_policy.modes and not callable(getattr(plugin, "bias", None)):
         raise ValueError(f"exit signal_flip: strategia {strategy_name} nu oferă bias() (direcția pe fiecare bară)")
     max_hold_s = None  # None -> strategy max_hold_minutes, exactly as before
@@ -283,7 +288,8 @@ def resolve(db, params: dict) -> dict:
             "specs": params.get("specs") or {}, "tz": (sched or {}).get("tz") or s.DEFAULT_TIMEZONE,
             "workers": params.get("workers"), "strategy_name": strategy_name,
             "strategy_version": getattr(plugin, "VERSION", None) if plugin is not None else strategy.STRATEGY_VERSION,
-            "exit": exit_policy, "live_rescue": live_rescue, "record_paths": bool(params.get("record_paths")),
+            "exit": exit_policy, "live_rescue": live_rescue, "live_profit_lock": live_profit_lock,
+            "record_paths": bool(params.get("record_paths")),
             "all_trades": bool(params.get("all_trades")),
             "paths_out": params.get("paths_out"), "max_hold_s": max_hold_s}
 
@@ -815,7 +821,8 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
                    "risk_pct": rsk.get("max_risk_per_trade_pct"), "size_mode": cfg["size_mode"],
                    "strategy": {k: v for k, v in strat.items() if k != "symbols"},
                    "risk": rsk, "strategy_name": cfg["strategy_name"], "strategy_version": cfg["strategy_version"],
-                   "exit": cfg["exit"].to_dict(), "live_rescue": cfg.get("live_rescue")},
+                   "exit": cfg["exit"].to_dict(), "live_rescue": cfg.get("live_rescue"),
+                   "live_profit_lock": cfg.get("live_profit_lock")},
         "timing": {"total_s": round(time.time() - t0, 2), "analyze_s": round(t_scan, 2), "workers": int(workers),
                    "simulate_s": round(time.time() - t2, 2), "phase1_cached": hit is not None},
     }
@@ -871,6 +878,8 @@ def _simulate(cfg: dict, series: dict, spreads: dict, specs: dict, scans: dict, 
     policy: exits.ExitPolicy = cfg.get("exit") or exits.ExitPolicy()
     if cfg.get("live_rescue"):
         policy = exits.with_rescue(policy, {"rescue_enabled": True, **cfg["live_rescue"]})
+    if cfg.get("live_profit_lock"):
+        policy = exits.with_profit_lock(policy, {"profit_lock_enabled": True, **cfg["live_profit_lock"]})
     record = bool(cfg.get("record_paths"))
     paths: list[dict] = []
 

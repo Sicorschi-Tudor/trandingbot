@@ -87,6 +87,9 @@ STRATEGY_NUM: dict[str, tuple[type, float, float]] = {
     "rescue_mae_r": (float, 0, 1),
     "rescue_neg_frac": (float, 0, 1),
     "rescue_close_r": (float, 0, 1),
+    "profit_lock_activate_r": (float, 0.01, 20),
+    "profit_lock_gap_r": (float, 0, 20),
+    "profit_lock_step_r": (float, 0, 5),
 }
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9._#-]{2,20}$")
 
@@ -130,7 +133,7 @@ def validate_strategy_update(body: dict, current: dict) -> dict:
     for k, v in body.items():
         if k in STRATEGY_NUM:
             out[k] = _num(k, v, *STRATEGY_NUM[k])
-        elif k in ("trailing_enabled", "close_at_session_end", "rescue_enabled"):
+        elif k in ("trailing_enabled", "close_at_session_end", "rescue_enabled", "profit_lock_enabled"):
             out[k] = _bool(k, v)
         elif k in ("signal_timeframe", "htf_timeframe"):
             tf = str(v).upper()

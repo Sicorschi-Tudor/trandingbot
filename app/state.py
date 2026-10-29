@@ -106,6 +106,9 @@ class Runtime:
                 for k, v in saved.items():
                     if k in cur:
                         cur[k] = v
+        if s.profile_name:  # a named profile pins its symbols / trade symbols over anything saved from the dashboard
+            self.strategy["symbols"] = s.default_strategy()["symbols"]
+            self.strategy["trade_symbols"] = s.default_strategy()["trade_symbols"]
         self.risk["must_have_sl_tp"] = True
         mode = s.TRADING_MODE.strip().upper()
         if mode not in ("SIGNAL_ONLY", "PAPER", "DEMO"):

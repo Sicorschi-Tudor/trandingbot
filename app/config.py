@@ -6,7 +6,22 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# PROFILE=gold: the owner's "gold only" setup in one line. Applied over .env AND over settings saved from the dashboard
+# (Runtime.load_runtime_config keeps symbols / trade_symbols pinned), so a stale saved symbol list can never bring the
+# other pairs back. Values follow docs/PROFIL_AUR.md.
+PROFILES: dict[str, dict] = {
+    "gold": {
+        "ACTIVE_SYMBOLS": "XAUUSD", "TRADE_SYMBOLS": "XAUUSD", "CHART_TIMEFRAMES": "M1,M5,M15,H1,H4,D1",
+        "MAX_SPREAD_POINTS": 60.0, "MIN_SL_POINTS": 150, "MAX_VOLUME_LOTS": 0.05, "NEWS_BLACKOUT_MINUTES": 45,
+        "MAX_OPEN_POSITIONS": 3, "MAX_POSITIONS_PER_SYMBOL": 3, "PYRAMID_MIN_R": 0.5, "PYRAMID_MIN_DISTANCE_ATR": 1.0,
+        "MAX_SAME_CURRENCY_DIRECTION": 3, "ARCHIVE_EXTRA": "M15:730,H1:1825,H4:3650,D1:7300",
+        "AI_TRADER_ENTRY_MODE": "shadow", "AI_TRADER_MANAGE_MODE": "shadow", "AI_TRADER_TIMEFRAME": "M15",
+        "AI_TRADER_SYMBOLS": "XAUUSD",
+    },
+}
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 VERSION = "0.1.0"
@@ -26,6 +41,8 @@ class Settings(BaseSettings):
     )
 
     APP_ENV: str = "development"
+    # named profile applied over the values below (and over dashboard-saved symbols): "" | gold — see PROFILES
+    PROFILE: str = ""
     HOST: str = "127.0.0.1"
     PORT: int = 8787
     ADMIN_TOKEN: str = ""
@@ -86,6 +103,13 @@ class Settings(BaseSettings):
     # break-even SL = entry ± max(spread now + 3 points, BE_LOCK_R × initial risk); 0 = old entry ± 2 points
     BE_LOCK_R: float = 0.1
     TRAILING_ENABLED: bool = False
+    # profit-lock trailing: once the open profit reaches PROFIT_LOCK_ACTIVATE_R × initial risk, the SL follows the price
+    # PROFIT_LOCK_GAP_R × risk behind it (only towards profit, in steps of PROFIT_LOCK_STEP_R × risk). With a 1.50 risk:
+    # activate 0.67 (+1.00) -> SL at +0.50; price +1.30 -> SL +0.80. Applies to every bot position (every strategy).
+    PROFIT_LOCK_ENABLED: bool = False
+    PROFIT_LOCK_ACTIVATE_R: float = 0.67
+    PROFIT_LOCK_GAP_R: float = 0.33
+    PROFIT_LOCK_STEP_R: float = 0.1
     MAX_HOLD_MINUTES: int = 240
     CLOSE_AT_SESSION_END: bool = False
     # rescue exit: after RESCUE_MINUTES open, MAE ≥ RESCUE_MAE_R and ≥ RESCUE_NEG_FRAC of the 1-min samples under
@@ -159,6 +183,18 @@ class Settings(BaseSettings):
     ML_MODELS_DIR: str = "data/models"
     ML_DECISIONS_MAX_ROWS: int = 200000
 
+    @model_validator(mode="after")
+    def _apply_profile(self):
+        prof = PROFILES.get(str(self.PROFILE or "").strip().lower())
+        if prof:
+            for k, v in prof.items():
+                setattr(self, k, v)
+        return self
+
+    @property
+    def profile_name(self) -> str:
+        return str(self.PROFILE or "").strip().lower() if str(self.PROFILE or "").strip().lower() in PROFILES else ""
+
     @property
     def db_path(self) -> Path:
         p = Path(self.DATABASE_PATH)
@@ -221,6 +257,10 @@ class Settings(BaseSettings):
             "signal_expiry_minutes": self.SIGNAL_EXPIRY_MINUTES,
             "break_even_at_r": self.BREAK_EVEN_AT_R,
             "trailing_enabled": self.TRAILING_ENABLED,
+            "profit_lock_enabled": self.PROFIT_LOCK_ENABLED,
+            "profit_lock_activate_r": self.PROFIT_LOCK_ACTIVATE_R,
+            "profit_lock_gap_r": self.PROFIT_LOCK_GAP_R,
+            "profit_lock_step_r": self.PROFIT_LOCK_STEP_R,
             "max_hold_minutes": self.MAX_HOLD_MINUTES,
             "close_at_session_end": self.CLOSE_AT_SESSION_END,
             "be_lock_r": self.BE_LOCK_R,

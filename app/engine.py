@@ -126,6 +126,12 @@ class Engine:
                     f"Telegram={'activ' if self.telegram.active else 'inactiv'}")
         if not s.ADMIN_TOKEN:
             self.rt.log("WARN", "engine", "ADMIN_TOKEN nu este setat — acțiunile de administrare sunt blocate")
+        if s.profile_name:
+            self.rt.log("INFO", "engine", f"Profil {s.profile_name.upper()}: simboluri {','.join(self.rt.active_symbols())}, "
+                                          f"tranzacții doar pe {','.join(self.trade_symbols())}, max {s.MAX_POSITIONS_PER_SYMBOL} "
+                                          f"poziții/simbol, AI trader {s.AI_TRADER_ENTRY_MODE}")
+        elif "XAUUSD" not in self.rt.active_symbols():
+            self.rt.log("INFO", "engine", "Pentru configurația „doar aur” pune PROFILE=gold în .env (docs/PROFIL_AUR.md)")
         self._perf_startup()
         try:
             self.forward.startup()
