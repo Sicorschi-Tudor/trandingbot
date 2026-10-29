@@ -1,0 +1,5 @@
+parent N=5438 avg=-0.0784 | filtered n=1755 avg=-0.0298 CI90=[-0.0624,+0.0028]
+random same-size subsample expectation: avg=-0.0784 SE=0.0149 90% band=[-0.1019,-0.0538]  z=+3.27  empirical P(random>=filtered)=0.0000
+per-year: {2013: (192, -0.0795), 2014: (320, -0.0871), 2015: (314, 0.0037), 2016: (299, 0.0046), 2017: (308, 0.0156), 2018: (322, -0.0513)}
+top5% (87) sum=+144.7 share of gross=27.2% net=-52.3 avg without top5%=-0.1181
+outcomes: {'SL': (477, -487.3), 'RESCUE': (450, 36.0), 'TIME': (554, 70.6), 'TP': (197, 323.0), 'BE': (77, 5.4)}
