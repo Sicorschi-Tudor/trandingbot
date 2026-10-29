@@ -733,6 +733,51 @@ def _ml(request: Request):
     return ml
 
 
+# ---- Claude trade analyst (analysis only) ----------------------------------
+@router.get("/trade-reviews")
+def get_trade_reviews(request: Request, limit: int = Query(50, ge=1, le=500), kind: str | None = Query(None),
+                      payload: bool = Query(False)):
+    if kind is not None and kind not in ("TRADE", "DAILY"):
+        raise HTTPException(status_code=422, detail="kind: TRADE sau DAILY")
+    eng = get_engine(request)
+    return {"status": eng.trade_reviews.status(), "items": eng.trade_reviews.list_payload(limit, kind, payload)}
+
+
+@router.post("/trade-reviews/daily", dependencies=[Depends(require_admin)])
+async def run_daily_review(request: Request):
+    """Run (or re-run with {"force":true}) the daily review of a local day; default = today."""
+    eng = get_engine(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    day = str(body.get("day") or scheduler.local_day(eng.now_utc(), eng.tz()))
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        raise HTTPException(status_code=422, detail="day: format YYYY-MM-DD")
+    if not eng.ai.enabled or not eng.ai.key_set:
+        raise HTTPException(status_code=409, detail="Claude este dezactivat sau lipsește ANTHROPIC_API_KEY")
+    row = await eng.trade_reviews.review_day(day, force=body.get("force") is True)
+    if row is None:
+        raise HTTPException(status_code=409, detail="Nimic de analizat pentru această zi (fără tranzacții și fără "
+                                                    "setup-uri etichetate) sau bilanțul există deja — folosește force")
+    return row
+
+
+@router.post("/trade-reviews/trade/{trade_id}", dependencies=[Depends(require_admin)])
+async def run_trade_review(request: Request, trade_id: int):
+    eng = get_engine(request)
+    if not eng.ai.enabled or not eng.ai.key_set:
+        raise HTTPException(status_code=409, detail="Claude este dezactivat sau lipsește ANTHROPIC_API_KEY")
+    if not eng.db.query_one("SELECT id FROM trades WHERE id=?", (trade_id,)):
+        raise HTTPException(status_code=404, detail="Tranzacție inexistentă")
+    row = await eng.trade_reviews.review_trade(trade_id)
+    if row is None:
+        raise HTTPException(status_code=409, detail="Analiza acestei tranzacții există deja")
+    return row
+
+
 @router.get("/models")
 def get_models(request: Request):
     return _ml(request).list_payload()

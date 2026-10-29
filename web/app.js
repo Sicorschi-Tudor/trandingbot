@@ -1165,6 +1165,54 @@ function initControl() {
 async function enterIntegrations() {
   if (!S.settings) { try { S.settings = await api('/settings'); } catch (e) { /* render from status */ } }
   renderIntegrations();
+  loadTradeReviews();
+}
+async function loadTradeReviews() {
+  const box = $('#int-reviews');
+  if (!box) return;
+  try {
+    const d = await api('/trade-reviews?limit=30');
+    renderTradeReviews(d || {});
+  } catch (e) { box.innerHTML = emptyState('Analizele Claude nu au putut fi încărcate', ' ' + (e.detail || e.message)); }
+}
+function reviewBody(it) {
+  const rv = it.review || {};
+  if (it.status !== 'DONE') return `<span class="faint">${esc(it.status)}${rv.error ? ' — ' + esc(rv.error) : ''}</span>`;
+  const li = (arr) => (arr || []).map(x => `<li>${esc(x)}</li>`).join('');
+  if (it.kind === 'TRADE') {
+    const q = rv.process_quality || '?';
+    const lvl = q === 'GOOD' ? 'ONLINE' : q === 'POOR' ? 'OFFLINE' : 'DEGRADED';
+    return `${pill(lvl, 'proces ' + q)} <span class="faint">${esc(rv.outcome_class || '')} · ieșire ${esc(rv.exit_assessment || '')}</span>
+      <p style="margin:6px 0">${esc(rv.summary || '')}</p>
+      ${(rv.lessons || []).length ? `<b>Lecții</b><ul style="margin:4px 0 0 18px">${li(rv.lessons)}</ul>` : ''}
+      ${(rv.tags || []).length ? `<p class="faint" style="margin:6px 0 0;font-size:12px">${esc(rv.tags.join(', '))}</p>` : ''}`;
+  }
+  return `<b>${esc(rv.headline || '')}</b> <span class="faint">(încredere ${esc(rv.confidence || '?')})</span>
+    <p style="margin:6px 0">${esc(rv.summary || '')}</p>
+    ${(rv.patterns || []).length ? `<b>Tipare</b><ul style="margin:4px 0 0 18px">${li(rv.patterns)}</ul>` : ''}
+    ${rv.veto_assessment ? `<p style="margin:6px 0"><b>Verdicte AI:</b> ${esc(rv.veto_assessment)}</p>` : ''}
+    ${(rv.hypotheses_to_test || []).length ? `<b>De testat în backtest (nu se aplică automat)</b><ul style="margin:4px 0 0 18px">${li(rv.hypotheses_to_test)}</ul>` : ''}`;
+}
+function renderTradeReviews(d) {
+  const box = $('#int-reviews');
+  const st = d.status || {}, items = d.items || [];
+  const on = st.trade_review_enabled || st.daily_review_enabled;
+  box.innerHTML = `
+    <div class="card-head"><h2>Analist de tranzacții (Claude)</h2>
+      <div>${on ? pill('ONLINE', 'ACTIV') : '<span class="pill">INACTIV</span>'} <button class="btn sm" id="btn-daily-review" style="margin-left:8px">Bilanț zilnic acum</button></div></div>
+    <p class="faint" style="font-size:12px;margin:0 0 10px">După fiecare tranzacție închisă Claude evaluează <b>procesul</b> (nu doar rezultatul), iar la sfârșitul sesiunii face bilanțul zilei, inclusiv ce ar fi făcut setup-urile blocate sau cu VETO. Analizele sunt informative: nu modifică setări, niveluri sau ordine. Analize: ${st.done ? (st.done.TRADE || 0) + ' tranzacții · ' + (st.done.DAILY || 0) + ' zile' : '—'}.</p>
+    ${items.length ? items.map(it => `
+      <div style="border-top:1px solid var(--border);padding:10px 0">
+        <div class="faint" style="font-size:12px">${it.kind === 'DAILY' ? '📋 Bilanț ' + esc(String(it.ref_id).split(':').pop()) : '🧠 Tranzacție #' + esc(it.ref_id) + (it.symbol ? ' · ' + esc(it.symbol) : '')} · ${fmtDT(it.created_at_utc)}</div>
+        <div style="margin-top:4px">${reviewBody(it)}</div>
+      </div>`).join('') : emptyState('Nicio analiză încă', ' Apare după prima tranzacție închisă sau la sfârșitul sesiunii.')}`;
+  const b = $('#btn-daily-review');
+  if (b) b.onclick = async () => {
+    b.disabled = true;
+    try { await api('/trade-reviews/daily', { method: 'POST', body: {} }); toast('Bilanțul zilnic a fost generat'); await loadTradeReviews(); }
+    catch (e) { toast(e.detail || e.message, 'error'); }
+    b.disabled = false;
+  };
 }
 function renderIntegrations() {
   const st = S.status || {};

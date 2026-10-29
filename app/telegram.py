@@ -145,6 +145,48 @@ def fmt_trade(tr: dict, tz: str) -> str:
     return truncate("\n".join(lines))
 
 
+def fmt_trade_review(tr: dict, rv: dict) -> str:
+    """Claude's post-trade analysis (review_json of a DONE trade_reviews row)."""
+    q = str(rv.get("process_quality") or "?")
+    icon = {"GOOD": "🟢", "ACCEPTABLE": "🟡", "POOR": "🔴"}.get(q, "ℹ️")
+    r = tr.get("r_multiple")
+    r_txt = f"{float(r):+.2f}R" if r is not None else "R necunoscut"
+    lines = [
+        f"🧠 <b>ANALIZĂ TRANZACȚIE — {e(str(tr.get('symbol')))} {e(str(tr.get('side')))}</b> ({r_txt}, {e(str(tr.get('close_reason')))})",
+        f"{icon} Proces: <b>{e(q)}</b> · {e(str(rv.get('outcome_class') or ''))} · ieșire {e(str(rv.get('exit_assessment') or ''))}",
+        e(str(rv.get("summary") or "")),
+    ]
+    lessons = [str(x) for x in (rv.get("lessons") or []) if x]
+    if lessons:
+        lines.append("<b>Lecții:</b>\n" + "\n".join(f"• {e(x)}" for x in lessons[:4]))
+    tags = [str(x) for x in (rv.get("tags") or []) if x]
+    if tags:
+        lines.append("<i>" + e(", ".join(tags[:6])) + "</i>")
+    lines.append("<i>Analiză informativă — nu modifică setările botului.</i>")
+    return truncate("\n".join(lines))
+
+
+def fmt_daily_review(day: str, rv: dict, summary: dict | None = None) -> str:
+    s = summary or {}
+    lines = [f"📋 <b>BILANȚ ZILNIC {e(day)}</b> (încredere {e(str(rv.get('confidence') or '?'))})"]
+    if s:
+        n = s.get("trades") or 0
+        avg = s.get("avg_r")
+        lines.append(f"Tranzacții: {n} · câștigătoare {s.get('wins') or 0} · R mediu "
+                     f"{f'{float(avg):+.2f}' if avg is not None else '—'} · net {float(s.get('net_usd') or 0):+.2f}")
+    lines.append(f"<b>{e(str(rv.get('headline') or ''))}</b>")
+    lines.append(e(str(rv.get("summary") or "")))
+    pats = [str(x) for x in (rv.get("patterns") or []) if x]
+    if pats:
+        lines.append("<b>Tipare:</b>\n" + "\n".join(f"• {e(x)}" for x in pats[:5]))
+    if rv.get("veto_assessment"):
+        lines.append(f"<b>Verdicte AI:</b> {e(str(rv['veto_assessment']))}")
+    hyp = [str(x) for x in (rv.get("hypotheses_to_test") or []) if x]
+    if hyp:
+        lines.append("<b>De testat în backtest (nu se aplică automat):</b>\n" + "\n".join(f"• {e(x)}" for x in hyp[:5]))
+    return truncate("\n".join(lines))
+
+
 def fmt_risk_alert(text: str) -> str:
     return truncate(f"⚠️ <b>ALERTĂ RISC</b>\n{e(text)}")
 

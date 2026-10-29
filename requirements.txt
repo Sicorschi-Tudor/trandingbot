@@ -6,4 +6,8 @@ anthropic>=2.3.0
 httpx>=0.27
 python-dotenv>=1.0
 pytest>=8.0
+# ML layer (app/ml): learning runs offline; without these the bot works and ML hooks are no-ops
+numpy>=1.26
+scikit-learn>=1.4
+joblib>=1.3
 tzdata; platform_system == "Windows"

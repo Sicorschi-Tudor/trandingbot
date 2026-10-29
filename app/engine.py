@@ -25,6 +25,8 @@ from .paper import PaperBroker
 from .position_manager import PositionManager
 from .simfeed import SimFeed
 from .state import Runtime
+from . import trade_review as trade_review_mod
+from .trade_review import TradeReviewer
 from .telegram import (TelegramNotifier, fmt_daily_start, fmt_intent, fmt_modify, fmt_risk_alert, fmt_signal,
                        fmt_trade)
 
@@ -102,6 +104,8 @@ class Engine:
         self.forward = ForwardRunner(self)
         # ML (spec §6.4): shadow logging always harmless; only an explicitly approved model may gate/close
         self.ml = MLLive(self)
+        # Claude as trade analyst: post-trade + daily reviews (text only, never touches trading)
+        self.trade_reviews = TradeReviewer(self)
 
     # ---- lifecycle -------------------------------------------------------
     def startup(self) -> None:
@@ -335,6 +339,7 @@ class Engine:
             self.add_signal_event(trade["signal_id"], "POSITION_CLOSED", f"{trade['close_reason']} net {net:+.2f}")
         if notify:
             self.telegram.enqueue(f"{trade.get('mode')}:{trade.get('ticket')}", "POSITION_CLOSED", fmt_trade(trade, self.tz()))
+            self.trade_reviews.on_trade_closed(trade)
 
     def ingest_deals(self, deals: list[dict]) -> None:
         magic = self.settings.MT5_MAGIC
@@ -1124,12 +1129,36 @@ class Engine:
         bars = rt.closed_bars(symbol, rt.strategy["signal_timeframe"])[-12:]
         htf = rt.closed_bars(symbol, rt.strategy["htf_timeframe"])[-6:]
         a = rt.last_analysis.get(symbol) or {}
-        return {
+        ctx = {
             "bid": q.get("bid"), "ask": q.get("ask"), "digits": q.get("digits"), "regime": a.get("regime"),
             "score": a.get("score"), "session_open": self.session()["open_now"],
             "recent_bars_signal_tf": [{"t": iso(b["t"]), "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"]} for b in bars],
             "recent_bars_htf": [{"t": iso(b["t"]), "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"]} for b in htf],
         }
+        # bot history the reviewer can learn from: recent trades on the symbol, how its own verdicts fared (shadow
+        # labels), the next relevant news event. Best effort — a failure here never blocks the review.
+        try:
+            now = time.time()
+            key = self.account_key()
+            same = self.trade_reviews._recent_trades(key, None, symbol=symbol, limit=6)
+            ctx["recent_trades_same_symbol"] = [
+                {k: t.get(k) for k in ("side", "r_multiple", "net_usd", "close_reason", "minutes_open", "closed_at_utc")}
+                for t in same] or None
+            recent = self.trade_reviews._recent_trades(key, None, limit=20)
+            if recent:
+                s = trade_review_mod.trades_summary(recent)
+                ctx["recent_trades_summary"] = {k: s.get(k) for k in ("trades", "wins", "losses", "avg_r", "profit_factor")}
+            ctx["ai_verdicts_shadow_30d"] = {
+                v: {k: g.get(k) for k in ("n", "win_rate", "avg_r")}
+                for v, g in (self.shadow_stats(days=30, now=now).get("by_verdict") or {}).items()} or None
+            ev = self.news_event_near(symbol, now, window_s=4 * 3600)
+            if ev:
+                ctx["next_news_event"] = {"name": ev.get("name"), "ccy": ev.get("ccy"), "imp": ev.get("imp"),
+                                          "minutes_away": round((float(ev["t"]) - now) / 60) if ev.get("t") else None}
+            ctx["local_time"] = datetime.fromtimestamp(now, scheduler._tz(self.tz())).strftime("%A %H:%M")
+        except Exception as e:
+            self._perf_warn_once("ai_context", f"context extins pentru Claude indisponibil: {e!r}")
+        return ctx
 
     def try_execute(self, sig: dict) -> None:
         mode = self.mode()
@@ -1858,6 +1887,7 @@ class Engine:
                 "symbols": rt.active_symbols(), "feed_label": self.settings.feed_label}))
         elif self._prev_session_open and not sess["open_now"]:
             self.rt.log("INFO", "scheduler", "Sesiunea s-a închis — fără intrări noi; pozițiile rămân gestionate")
+            self.trade_reviews.on_session_closed(now)
         self._prev_session_open = sess["open_now"]
         if self.settings.data_source == "mt5_bridge":
             connected = rt.bridge_connected()
