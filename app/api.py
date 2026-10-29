@@ -232,6 +232,15 @@ async def get_candles(request: Request, symbol: str, tf: str = "M5", limit: int 
     if tf not in TF_SECONDS:
         raise HTTPException(status_code=422, detail="tf invalid")
     series = list(eng.rt.bars.get((symbol, tf), []))
+    if limit > len(series):  # the live buffer holds the EA's last ~300 bars; older bars come from the archive
+        try:
+            sec = TF_SECONDS[tf]
+            oldest = series[0]["t"] if series else int(eng.now_utc().timestamp())
+            older = eng.get_closed_bars(symbol, tf, oldest - (limit - len(series) + 5) * sec * 2, oldest - 1)
+            seen = {b["t"] for b in series}
+            series = [b for b in older if b["t"] not in seen][-(limit - len(series)):] + series
+        except Exception:
+            pass
     closes = [b["c"] for b in series]
     ef, es = ind.ema(closes, 20), ind.ema(closes, 50)
     start = max(0, len(series) - limit)

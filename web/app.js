@@ -528,7 +528,7 @@ async function loadChartData({ keepRange = false } = {}) {
   const sym = CH.symbol, tf = CH.tf;
   if (!keepRange) $('#ch-meta').textContent = 'Se încarcă…';
   let d;
-  try { d = await api(`/candles?symbol=${enc(sym)}&tf=${enc(tf)}&limit=300`); }
+  try { d = await api(`/candles?symbol=${enc(sym)}&tf=${enc(tf)}&limit=1500`); }
   catch (e) { if (seq === CH.loadSeq) { showChartOverlay('Nu s-au putut încărca lumânările', e.detail || e.message); $('#ch-meta').textContent = ''; } return; }
   if (seq !== CH.loadSeq) return;
   const range = keepRange ? CH.chart.timeScale().getVisibleLogicalRange() : null;

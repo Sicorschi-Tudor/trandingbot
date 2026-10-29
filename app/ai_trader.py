@@ -38,7 +38,7 @@ BAR_FRESH_S = 180.0  # decide only on a bar that closed less than 3 minutes ago 
 MIN_RR = 1.2
 MIN_SL_ATR = 0.3
 LABEL_EVERY_S = 300.0
-CANDLES = {"signal": 60, "H1": 30, "H4": 20}
+CANDLES = {"signal": 96, "H1": 48, "H4": 30}  # ≈ 1 day of M15, 2 days of H1, 5 days of H4 + the long-term context
 
 
 def _f(x) -> float | None:

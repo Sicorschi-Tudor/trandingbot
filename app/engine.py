@@ -325,6 +325,12 @@ class Engine:
                 return s
         return name
 
+    def is_tradable(self, symbol: str) -> bool:
+        """False only when TRADE_SYMBOLS is configured and excludes the symbol (the active list already governs analysis)."""
+        act = self.rt.active_symbols()
+        ts = [s for s in (self.rt.strategy.get("trade_symbols") or []) if s in act]
+        return not ts or symbol in ts
+
     def trade_symbols(self) -> list[str]:
         """Symbols that may receive signals/orders: strategy.trade_symbols (settings/.env TRADE_SYMBOLS) ∩ active;
         empty = every active symbol. The rest are context only (quoted, analysed, shadow-labelled)."""
@@ -643,7 +649,7 @@ class Engine:
             symbol_info=dict(self.rt.quotes.get(symbol) or {}), account=acc, risk=self.rt.risk,
             bridge_connected=self.rt.bridge_connected(), terminal=self.rt.bridge.get("terminal"),
             mt5_account=self.rt.mt5_account, tick_age=self.rt.tick_age(symbol),
-            symbol=symbol, symbol_tradable=symbol in self.trade_symbols(),
+            symbol=symbol, symbol_tradable=self.is_tradable(symbol),
             open_exposures=self.open_exposures(mode) + [(r["symbol"], r["side"]) for r in reserved],
             open_bot_positions=n_open + len(reserved), ea_magic_ok=self.rt.bridge.get("magic_ok") is True,
             has_bot_position_on_symbol=self.has_bot_position(symbol, mode) or any(r["symbol"] == symbol for r in reserved),
