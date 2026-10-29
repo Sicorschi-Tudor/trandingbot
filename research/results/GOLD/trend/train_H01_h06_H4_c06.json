@@ -1,0 +1,96 @@
+{
+ "strategy": "disc-h06",
+ "tf": "H4",
+ "htf": "NONE",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "c": 0.6
+ },
+ "risk_params": {
+  "max_open_positions": 1,
+  "max_trades_per_day": 20,
+  "max_spread_points": 100,
+  "max_daily_loss_pct": 100,
+  "max_consecutive_losses": 1000,
+  "cooldown_after_loss_minutes": 0,
+  "rollover_blackout_minutes": 0,
+  "max_total_open_risk_pct": 100
+ },
+ "exit": null,
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0,
+  "swap_mode": "table"
+ },
+ "elapsed_s": 2.4,
+ "summary": {
+  "trades": 7,
+  "win_rate": 0.8571,
+  "avg_r": 0.8122,
+  "expectancy_r": 0.8122,
+  "profit_factor": 20.666,
+  "max_dd_r": 0.289,
+  "max_consec_losses": 1,
+  "net_r": 5.685,
+  "net_usd": 114.94,
+  "ci90_avg_r": [
+   0.2985,
+   1.3467
+  ],
+  "swap_r": -0.055,
+  "swap_usd": -1.05,
+  "swap_days": 13,
+  "sample_days": 2037.9
+ },
+ "by_year": {
+  "2013": {
+   "n": 3,
+   "avg_r": 0.8275,
+   "sum_r": 2.48
+  },
+  "2014": {
+   "n": 4,
+   "avg_r": 0.8007,
+   "sum_r": 3.2
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 7,
+   "win_rate": 0.8571,
+   "avg_r": 0.8122,
+   "expectancy_r": 0.8122,
+   "profit_factor": 20.666,
+   "max_dd_r": 0.289,
+   "max_consec_losses": 1,
+   "net_r": 5.685,
+   "net_usd": 114.94
+  }
+ },
+ "by_outcome": {
+  "TP": 2,
+  "TIME": 5
+ },
+ "counts": {
+  "blocked_market": 0,
+  "blocked_context": {},
+  "signals": 7,
+  "risk_rejected": {},
+  "filled": 7,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 0,
+  "analyses": 8588,
+  "candidates": 7
+ },
+ "warnings": [
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate.",
+  "Doar 7 tranzac\u021bii \u2014 rezultatele nu sunt semnificative statistic.",
+  "Swap estimat (tabel implicit -5/-5 puncte/zi long/short) pentru XAUUSD \u2014 trimite cost.swap_pts_per_day pentru valorile brokerului."
+ ]
+}

@@ -56,7 +56,8 @@ def build_params(a) -> dict:
     p = {"strategy_name": a.strategy, "specs": specs, "size_mode": "r_only", "workers": a.workers, "session": None,
          "symbols": [s.strip().upper() for s in a.symbols.split(",") if s.strip()],
          "signal_tf": a.tf.upper(), "htf_tf": a.htf.upper(), "start_ts": ts(start), "end_ts": ts(end),
-         "cost": cost, "now_ts": ts(NOW_TS), "strategy": strat, "risk": risk, "initial_equity": a.equity}
+         "cost": cost, "now_ts": ts(NOW_TS), "strategy": strat, "risk": risk, "initial_equity": a.equity,
+         "all_trades": True}  # full trade list: by_year / --trades-out cover every trade, not the last 300
     if a.exit:
         p["exit"] = {"mode": a.exit, "params": json.loads(a.exit_params or "{}")}
     if a.session_json:
