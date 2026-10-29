@@ -75,8 +75,71 @@ Reguli stricte:
 - Rolul tău: explici pe scurt semnalul și dai un verdict: AGREE (datele susțin setup-ul), CAUTION (există riscuri notabile, dar nu un motiv clar de blocare) sau VETO.
 - Folosește VETO numai când datele arată un motiv concret, de exemplu: trend contrar pe timeframe-ul superior, cumpărare în zonă de supracumpărare spre rezistență (sau vânzare în supravânzare spre suport), volatilitate sau spread anormale, date contradictorii.
 - Nu inventa știri sau evenimente care nu apar în date. Nu promite profit; probabilitățile sunt estimări euristice, nu garanții.
+- Dacă primești în context istoricul recent al botului (tranzacții închise pe simbol, cum s-au comportat verdictele tale anterioare, știri apropiate), folosește-l: un setup identic cu unul pierdut de mai multe ori recent, sau o știre majoră în orele următoare, sunt motive legitime de CAUTION sau VETO.
 - Scrie explicația în limba română, clar și concis (maxim 600 de caractere). Lista de riscuri: fraze scurte în română. Câmpul invalidation: condiția concretă care anulează setup-ul.
 Răspunde doar cu obiectul JSON cerut."""
+
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+# ---- post-trade analysis (Claude as trade analyst; never changes settings or orders) --------------------------------
+TRADE_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "process_quality": {"type": "string", "enum": ["GOOD", "ACCEPTABLE", "POOR"],
+                            "description": "Calitatea PROCESULUI (intrare, gestionare, ieșire), independent de rezultat."},
+        "outcome_class": {"type": "string", "enum": ["GOOD_PROCESS_WIN", "GOOD_PROCESS_LOSS", "BAD_PROCESS_WIN",
+                                                     "BAD_PROCESS_LOSS", "NEUTRAL"]},
+        "summary": {"type": "string", "description": "Rezumat în română, maxim 500 de caractere."},
+        "what_worked": {"type": "array", "items": {"type": "string"}},
+        "what_failed": {"type": "array", "items": {"type": "string"}},
+        "lessons": {"type": "array", "items": {"type": "string"},
+                    "description": "Lecții concrete, verificabile, maxim 4."},
+        "tags": {"type": "array", "items": {"type": "string"},
+                 "description": "Etichete scurte (ex: contra-trend, stiri, spread-mare, iesire-prematura, time-stop)."},
+        "exit_assessment": {"type": "string", "enum": ["OPTIMAL", "EARLY", "LATE", "FORCED", "UNKNOWN"]},
+    },
+    "required": ["process_quality", "outcome_class", "summary", "what_worked", "what_failed", "lessons", "tags",
+                 "exit_assessment"],
+    "additionalProperties": False,
+}
+
+TRADE_REVIEW_PROMPT = """Ești analistul de tranzacții al unui bot de trading determinist care rulează pe un cont DEMO / PAPER MetaTrader 5.
+Primești o tranzacție ÎNCHISĂ cu toate datele: semnalul care a generat-o (indicatori, motive, verdictul tău de la intrare), nivelurile, umplerea, traiectoria prețului cât a fost deschisă (MFE/MAE în R), motivul închiderii, rezultatul net în bani și în R, plus istoricul recent al botului.
+Reguli:
+- Evaluezi PROCESUL, nu rezultatul: o tranzacție pierdută poate fi un proces bun (setup valid, risc respectat, ieșire la SL), iar una câștigată poate fi un proces slab (contra-trend, spread mare, noroc).
+- Folosește doar datele primite. Nu inventa evenimente, nu presupune prețuri care nu apar.
+- Lecțiile trebuie să fie concrete și verificabile pe date (ex: „3 din ultimele 4 tranzacții SELL pe EURUSD la ora 09 au atins SL înainte de +0.3R”), nu generalități.
+- Nu propui modificarea nivelurilor, a volumului sau a setărilor; poți sugera ipoteze de verificat în backtest.
+- Totul în limba română, concis. Răspunde doar cu obiectul JSON cerut."""
+
+DAILY_REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "headline": {"type": "string", "description": "O propoziție despre ziua de trading."},
+        "summary": {"type": "string", "description": "Bilanț în română, maxim 900 de caractere."},
+        "patterns": {"type": "array", "items": {"type": "string"},
+                     "description": "Tipare observate în tranzacții și în setup-urile neexecutate (umbră)."},
+        "veto_assessment": {"type": "string",
+                            "description": "Cum s-au comportat verdictele AI (AGREE/CAUTION/VETO) față de rezultatele în umbră."},
+        "risk_assessment": {"type": "string", "description": "Respectarea limitelor de risc și expunerea zilei."},
+        "hypotheses_to_test": {"type": "array", "items": {"type": "string"},
+                               "description": "Ipoteze de verificat în backtest/forward, maxim 5. NU se aplică automat."},
+        "confidence": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"],
+                       "description": "Cât de sigur ești pe concluzii, dat fiind numărul de tranzacții."},
+    },
+    "required": ["headline", "summary", "patterns", "veto_assessment", "risk_assessment", "hypotheses_to_test",
+                 "confidence"],
+    "additionalProperties": False,
+}
+
+DAILY_REVIEW_PROMPT = """Ești analistul de performanță al unui bot de trading determinist (cont DEMO / PAPER MetaTrader 5).
+Primești bilanțul unei zile: tranzacțiile închise (cu R, motiv de ieșire, durată, MFE/MAE), statistici ale setup-urilor NEexecutate (etichete „umbră”: ce ar fi făcut semnalele blocate de filtre, respinse de risc sau cu VETO), performanța pe verdictele AI, limitele de risc și bilanțul de ieri.
+Reguli:
+- Separă zgomotul de semnal: cu 1–5 tranzacții pe zi, aproape nimic nu este semnificativ statistic; spune explicit asta și setează confidence corespunzător.
+- Caută tipare verificabile (oră, simbol, direcție, regim, motiv de ieșire, spread, știri) și compară-le cu etichetele în umbră.
+- Evaluează onest verdictele AI: dacă setup-urile cu VETO au avut rezultate în umbră mai bune decât cele executate, spune-o.
+- Ipotezele trebuie formulate ca teste concrete (ce filtru, ce prag, ce metrică ar trebui să se îmbunătățească); ele NU se aplică automat, le decide omul după backtest.
+- Nu promite profit, nu extrapola o zi bună. Totul în limba română, concis. Răspunde doar cu obiectul JSON cerut."""
 
 
 class ClaudeReviewer:
@@ -96,10 +159,18 @@ class ClaudeReviewer:
     def enabled(self) -> bool:
         return bool(self.settings.CLAUDE_ENABLED)
 
+    @property
+    def effort(self) -> str:
+        e = str(getattr(self.settings, "CLAUDE_REVIEW_EFFORT", "medium") or "medium").strip().lower()
+        return e if e in EFFORT_LEVELS else "medium"
+
     def status(self) -> dict:
         return {
             "enabled": self.enabled, "model": self.settings.CLAUDE_MODEL, "veto_enabled": self.settings.CLAUDE_VETO_ENABLED,
             "key_set": self.key_set, "last_ok_utc": self.last_ok_utc, "last_error": self.last_error,
+            "effort": self.effort,
+            "trade_review_enabled": bool(getattr(self.settings, "CLAUDE_TRADE_REVIEW_ENABLED", True)),
+            "daily_review_enabled": bool(getattr(self.settings, "CLAUDE_DAILY_REVIEW_ENABLED", True)),
         }
 
     def _get_client(self):
@@ -175,17 +246,69 @@ class ClaudeReviewer:
         return repr(e)[:300]
 
     async def _call(self, signal: dict, context: dict | None) -> dict:
-        import anthropic
-        client = self._get_client()
         payload = self.build_payload(signal, context)
         user_msg = ("Evaluează următorul semnal calculat de motorul determinist. Datele sunt verificate.\n\n"
                     + json.dumps(payload, ensure_ascii=False, default=str))
+        return await self._call_json(SYSTEM_PROMPT, user_msg, REVIEW_SCHEMA, signal.get("id"))
+
+    # ---- trade analyst ------------------------------------------------------------------------------------------
+    async def review_trade(self, payload: dict) -> dict:
+        """Post-trade analysis of a CLOSED trade (payload built by app.trade_review). Same status contract as review():
+        DISABLED (no key / disabled) · ERROR (timeout, API error, invalid JSON) · DONE (+ the schema fields)."""
+        return await self._analysis(TRADE_REVIEW_PROMPT, TRADE_REVIEW_SCHEMA,
+                                    "Analizează următoarea tranzacție ÎNCHISĂ a botului.\n\n", payload,
+                                    (payload.get("trade") or {}).get("signal_id"))
+
+    async def review_day(self, payload: dict) -> dict:
+        """Daily performance review (trades + shadow labels of one local day)."""
+        return await self._analysis(DAILY_REVIEW_PROMPT, DAILY_REVIEW_SCHEMA,
+                                    "Fă bilanțul următoarei zile de trading a botului.\n\n", payload, None)
+
+    async def _analysis(self, system: str, schema: dict, lead: str, payload: dict, signal_id: str | None) -> dict:
+        model = self.settings.CLAUDE_MODEL
+        base = {"status": "DISABLED", "model": model}
+        if not self.enabled or not self.key_set:
+            base["error"] = "Analiza Claude este dezactivată (lipsește ANTHROPIC_API_KEY sau CLAUDE_ENABLED=false)."
+            return base
+        user_msg = lead + json.dumps(payload, ensure_ascii=False, default=str)
+        try:
+            parsed = await asyncio.wait_for(self._call_json(system, user_msg, schema, signal_id),
+                                            timeout=float(self.settings.CLAUDE_TIMEOUT_SECONDS) * 2)
+        except asyncio.TimeoutError:
+            return self._analysis_error(base, f"timeout după {self.settings.CLAUDE_TIMEOUT_SECONDS * 2:g} s")
+        except Exception as e:
+            return self._analysis_error(base, self._describe(e))
+        missing = [k for k in schema["required"] if k not in parsed]
+        if missing:
+            return self._analysis_error(base, f"răspuns incomplet: lipsesc {missing}")
+        self.last_ok_utc = iso(utcnow())
+        self.last_error = None
+        out = {"status": "DONE", "model": model}
+        for k, spec in schema["properties"].items():
+            v = parsed.get(k)
+            if spec.get("type") == "array":
+                out[k] = [str(x)[:300] for x in (v or []) if x is not None][:8]
+            else:
+                out[k] = str(v or "")[:1200]
+        return out
+
+    def _analysis_error(self, base: dict, msg: str) -> dict:
+        msg = redact(msg, self.settings.secret_values())
+        self.last_error = msg
+        log.warning("Claude trade analysis failed: %s", msg)
+        return {**base, "status": "ERROR", "error": msg}
+
+    async def _call_json(self, system: str, user_msg: str, schema: dict, signal_id: str | None) -> dict:
+        """One structured-output call: adaptive thinking (always on for this model family) at CLAUDE_REVIEW_EFFORT, strict JSON
+        schema, server-side refusal fallback when the API offers it."""
+        import anthropic
+        client = self._get_client()
         common = dict(
             model=self.settings.CLAUDE_MODEL,
-            max_tokens=4000,
-            system=SYSTEM_PROMPT,
+            max_tokens=8000,
+            system=system,
             messages=[{"role": "user", "content": user_msg}],
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": REVIEW_SCHEMA}},
+            output_config={"effort": self.effort, "format": {"type": "json_schema", "schema": schema}},
         )
         try:
             resp = await client.beta.messages.create(
@@ -199,7 +322,7 @@ class ClaudeReviewer:
                 resp = await client.messages.create(**common)
             else:
                 raise
-        self._record_usage(resp, signal.get("id"))
+        self._record_usage(resp, signal_id)
         return self.parse_response(resp)
 
     def _record_usage(self, resp, signal_id: str | None) -> None:

@@ -58,7 +58,7 @@ Un **sistem de trading semi-automat pentru MetaTrader 5**, construit pentru a fi
 
 Concluzia onestă a cercetării de până acum: **nicio strategie testată nu are avantaj statistic după costuri**, deci botul rămâne pe DEMO. Modul LIVE (bani reali) este blocat în cod.
 
-Cifre: ~35 000 de linii, ~60 de module Python, EA MQL5 de ~1 800 de linii, dashboard de ~3 000 de linii, **608 teste automate** (toate trec).
+Cifre: ~36 000 de linii, ~60 de module Python, EA MQL5 de ~1 800 de linii, dashboard de ~3 000 de linii, **619 teste automate** (toate trec).
 
 ---
 
@@ -290,6 +290,14 @@ Fișier: `app/ai_claude.py`. Model implicit: `CLAUDE_MODEL=claude-opus-5-5` (con
 - fără cheie API → status DISABLED;
 - erorile sunt traduse clar (401 cheie invalidă, 403, 429, conexiune) și orice secret e mascat în mesaje;
 - **costul** fiecărui apel (tokeni input / output / cache) e calculat în USD și salvat în `claude_usage`.
+- **context istoric** la fiecare revizuire: ultimele tranzacții pe simbol, sumarul ultimelor 20 de tranzacții, cum s-au comportat verdictele AI în umbră pe 30 de zile, următoarea știre importantă, ora locală;
+- **profunzimea raționamentului** e configurabilă (`CLAUDE_REVIEW_EFFORT`: low … max, implicit `medium`); modelul gândește adaptiv la fiecare apel.
+
+**Claude ca analist de tranzacții** (`app/trade_review.py`):
+- după **fiecare tranzacție închisă** a botului primește tranzacția, semnalul care a generat-o (indicatori, motive, verdictul său de la intrare), traiectoria prețului (MFE/MAE în R), motivul închiderii, rezultatul net și istoricul recent, și întoarce: calitatea **procesului** (GOOD / ACCEPTABLE / POOR, independent de rezultat), clasa rezultatului (ex. „proces bun, pierdere”), ce a mers, ce nu, lecții verificabile, etichete, evaluarea ieșirii (optimă / prematură / târzie / forțată);
+- la **sfârșitul sesiunii** face bilanțul zilei: tiparele din tranzacții și din setup-urile neexecutate (umbră), cum s-au comportat verdictele AI, respectarea riscului, **ipoteze de testat în backtest** (nu se aplică niciodată automat), nivelul de încredere dat fiind numărul mic de tranzacții; primește și bilanțul precedent, ca lecțiile să fie purtate mai departe;
+- totul e stocat în `trade_reviews`, trimis pe Telegram, afișat în dashboard (pagina *Telegram & AI*) și accesibil prin `GET /api/v1/trade-reviews`; bilanțul zilnic și analiza unei tranzacții se pot porni și manual (admin);
+- este **doar analiză**: nu modifică setări, niveluri, volume sau ordine; dezactivabil cu `CLAUDE_TRADE_REVIEW_ENABLED` / `CLAUDE_DAILY_REVIEW_ENABLED`.
 
 ---
 
@@ -431,6 +439,7 @@ Butoanele de control cer `ADMIN_TOKEN` (introdus din iconița ⚙, păstrat loca
 Prefix `/api/v1`, JSON. Toate acțiunile (POST/PUT) cer header-ul `X-Admin-Token`; dacă tokenul nu e setat în `.env` → 403, token greșit → 401.
 
 - **Citire:** `status`, `symbols`, `candles`, `analysis`, `signals`, `signals/{id}`, `positions`, `trades`, `intents`, `risk`, `settings`, `strategies`, `logs`, `stream` (SSE), `stats`, `shadow`, `archive/status`, `exits`, `backtest/runs`, `backtest/runs/{id}`, `forward`, `models`, `models/{id}`.
+- **Analist Claude:** `trade-reviews` (listă), `trade-reviews/daily` (bilanț zilnic, admin), `trade-reviews/trade/{id}` (analiza unei tranzacții, admin).
 - **Control:** `control/mode`, `control/execution`, `control/pause-entries`, `control/resume-entries`, `control/session`, `control/close-position`, `control/close-all` (cere `{"confirm":"CLOSE ALL"}`), `control/test-order`, `control/analyze-now`, `PUT risk`, `PUT schedule`, `PUT strategy`, `telegram/test`, `backtest/run`, `forward/reset`, `PUT models/settings`, `models/retrain`, `models/{id}/approve` (cere „APROB”), `models/{id}/retire`.
 - **Bridge:** `POST /bridge/v1/sync` (doar pentru EA, cu `X-Bridge-Key`).
 
@@ -442,7 +451,7 @@ Detaliile complete ale formatului: [`docs/CONTRACT.md`](CONTRACT.md).
 
 SQLite (`data/bot.db`), mod **WAL**, o singură conexiune protejată de un lock; scrierile mari (arhivă) rulează pe un fir separat. Migrările sunt **aditive** (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN`) — nimic nu se șterge.
 
-Tabele: `signals`, `signal_events`, `intents`, `trades`, `bars`, `bars_archive`, `spread_stats`, `analyses` (fiecare analiză + eticheta umbră), `equity_marks` (equity de început de zi / maxim), `equity_snapshots`, `claude_usage`, `notifications` (outbox-ul Telegram), `settings`, `system_events` (loguri), `backtest_runs`, `trade_paths`, `forward_meta`, `forward_positions`, `forward_trades`, `calendar_history`, `calendar_history_windows`, `ml_models`, `ml_decisions`, `ml_approvals`, `ml_retrain_runs`.
+Tabele: `signals`, `signal_events`, `intents`, `trades`, `bars`, `bars_archive`, `spread_stats`, `analyses` (fiecare analiză + eticheta umbră), `equity_marks` (equity de început de zi / maxim), `equity_snapshots`, `claude_usage`, `notifications` (outbox-ul Telegram), `settings`, `system_events` (loguri), `backtest_runs`, `trade_paths`, `forward_meta`, `forward_positions`, `forward_trades`, `calendar_history`, `calendar_history_windows`, `ml_models`, `ml_decisions`, `ml_approvals`, `ml_retrain_runs`, `trade_reviews` (analizele Claude).
 
 ---
 
@@ -617,7 +626,7 @@ Toate variabilele sunt documentate în [`.env.example`](../.env.example). Grupur
 - **Mod:** `TRADING_MODE`, `EXECUTION_ENABLED`, `LIVE_TRADING_ALLOWED`, `MUST_HAVE_SL_TP`.
 - **Risc:** `MAX_RISK_PER_TRADE_PCT`, `MAX_DAILY_LOSS_PCT`, `MAX_EQUITY_DRAWDOWN_PCT`, `MAX_OPEN_POSITIONS`, `MAX_TRADES_PER_DAY`, `MAX_CONSECUTIVE_LOSSES`, `MAX_SPREAD_POINTS`, `MAX_SLIPPAGE_POINTS`, `MAX_VOLUME_LOTS`, `MAX_SAME_CURRENCY_DIRECTION`, `MIN_FREE_MARGIN_PCT`, `MAX_TICK_AGE_SECONDS`, `MAX_SIGNALS_PER_SYMBOL_PER_SESSION`, `NEWS_*`, `MAX_TOTAL_OPEN_RISK_PCT`, `LOSS_STREAK_PAUSE_MINUTES`, `COOLDOWN_AFTER_LOSS_MINUTES`, `ROLLOVER_BLACKOUT_MINUTES`.
 - **Strategie și ieșiri:** `ATR_SL_MULT`, `ATR_TP_MULT`, `MIN_SL_POINTS`, `MIN_SCORE_COMPONENTS`, `SIGNAL_EXPIRY_MINUTES`, `BREAK_EVEN_AT_R`, `BE_LOCK_R`, `TRAILING_ENABLED`, `MAX_HOLD_MINUTES`, `CLOSE_AT_SESSION_END`, `RESCUE_*`, `PAPER_START_BALANCE`.
-- **Claude:** `ANTHROPIC_API_KEY`, `CLAUDE_ENABLED`, `CLAUDE_MODEL`, `CLAUDE_VETO_ENABLED`, `CLAUDE_REQUIRED`, `CLAUDE_TIMEOUT_SECONDS`.
+- **Claude:** `ANTHROPIC_API_KEY`, `CLAUDE_ENABLED`, `CLAUDE_MODEL`, `CLAUDE_VETO_ENABLED`, `CLAUDE_REQUIRED`, `CLAUDE_TIMEOUT_SECONDS`, `CLAUDE_REVIEW_EFFORT`, `CLAUDE_TRADE_REVIEW_ENABLED`, `CLAUDE_DAILY_REVIEW_ENABLED`.
 - **Telegram:** `TELEGRAM_ENABLED`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_MESSAGE_THREAD_ID`, `PUBLIC_APP_URL`.
 
 Multe limite de risc, programul și strategia activă se pot schimba și din dashboard (se salvează în tabelul `settings`).
@@ -628,7 +637,7 @@ Multe limite de risc, programul și strategia activă se pot schimba și din das
 
 ## 32. Teste automate
 
-**608 teste** pytest în `tests/` (toate trec, ~60 s): indicatori, strategie, risc, scheduler, bridge și protocol, motor, end-to-end cu un **EA fals** (`tests/fake_ea.py`), integrare, PAPER, poziții, Telegram + AI, arhivă, backtest, performanță, strategii, ieșiri, rescue, forward, ML (pipeline, live, end-to-end), calendar istoric, simboluri de cercetare, plus teste de regresie pentru fiecare runda de review.
+**619 teste** pytest în `tests/` (toate trec, ~60 s): indicatori, strategie, risc, scheduler, bridge și protocol, motor, end-to-end cu un **EA fals** (`tests/fake_ea.py`), integrare, PAPER, poziții, Telegram + AI, arhivă, backtest, performanță, strategii, ieșiri, rescue, forward, ML (pipeline, live, end-to-end), calendar istoric, simboluri de cercetare, plus teste de regresie pentru fiecare runda de review.
 
 ```bash
 .venv/bin/python -m pytest -q
@@ -660,8 +669,7 @@ Multe limite de risc, programul și strategia activă se pot schimba și din das
 
 - **Nu există avantaj statistic demonstrat** — botul este o infrastructură solidă și sigură, nu o mașină de profit.
 - Probabilitățile strategiei sunt **euristice, necalibrate**.
-- **Port inconsistent:** `.env.example` are `PORT=8765` și `PUBLIC_APP_URL=…:8765`, dar codul, README-ul și EA-ul folosesc **8787**. Dacă se copiază `.env.example` ca atare, EA-ul nu se conectează (trebuie pus `PORT=8787` sau schimbat `InpServerUrl` în EA).
-- **Dependențe ML lipsă:** `requirements.txt` nu conține `numpy` și `scikit-learn`; fără ele botul merge, dar ML-ul și reantrenarea sunt dezactivate.
+- Portul din `.env.example` și dependențele ML lipsă din `requirements.txt` au fost corectate (vezi `docs/PLAN_PROFITABILITATE.md`, §6).
 - Un singur proces, SQLite, dashboard local fără HTTPS — potrivit pentru demo pe calculatorul propriu, nu pentru producție expusă pe internet.
 - În jurul schimbării orei la broker, barele H4/D1 pot fi decalate cu ±1 h de două ori pe an (acceptat).
 

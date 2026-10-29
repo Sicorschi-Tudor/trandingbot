@@ -187,6 +187,20 @@ CREATE TABLE IF NOT EXISTS trade_paths (
     PRIMARY KEY (source, trade_id, ts)
 );
 CREATE INDEX IF NOT EXISTS ix_trade_paths_ts ON trade_paths(ts);
+CREATE TABLE IF NOT EXISTS trade_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    ref_id TEXT NOT NULL,
+    created_ts REAL NOT NULL,
+    account_key TEXT,
+    symbol TEXT,
+    status TEXT NOT NULL,
+    model TEXT,
+    review_json TEXT,
+    payload_json TEXT,
+    UNIQUE (kind, ref_id)
+);
+CREATE INDEX IF NOT EXISTS ix_trade_reviews_ts ON trade_reviews(created_ts);
 CREATE TABLE IF NOT EXISTS forward_meta (
     name TEXT PRIMARY KEY,
     started_ts REAL NOT NULL,

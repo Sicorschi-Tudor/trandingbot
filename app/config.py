@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     CLAUDE_VETO_ENABLED: bool = True
     CLAUDE_REQUIRED: bool = False
     CLAUDE_TIMEOUT_SECONDS: float = 45
+    # reasoning depth of every Claude call (adaptive thinking is always on): low | medium | high | xhigh | max
+    CLAUDE_REVIEW_EFFORT: str = "medium"
+    # Claude as trade analyst: post-trade review of every closed bot trade + a daily review at session end.
+    # Analysis only — it never changes settings, levels or orders.
+    CLAUDE_TRADE_REVIEW_ENABLED: bool = True
+    CLAUDE_DAILY_REVIEW_ENABLED: bool = True
     TELEGRAM_ENABLED: bool = False
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
