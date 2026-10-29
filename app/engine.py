@@ -131,7 +131,12 @@ class Engine:
         if s.profile_name:
             self.rt.log("INFO", "engine", f"Profil {s.profile_name.upper()}: simboluri {','.join(self.rt.active_symbols())}, "
                                           f"tranzacții doar pe {','.join(self.trade_symbols())}, max {s.MAX_POSITIONS_PER_SYMBOL} "
-                                          f"poziții/simbol, AI trader {s.AI_TRADER_ENTRY_MODE}")
+                                          f"poziții/simbol, AI trader {s.AI_TRADER_ENTRY_MODE}; cadru strategie "
+                                          f"{self.rt.strategy['signal_timeframe']}/{self.rt.strategy['htf_timeframe']}, "
+                                          f"SL {self.rt.strategy['atr_sl_mult']:g}×ATR, TP {self.rt.strategy['atr_tp_mult']:g}×ATR, "
+                                          f"hold {self.rt.strategy['max_hold_minutes']} min, sesiune "
+                                          f"{self.rt.schedule['start']}–{self.rt.schedule['end']} {self.rt.schedule['tz']} "
+                                          "(cheile fixate de profil ignoră valorile salvate din dashboard)")
         elif "XAUUSD" not in self.rt.active_symbols():
             self.rt.log("INFO", "engine", "Pentru configurația „doar aur” pune PROFILE=gold în .env (docs/PROFIL_AUR.md)")
         self._perf_startup()

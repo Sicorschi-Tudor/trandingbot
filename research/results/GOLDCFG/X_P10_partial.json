@@ -1,0 +1,120 @@
+{
+ "strategy": "pullback-v1",
+ "tf": "H1",
+ "htf": "H4",
+ "split": "train",
+ "db": "data/research_ecn.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "rescue_enabled": false,
+  "tp_r": 2.5
+ },
+ "risk_params": {
+  "max_open_positions": 1,
+  "max_trades_per_day": 20,
+  "max_spread_points": 100,
+  "max_daily_loss_pct": 100,
+  "max_consecutive_losses": 1000,
+  "cooldown_after_loss_minutes": 0,
+  "rollover_blackout_minutes": 0
+ },
+ "exit": {
+  "mode": "partial",
+  "params": {
+   "max_hold_hours": 24
+  }
+ },
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0
+ },
+ "elapsed_s": 2.8,
+ "summary": {
+  "trades": 310,
+  "win_rate": 0.5452,
+  "avg_r": 0.073,
+  "expectancy_r": 0.073,
+  "profit_factor": 1.168,
+  "max_dd_r": 11.222,
+  "max_consec_losses": 8,
+  "net_r": 22.615,
+  "net_usd": 473.21,
+  "ci90_avg_r": [
+   -0.0165,
+   0.1738
+  ],
+  "sample_days": 2037.8
+ },
+ "by_year": {
+  "2013": {
+   "n": 33,
+   "avg_r": -0.1509,
+   "sum_r": -4.98
+  },
+  "2014": {
+   "n": 67,
+   "avg_r": 0.2331,
+   "sum_r": 15.62
+  },
+  "2015": {
+   "n": 52,
+   "avg_r": 0.0041,
+   "sum_r": 0.21
+  },
+  "2016": {
+   "n": 54,
+   "avg_r": -0.0212,
+   "sum_r": -1.15
+  },
+  "2017": {
+   "n": 61,
+   "avg_r": 0.1,
+   "sum_r": 6.1
+  },
+  "2018": {
+   "n": 43,
+   "avg_r": 0.1584,
+   "sum_r": 6.81
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 310,
+   "win_rate": 0.5452,
+   "avg_r": 0.073,
+   "expectancy_r": 0.073,
+   "profit_factor": 1.168,
+   "max_dd_r": 11.222,
+   "max_consec_losses": 8,
+   "net_r": 22.615,
+   "net_usd": 473.21
+  }
+ },
+ "by_outcome": {
+  "SL": 123,
+  "TP": 44,
+  "TIME": 73,
+  "BE": 70
+ },
+ "counts": {
+  "blocked_market": 32,
+  "blocked_context": {
+   "Exist\u0103": 58
+  },
+  "signals": 310,
+  "risk_rejected": {},
+  "filled": 310,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 0,
+  "partial_disabled_min_lot": 0,
+  "analyses": 11512,
+  "candidates": 400
+ },
+ "warnings": [
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate."
+ ]
+}

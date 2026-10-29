@@ -12,10 +12,30 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # PROFILE=gold: the owner's "gold only" setup in one line. Applied over .env AND over settings saved from the dashboard
 # (Runtime.load_runtime_config keeps symbols / trade_symbols pinned), so a stale saved symbol list can never bring the
 # other pairs back. Values follow docs/PROFIL_AUR.md.
+# runtime-config keys a named profile pins over values saved from the dashboard (symbols, the measured strategy frame,
+# the session window and the gold risk caps); everything else saved from the dashboard is still honoured
+PROFILE_PINNED: dict[str, tuple[str, ...]] = {
+    "strategy": ("symbols", "trade_symbols", "signal_timeframe", "htf_timeframe", "atr_sl_mult", "atr_tp_mult",
+                 "max_hold_minutes", "rescue_enabled", "close_at_session_end", "min_sl_points"),
+    "schedule": ("enabled", "start", "end", "days"),
+    "risk": ("max_spread_points", "max_volume_lots", "news_blackout_minutes", "max_open_positions",
+             "max_positions_per_symbol", "pyramid_min_r", "pyramid_min_distance_atr", "max_same_currency_direction"),
+}
+
 PROFILES: dict[str, dict] = {
     "gold": {
         "ACTIVE_SYMBOLS": "XAUUSD", "TRADE_SYMBOLS": "XAUUSD", "CHART_TIMEFRAMES": "M1,M5,M15,H1,H4,D1",
-        "MAX_SPREAD_POINTS": 60.0, "MIN_SL_POINTS": 150, "MAX_VOLUME_LOTS": 0.05, "NEWS_BLACKOUT_MINUTES": 45,
+        # Strategy frame measured on 9 years of XAUUSD (research/results/GOLDCFG/SYNTHESIS.md): trend-v1 on M5/M15 loses
+        # 0.10-0.19 R per trade (the spread eats ~0.18 R of a 1.5xATR stop; the entry itself has no edge), H1/H4 with a
+        # 3xATR stop, 24 h time stop, no rescue and the London+New York window is the lowest-cost frame: TRAIN n 1431
+        # -0.0025 R [-0.043; +0.039] standard spread, +0.019 R on ECN spread -> expectancy ~0, ~5 trades/week.
+        "SIGNAL_TIMEFRAME": "H1", "HTF_TIMEFRAME": "H4", "ATR_SL_MULT": 3.0, "ATR_TP_MULT": 4.5,
+        "MAX_HOLD_MINUTES": 1440, "RESCUE_ENABLED": False,  # RESCUE is calibrated for <= M5 bars; on H1 it is noise
+        "SESSION_ENABLED": True, "SESSION_START": "09:00", "SESSION_END": "19:00",  # 07-17 UTC in winter (tz below)
+        "SESSION_DAYS": "MON,TUE,WED,THU,FRI", "CLOSE_AT_SESSION_END": False,  # 24 h TIME exits carry the result
+        # 150 points = 1.50 USD: 3-6 % of a 3xATR(H1) stop (25-45 USD); on a 1.5xATR(M5) stop a demo spread of 1.2 USD
+        # was 30-40 % of R - the reason the M5 frame loses. Research cost model: ~40 pts standard, ~17 pts ECN.
+        "MAX_SPREAD_POINTS": 150.0, "MIN_SL_POINTS": 150, "MAX_VOLUME_LOTS": 0.05, "NEWS_BLACKOUT_MINUTES": 45,
         "MAX_OPEN_POSITIONS": 3, "MAX_POSITIONS_PER_SYMBOL": 3, "PYRAMID_MIN_R": 0.5, "PYRAMID_MIN_DISTANCE_ATR": 1.0,
         "MAX_SAME_CURRENCY_DIRECTION": 3, "ARCHIVE_EXTRA": "M15:730,H1:1825,H4:3650,D1:7300",
         "ARCHIVE_EXTRA_WITH_POSITIONS": True,  # keep downloading history while gold positions are open (SL/TP sit at the broker)

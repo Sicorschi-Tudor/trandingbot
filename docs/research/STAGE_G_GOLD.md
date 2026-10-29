@@ -42,3 +42,13 @@ Regula cerută de proprietar (SL urmărește prețul de la +0,67 R, la 0,33 R î
 | trend-v1 H1, 12 instrumente | n 8 933, −0,061 R, PF 0,85 | n 9 328, −0,058 R, PF 0,85 | +0,004 R (nesemnificativ) |
 
 Concluzie: blocarea rapidă a profitului **scade** expectanța acolo unde există câștigători mari (aur) și nu salvează o strategie pierzătoare. Face exact ce promite — mai multe închideri mici pe plus, mai puține pierderi complete — dar prețul este că retrage poziția înainte de mișcările mari, care sunt singura sursă de profit a strategiilor de breakout/trend. Rămâne disponibilă (implicit oprită); dacă se folosește, parametrii trebuie testați în backtest (`--exit profit_lock --exit-params '{"profit_lock_activate_r": 1.0, "profit_lock_gap_r": 0.5}'`), nu aleși după intuiție.
+
+## Etapa H — configurația profilului gold (studiu pre-înregistrat, 38 de rulări)
+
+Întrebarea: ce cadru determinist (strategie, TF, SL/TP, sesiune, ieșire) minimizează pierderea / maximizează expectanța pe aur, cu o singură confirmare pe VALID. Rezultate complete: `research/results/GOLDCFG/SYNTHESIS.md` (+ `grid_log.jsonl` cu comenzile exacte).
+
+- `trend-v1` M15/H1 (profilul live de până acum): TRAIN n 6 623 **−0,18 R**; VALID n 2 289 **−0,19 R** [−0,22; −0,16] — robust negativ, confirmă cele −0,10 R pe 90 de zile M5 ale proprietarului. La cost zero +0,002 R: toată pierderea e spread/stop.
+- `trend-v1` H1/H4, SL 3×ATR, TP 4,5×ATR, hold 1440, rescue off, 07–17 UTC: TRAIN n 1 429 **−0,0025 R** [−0,043; +0,039], PF 0,99; ECN +0,019 R → cadrul adoptat în `PROFILES["gold"]` (opresc sângerarea, nu profit).
+- Nicio ieșire suplimentară nu îmbunătățește un candidat pe H1: base > giveback > trailing > partial > profit_lock > stall > combo (combo întoarce semnul).
+- Candidatul cu cel mai mare R pe TRAIN (`breakout-v1` H1/H4 cu SL plafonat 1,5×ATR, +0,100 R) pe VALID: −0,059 R standard / −0,020 ECN, n 193; versiunea fără plafon (G15) +0,009 / +0,031 — verdict pre-înregistrat **ADOPT_AS_LEAST_BAD** (bate baseline-ul cu +0,135 R/tranz., nu e > 0).
+

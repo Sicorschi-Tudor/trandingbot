@@ -8,7 +8,7 @@ Cum pornești botul pe aur, pe contul DEMO, cu mai multe poziții permise pe ace
 PROFILE=gold
 ```
 
-Apoi repornești serverul (`./run.sh`). Profilul **gold** setează automat tot ce urmează mai jos: doar XAUUSD (grafic, analiză, tranzacții), 3 poziții pe aur la niveluri diferite, istoric extins din MT5, AI trader în umbră, spread/SL/lot potrivite pentru aur — și **ignoră lista de simboluri salvată anterior din dashboard** (motivul pentru care, fără profil, aurul nu apărea și botul lucra pe EURUSD). Totul rămâne pe DEMO cu execuția dezarmată până o armezi tu din *Control & Risc*.
+Apoi repornești serverul (`./run.sh`). Profilul **gold** setează automat tot ce urmează mai jos: doar XAUUSD (grafic, analiză, tranzacții), 3 poziții pe aur la niveluri diferite, istoric extins din MT5, AI trader în umbră, spread/SL/lot potrivite pentru aur și **cadrul de strategie măsurat pe 9 ani de aur** (vezi §4): `trend-v1` pe **H1 cu confirmare H4**, SL 3×ATR, TP 4,5×ATR, time-stop 24 h, fără „rescue”, sesiune 09:00–19:00 Europe/Chisinau (≈ 07–17 UTC, Londra + New York), spread maxim 150 puncte. Profilul **fixează** aceste chei (simboluri, cadru, sesiune, plafoane de risc) peste valorile salvate anterior din dashboard — dacă le schimbi din *Control & Risc* rămân până la repornire, apoi revin la profil; celelalte setări salvate din dashboard sunt păstrate. Totul rămâne pe DEMO cu execuția dezarmată până o armezi tu din *Control & Risc*.
 
 ## 0b. Aceeași configurație, scrisă manual (dacă nu vrei profilul)
 
@@ -45,8 +45,8 @@ Numele trebuie să fie **exact** cel din MT5 al brokerului tău (`XAUUSD`, uneor
 
 | Setare | Valoare pentru aur | De ce |
 |---|---|---|
-| `MAX_SPREAD_POINTS` | `60` (cont standard) / `30` (ECN) | aurul are `point` = 0,01 USD; un spread normal e 20–40 de puncte (0,20–0,40 USD). Cu 30 (implicit, gândit pentru EURUSD) multe ore ar fi blocate. Pune valoarea după spread-ul pe care îl vezi la brokerul tău în orele Londra/New York, +50 %. |
-| `MIN_SL_POINTS` | `150` | 60 de puncte = 0,60 USD, prea puțin pentru aur; SL-ul e oricum 1,5×ATR, deci rar contează. |
+| `MAX_SPREAD_POINTS` | `150` (profilul gold) | aurul are `point` = 0,01 USD; un spread normal e 20–40 de puncte (0,20–0,40 USD), pe MetaQuotes-Demo ~120. Cu stopul 3×ATR pe H1 (25–45 USD) 150 de puncte sunt 3–6 % din R; pe un stop 1,5×ATR pe M5 același spread era 30–40 % din R — motivul pentru care cadrul M5 pierde. Dacă brokerul tău are spread mic, coboară valoarea din *Control & Risc*. |
+| `MIN_SL_POINTS` | `150` | 60 de puncte = 0,60 USD, prea puțin pentru aur; SL-ul e oricum 3×ATR pe H1, deci practic nu contează. |
 | `MAX_VOLUME_LOTS` | `0.05` | 1 lot de aur = 100 uncii ≈ 200 000+ USD noțional; un lot minim 0,01 cu SL de 5 USD riscă 5 USD. |
 | `NEWS_BLACKOUT_MINUTES` | `45` | aurul reacționează violent la CPI, NFP, FOMC; fereastra mai largă e justificată. |
 
@@ -81,9 +81,22 @@ PROFIT_LOCK_STEP_R=0.1        # se mută doar în pași ≥ 0,1 R (fără MODIFY
 
 Exact regula cerută: poziție cu SL inițial la −1,50 USD; prețul coboară puțin, apoi urcă la +1,00 → SL mutat la **+0,50**; prețul mai urcă 0,30 → SL la **+0,80**; dacă prețul cade brusc, poziția se închide la +0,80. SL-ul **nu coboară niciodată**. O face gestionarul de poziții, determinist, **la fiecare secundă**, pentru toate pozițiile botului, pe orice strategie — nu depinde de un apel AI (AI trader-ul poate, în plus, să strângă SL-ul când vede un motiv pe grafic). Aceeași regulă există în backtest (`--exit profit_lock`), ca să-i măsurăm efectul; rezultatele sunt în `docs/research/STAGE_G_GOLD.md` §Profit lock.
 
-## 4. Ce strategie rulează pe aur
+## 4. Ce strategie rulează pe aur — și de ce profilul e pe H1/H4
 
-Strategia activă (`PUT /api/v1/strategy` sau pagina *Control & Risc*) se aplică tuturor simbolurilor active. Pe 9 ani de date XAUUSD (2012–2022), `trend-v1` pe M5/H1 este **pierzătoare** după costuri, ca pe perechile FX (vezi `docs/research/STAGE_F_RESULTS.md` și `research/results/GOLD/`). Rezultatele studiului dedicat aurului (toate strategiile, toate timeframe-urile) sunt în `research/results/GOLD/*/SUMMARY.md`; strategia recomandată, dacă există una care trece validarea, este notată acolo și în `docs/research/STAGE_G_GOLD.md`.
+Strategia activă (`PUT /api/v1/strategy` sau pagina *Control & Risc*) se aplică tuturor simbolurilor active. Studiul pre-înregistrat `research/results/GOLDCFG/SYNTHESIS.md` (38 de configurații pe XAUUSD 2013–2018, o singură confirmare pe 2019–2020) a arătat:
+
+| Cadru `trend-v1` pe aur | n | R mediu | IC90 | Tranz./săpt. |
+|---|---|---|---|---|
+| M15/H1, SL 1,5×ATR, TP 2,5×ATR, hold 240 min (fostul profil; M5 e și mai rău) — TRAIN | 6 623 | **−0,18** | complet negativ | 23 |
+| același, pe VALID 2019–2020 | 2 289 | **−0,19** | [−0,22; −0,16] | 22 |
+| **H1/H4, SL 3×ATR, TP 4,5×ATR, hold 1440, fără rescue, 07–17 UTC** (profilul actual) — TRAIN, spread standard | 1 429 | **−0,0025** | [−0,043; +0,039] | 4,9 |
+| același, cost ECN/raw | 1 429 | +0,019 | [−0,020; +0,059] | 4,9 |
+
+Cu cost zero, `trend-v1` pe M15 dă +0,002 R: intrarea nu are avantaj, iar **toată pierderea e spread-ul** raportat la un stop mic. Pe H1 cu stop 3×ATR spread-ul devine 3–6 % din R, de aceea expectanța urcă de la −0,18 R la ≈ 0. Ce **nu** ajută (măsurat): scor minim 5 (−0,06 R), hold 240 min pe H1 (−0,03 R, 81 % ieșiri pe timp), fereastra 12–17 UTC singură (mai slabă decât 07–17), orice ieșire suplimentară pe H1 — trailing (−0,025 R), profit-lock (−0,05…−0,06 R), partial (−0,05 R), stall/combo (întorc semnul). Nici backtest-urile proprietarului pe 90 de zile (M5: trend-v1 −0,10 R pe 1 137 tranzacții, pullback −0,11 R, meanrev +0,06 R pe 66, nesemnificativ) nu contrazic asta.
+
+Alternativa „cea mai puțin rea” din studiu: `breakout-v1` H1/H4 (spargerea range-ului asiatic 00–06 UTC, SL la capătul opus, TP 2,5×range, hold 24 h, fără rescue) — pe VALID +0,009 R (standard) / +0,031 R (ECN), n 187, dar câștigul vine din 2020 („long aur în raliu”), 2019 e negativ. Se poate alege din *Control & Risc*; parametrii pluginului: `sl_mode "opposite"`, `tp_range_mult 2.5`, `sl_max_atr 3.0`, `range_max_atr 0`.
+
+**Concluzia onestă:** nicio configurație testată nu are IC90 peste zero după costuri. Profilul actual oprește sângerarea (≈ 0 R la ~5 tranzacții pe săptămână) în loc să piardă 0,10–0,19 R la 20+ tranzacții pe săptămână; nu promite profit. Pe un cont cu spread la aur de 1,2 USD (120 puncte, tipic MetaQuotes-Demo), costul e de 3× modelul „standard” al cercetării — un broker cu spread 15–40 de puncte contează mai mult decât orice parametru.
 
 ## 5. Pornire sigură
 

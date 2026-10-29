@@ -83,13 +83,25 @@ def test_gold_profile(tmp_path):
     s = Settings(_env_file=None, PROFILE="gold", DATABASE_PATH=str(tmp_path / "g.db"), ACTIVE_SYMBOLS="EURUSD,GBPUSD",
                  TELEGRAM_ENABLED=False, SESSION_ENABLED=False)
     assert s.ACTIVE_SYMBOLS == "XAUUSD" and s.TRADE_SYMBOLS == "XAUUSD" and s.MAX_POSITIONS_PER_SYMBOL == 3
-    assert s.MAX_SPREAD_POINTS == 60 and s.AI_TRADER_ENTRY_MODE == "shadow" and "D1" in s.CHART_TIMEFRAMES
+    assert s.MAX_SPREAD_POINTS == 150 and s.AI_TRADER_ENTRY_MODE == "shadow" and "D1" in s.CHART_TIMEFRAMES
+    # the measured frame (research/results/GOLDCFG/SYNTHESIS.md): H1/H4, SL 3xATR, TP 4.5xATR, 24 h, no rescue
+    assert (s.SIGNAL_TIMEFRAME, s.HTF_TIMEFRAME, s.ATR_SL_MULT, s.ATR_TP_MULT) == ("H1", "H4", 3.0, 4.5)
+    assert s.MAX_HOLD_MINUTES == 1440 and s.RESCUE_ENABLED is False and s.CLOSE_AT_SESSION_END is False
     db = DB(s.db_path)
-    db.set_setting("strategy", {"symbols": ["EURUSD"], "trade_symbols": [], "atr_sl_mult": 2.0})  # stale dashboard save
+    # stale dashboard saves: pinned keys are overridden by the profile, the others are still honoured
+    db.set_setting("strategy", {"symbols": ["EURUSD"], "trade_symbols": [], "atr_sl_mult": 2.0, "signal_timeframe": "M5",
+                                "break_even_at_r": 0.8})
+    db.set_setting("risk", {"max_spread_points": 30.0, "max_trades_per_day": 7})
+    db.set_setting("schedule", {"start": "10:00", "tz": "UTC"})
     eng = Engine(s, db)
     eng.startup()
     assert eng.rt.active_symbols() == ["XAUUSD"] and eng.trade_symbols() == ["XAUUSD"]
-    assert eng.rt.strategy["atr_sl_mult"] == 2.0  # other saved keys still honoured
+    assert eng.rt.strategy["atr_sl_mult"] == 3.0 and eng.rt.strategy["signal_timeframe"] == "H1"
+    assert eng.rt.strategy["break_even_at_r"] == 0.8  # not pinned -> saved value kept
+    assert eng.rt.risk["max_spread_points"] == 150.0 and eng.rt.risk["max_trades_per_day"] == 7
+    assert eng.rt.schedule["start"] == "09:00" and eng.rt.schedule["tz"] == "UTC"  # tz is not pinned
+    logs = [r["message"] for r in db.query("SELECT message FROM system_events WHERE message LIKE 'Profil GOLD%'")]
+    assert logs and "H1/H4" in logs[-1] and "SL 3×ATR" in logs[-1]
     assert eng.ai_trader.conf["entry_mode"] == "shadow" and eng.ai_trader.symbols() == ["XAUUSD"]
     assert Settings(_env_file=None, PROFILE="", ACTIVE_SYMBOLS="EURUSD").ACTIVE_SYMBOLS == "EURUSD"
     db.close()
