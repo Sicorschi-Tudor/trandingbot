@@ -1,0 +1,122 @@
+{
+ "strategy": "trend-v1",
+ "tf": "H1",
+ "htf": "H4",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "rescue_enabled": false
+ },
+ "risk_params": {
+  "max_open_positions": 1,
+  "max_trades_per_day": 20,
+  "max_spread_points": 100,
+  "max_daily_loss_pct": 100,
+  "max_consecutive_losses": 1000,
+  "cooldown_after_loss_minutes": 0,
+  "rollover_blackout_minutes": 0
+ },
+ "exit": {
+  "mode": "base",
+  "params": {
+   "max_hold_hours": 24
+  }
+ },
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0
+ },
+ "elapsed_s": 12.0,
+ "summary": {
+  "trades": 2884,
+  "win_rate": 0.4643,
+  "avg_r": -0.0454,
+  "expectancy_r": -0.0454,
+  "profit_factor": 0.913,
+  "max_dd_r": 165.588,
+  "max_consec_losses": 10,
+  "net_r": -130.977,
+  "net_usd": -2580.66,
+  "ci90_avg_r": [
+   -0.0797,
+   -0.0126
+  ],
+  "sample_days": 2037.8
+ },
+ "by_year": {
+  "2013": {
+   "n": 294,
+   "avg_r": 0.0372,
+   "sum_r": 10.93
+  },
+  "2014": {
+   "n": 526,
+   "avg_r": -0.0383,
+   "sum_r": -20.16
+  },
+  "2015": {
+   "n": 507,
+   "avg_r": -0.0631,
+   "sum_r": -31.99
+  },
+  "2016": {
+   "n": 542,
+   "avg_r": -0.0448,
+   "sum_r": -24.28
+  },
+  "2017": {
+   "n": 487,
+   "avg_r": 0.0067,
+   "sum_r": 3.28
+  },
+  "2018": {
+   "n": 528,
+   "avg_r": -0.1302,
+   "sum_r": -68.76
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 2884,
+   "win_rate": 0.4643,
+   "avg_r": -0.0454,
+   "expectancy_r": -0.0454,
+   "profit_factor": 0.913,
+   "max_dd_r": 165.588,
+   "max_consec_losses": 10,
+   "net_r": -130.977,
+   "net_usd": -2580.66
+  }
+ },
+ "by_outcome": {
+  "SL": 1421,
+  "BE": 448,
+  "TIME": 248,
+  "TP": 766,
+  "END": 1
+ },
+ "counts": {
+  "blocked_market": 272,
+  "blocked_context": {
+   "Exist\u0103": 14104,
+   "Limita": 15
+  },
+  "signals": 2939,
+  "risk_rejected": {},
+  "filled": 2884,
+  "skipped_gap": 0,
+  "expired_unfilled": 55,
+  "closed_at_end": 1,
+  "analyses": 32761,
+  "candidates": 17330
+ },
+ "warnings": [
+  "Drawdown 3% atins la 2013-10-22T13:00:00Z \u2014 \u00een live intr\u0103rile s-ar fi oprit (backtestul continu\u0103; halt_on_drawdown=true pentru oprire).",
+  "1 pozi\u021bii \u00eenchise for\u021bat la sf\u00e2r\u0219itul datelor (END).",
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate."
+ ]
+}

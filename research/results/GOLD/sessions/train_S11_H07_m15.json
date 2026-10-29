@@ -1,0 +1,115 @@
+{
+ "strategy": "disc-H07",
+ "tf": "D1",
+ "htf": "NONE",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "h07_m": 1.5
+ },
+ "risk_params": {
+  "max_open_positions": 1,
+  "max_trades_per_day": 20,
+  "max_spread_points": 100,
+  "max_daily_loss_pct": 100,
+  "max_consecutive_losses": 1000,
+  "cooldown_after_loss_minutes": 0,
+  "rollover_blackout_minutes": 0,
+  "max_total_open_risk_pct": 100
+ },
+ "exit": null,
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0,
+  "swap_mode": "table"
+ },
+ "elapsed_s": 0.4,
+ "summary": {
+  "trades": 116,
+  "win_rate": 0.4483,
+  "avg_r": -0.0238,
+  "expectancy_r": -0.0238,
+  "profit_factor": 0.926,
+  "max_dd_r": 10.579,
+  "max_consec_losses": 7,
+  "net_r": -2.758,
+  "net_usd": -78.68,
+  "ci90_avg_r": [
+   -0.1436,
+   0.0978
+  ],
+  "swap_r": 0.0,
+  "swap_usd": 0.0,
+  "swap_days": 0,
+  "sample_days": 2037.0
+ },
+ "by_year": {
+  "2013": {
+   "n": 16,
+   "avg_r": -0.1624,
+   "sum_r": -2.6
+  },
+  "2014": {
+   "n": 25,
+   "avg_r": -0.1386,
+   "sum_r": -3.47
+  },
+  "2015": {
+   "n": 18,
+   "avg_r": -0.203,
+   "sum_r": -3.65
+  },
+  "2016": {
+   "n": 21,
+   "avg_r": 0.3854,
+   "sum_r": 8.09
+  },
+  "2017": {
+   "n": 20,
+   "avg_r": 0.0862,
+   "sum_r": 1.72
+  },
+  "2018": {
+   "n": 16,
+   "avg_r": -0.1786,
+   "sum_r": -2.86
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 116,
+   "win_rate": 0.4483,
+   "avg_r": -0.0238,
+   "expectancy_r": -0.0238,
+   "profit_factor": 0.926,
+   "max_dd_r": 10.579,
+   "max_consec_losses": 7,
+   "net_r": -2.758,
+   "net_usd": -78.68
+  }
+ },
+ "by_outcome": {
+  "FLIP": 88,
+  "SL": 28
+ },
+ "counts": {
+  "blocked_market": 0,
+  "blocked_context": {},
+  "signals": 116,
+  "risk_rejected": {},
+  "filled": 116,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 0,
+  "analyses": 1440,
+  "candidates": 116
+ },
+ "warnings": [
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate.",
+  "Swap estimat (tabel implicit -5/-5 puncte/zi long/short) pentru XAUUSD \u2014 trimite cost.swap_pts_per_day pentru valorile brokerului."
+ ]
+}

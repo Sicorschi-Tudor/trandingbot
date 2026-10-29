@@ -1,0 +1,121 @@
+{
+ "strategy": "disc-f2-tsmom2",
+ "tf": "H4",
+ "htf": "NONE",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "k": 3
+ },
+ "risk_params": {
+  "max_open_positions": 1,
+  "max_trades_per_day": 20,
+  "max_spread_points": 100,
+  "max_daily_loss_pct": 100,
+  "max_consecutive_losses": 1000,
+  "cooldown_after_loss_minutes": 0,
+  "rollover_blackout_minutes": 0,
+  "max_total_open_risk_pct": 100
+ },
+ "exit": null,
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0,
+  "swap_mode": "table"
+ },
+ "elapsed_s": 2.4,
+ "summary": {
+  "trades": 110,
+  "win_rate": 0.1727,
+  "avg_r": -0.1287,
+  "expectancy_r": -0.1287,
+  "profit_factor": 0.818,
+  "max_dd_r": 26.242,
+  "max_consec_losses": 14,
+  "net_r": -14.155,
+  "net_usd": -323.7,
+  "ci90_avg_r": [
+   -0.4056,
+   0.1897
+  ],
+  "swap_r": -4.259,
+  "swap_usd": -73.88,
+  "swap_days": 1457,
+  "sample_days": 2037.9
+ },
+ "by_year": {
+  "2013": {
+   "n": 11,
+   "avg_r": 0.0088,
+   "sum_r": 0.1
+  },
+  "2014": {
+   "n": 22,
+   "avg_r": -0.2077,
+   "sum_r": -4.57
+  },
+  "2015": {
+   "n": 20,
+   "avg_r": -0.2201,
+   "sum_r": -4.4
+  },
+  "2016": {
+   "n": 16,
+   "avg_r": -0.2086,
+   "sum_r": -3.34
+  },
+  "2017": {
+   "n": 19,
+   "avg_r": -0.1239,
+   "sum_r": -2.35
+  },
+  "2018": {
+   "n": 22,
+   "avg_r": 0.0187,
+   "sum_r": 0.41
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 110,
+   "win_rate": 0.1727,
+   "avg_r": -0.1287,
+   "expectancy_r": -0.1287,
+   "profit_factor": 0.818,
+   "max_dd_r": 26.242,
+   "max_consec_losses": 14,
+   "net_r": -14.155,
+   "net_usd": -323.7
+  }
+ },
+ "by_outcome": {
+  "FLIP": 40,
+  "TP": 7,
+  "SL": 62,
+  "END": 1
+ },
+ "counts": {
+  "blocked_market": 0,
+  "blocked_context": {
+   "Exist\u0103": 3571
+  },
+  "signals": 110,
+  "risk_rejected": {},
+  "filled": 110,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 1,
+  "analyses": 8588,
+  "candidates": 3681
+ },
+ "warnings": [
+  "Drawdown 3% atins la 2015-05-01T13:00:00Z \u2014 \u00een live intr\u0103rile s-ar fi oprit (backtestul continu\u0103; halt_on_drawdown=true pentru oprire).",
+  "1 pozi\u021bii \u00eenchise for\u021bat la sf\u00e2r\u0219itul datelor (END).",
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate.",
+  "Swap estimat (tabel implicit -5/-5 puncte/zi long/short) pentru XAUUSD \u2014 trimite cost.swap_pts_per_day pentru valorile brokerului."
+ ]
+}

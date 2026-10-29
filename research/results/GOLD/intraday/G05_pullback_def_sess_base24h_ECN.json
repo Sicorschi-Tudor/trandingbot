@@ -1,0 +1,118 @@
+{
+ "strategy": "pullback-v1",
+ "tf": "H1",
+ "htf": "H4",
+ "split": "train",
+ "db": "data/research_ecn.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "rescue_enabled": false
+ },
+ "risk_params": {
+  "max_open_positions": 1,
+  "max_trades_per_day": 20,
+  "max_spread_points": 100,
+  "max_daily_loss_pct": 100,
+  "max_consecutive_losses": 1000,
+  "cooldown_after_loss_minutes": 0,
+  "rollover_blackout_minutes": 0
+ },
+ "exit": {
+  "mode": "base",
+  "params": {
+   "max_hold_hours": 24
+  }
+ },
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0
+ },
+ "elapsed_s": 3.6,
+ "summary": {
+  "trades": 357,
+  "win_rate": 0.5238,
+  "avg_r": 0.0666,
+  "expectancy_r": 0.0666,
+  "profit_factor": 1.152,
+  "max_dd_r": 12.363,
+  "max_consec_losses": 8,
+  "net_r": 23.759,
+  "net_usd": 534.04,
+  "ci90_avg_r": [
+   -0.037,
+   0.1719
+  ],
+  "sample_days": 2037.8
+ },
+ "by_year": {
+  "2013": {
+   "n": 36,
+   "avg_r": 0.0016,
+   "sum_r": 0.06
+  },
+  "2014": {
+   "n": 75,
+   "avg_r": 0.1521,
+   "sum_r": 11.4
+  },
+  "2015": {
+   "n": 63,
+   "avg_r": 0.0725,
+   "sum_r": 4.57
+  },
+  "2016": {
+   "n": 61,
+   "avg_r": -0.0246,
+   "sum_r": -1.5
+  },
+  "2017": {
+   "n": 66,
+   "avg_r": 0.0139,
+   "sum_r": 0.92
+  },
+  "2018": {
+   "n": 56,
+   "avg_r": 0.1484,
+   "sum_r": 8.31
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 357,
+   "win_rate": 0.5238,
+   "avg_r": 0.0666,
+   "expectancy_r": 0.0666,
+   "profit_factor": 1.152,
+   "max_dd_r": 12.363,
+   "max_consec_losses": 8,
+   "net_r": 23.759,
+   "net_usd": 534.04
+  }
+ },
+ "by_outcome": {
+  "SL": 142,
+  "TP": 71,
+  "TIME": 75,
+  "BE": 69
+ },
+ "counts": {
+  "blocked_market": 38,
+  "blocked_context": {
+   "Exist\u0103": 87
+  },
+  "signals": 357,
+  "risk_rejected": {},
+  "filled": 357,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 0,
+  "analyses": 14383,
+  "candidates": 482
+ },
+ "warnings": [
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate."
+ ]
+}

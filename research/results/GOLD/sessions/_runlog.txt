@@ -1,0 +1,71 @@
+### S01_h02_fix16 disc-h02 H1/D1 {}  
+{"strategy": "disc-h02", "tf": "H1", "split": "train", "trades": 487, "avg_r": -0.0482, "ci90": [-0.0851, -0.0106], "pf": 0.794, "max_dd_r": 31.619, "net_r": -23.482, "by_year": {"2015": -0.03, "2016": -0.1588, "2017": -0.0172, "2018": 0.0122}, "elapsed_s": 1.3}
+### S02_H05_nr7 disc-H05 H1/D1 {}  
+{"strategy": "disc-H05", "tf": "H1", "split": "train", "trades": 82, "avg_r": -0.0843, "ci90": [-0.2652, 0.1019], "pf": 0.834, "max_dd_r": 12.855, "net_r": -6.916, "by_year": {"2013": 0.0678, "2014": 0.0831, "2015": -0.0042, "2016": -0.0368, "2017": -0.7308, "2018": -0.1089}, "elapsed_s": 1.9}
+### S03_H07_rangeexp disc-H07 D1/NONE {}  
+{"strategy": "disc-H07", "tf": "D1", "split": "train", "trades": 48, "avg_r": 0.0651, "ci90": [-0.1098, 0.2351], "pf": 1.275, "max_dd_r": 3.413, "net_r": 3.124, "by_year": {"2013": -0.0433, "2014": -0.1271, "2015": 0.1098, "2016": 0.6529, "2017": 0.0252, "2018": -0.0998}, "elapsed_s": 0.4}
+### S04_h08_pdhpdl disc-h08 H1/D1 {"close_at_session_end": true} sess={"start":"07:00","end":"20:00","tz":"UTC","days":["MON","TUE","WED","THU","FRI"]} 
+{"strategy": "disc-h08", "tf": "H1", "split": "train", "trades": 859, "avg_r": -0.0446, "ci90": [-0.0927, 0.0069], "pf": 0.887, "max_dd_r": 56.721, "net_r": -38.342, "by_year": {"2017": -0.1767, "2018": -0.0246}, "elapsed_s": 2.0}
+### S05_H09_pwhpwl disc-H09 H4/D1 {}  
+{"strategy": "disc-H09", "tf": "H4", "split": "train", "trades": 214, "avg_r": -0.0625, "ci90": [-0.1822, 0.0582], "pf": 0.876, "max_dd_r": 26.349, "net_r": -13.365, "by_year": {"2013": -0.2009, "2014": 0.2155, "2015": -0.1012, "2016": -0.011, "2017": -0.3298, "2018": -0.008}, "elapsed_s": 1.3}
+### S06_H11_consec disc-H11 H4/NONE {}  
+{"strategy": "disc-H11", "tf": "H4", "split": "train", "trades": 427, "avg_r": -0.0723, "ci90": [-0.1156, -0.0322], "pf": 0.695, "max_dd_r": 31.617, "net_r": -30.879, "by_year": {"2015": -0.0233, "2016": -0.0402, "2017": -0.0979, "2018": -0.1589}, "elapsed_s": 1.8}
+### S07_gh17_round10 disc-gold-h17 H1/NONE {"step_price": 10.0}  
+{"strategy": "disc-gold-h17", "tf": "H1", "split": "train", "trades": 429, "avg_r": -0.1306, "ci90": [-0.2196, -0.0517], "pf": 0.764, "max_dd_r": 60.231, "net_r": -56.039, "by_year": {"2014": -0.473, "2015": -0.1601, "2016": 0.0462, "2017": -0.101, "2018": -0.147}, "elapsed_s": 2.8}
+### S08_h18_fakey disc-h18 H4/NONE {}  
+{"strategy": "disc-h18", "tf": "H4", "split": "train", "trades": 519, "avg_r": -0.0985, "ci90": [-0.189, -0.0018], "pf": 0.84, "max_dd_r": 65.029, "net_r": -51.11, "by_year": {"2015": -0.0263, "2016": -0.1356, "2017": -0.1085, "2018": -0.1674}, "elapsed_s": 1.6}
+### S09_h20_spike disc-h20 H1/NONE {}  
+{"strategy": "disc-h20", "tf": "H1", "split": "train", "trades": 184, "avg_r": -0.1095, "ci90": [-0.1936, -0.0252], "pf": 0.703, "max_dd_r": 20.917, "net_r": -20.15, "by_year": {"2013": -0.0308, "2014": -0.2411, "2015": 0.1236, "2016": -0.166, "2017": -0.227, "2018": -0.1276}, "elapsed_s": 1.4}
+### S10_H15_friday disc-H15 H1/D1 {}  
+{"strategy": "disc-H15", "tf": "H1", "split": "train", "trades": 128, "avg_r": 0.0058, "ci90": [-0.0774, 0.0909], "pf": 1.024, "max_dd_r": 4.713, "net_r": 0.738, "by_year": {"2013": 0.0084, "2014": 0.0166, "2015": -0.0191, "2016": -0.0365, "2017": -0.0115, "2018": 0.1069}, "elapsed_s": 2.6}
+## re-run runda 1 cu lista completa de tranzactii (_run_full.py), apoi runda 2
+### S01_h02_fix16 disc-h02 H1/D1 {}  
+{"strategy": "disc-h02", "tf": "H1", "split": "train", "trades": 487, "avg_r": -0.0482, "ci90": [-0.0851, -0.0106], "pf": 0.794, "max_dd_r": 31.619, "net_r": -23.482, "by_year": {"2013": -0.0293, "2014": -0.0971, "2015": -0.0207, "2016": -0.1588, "2017": -0.0172, "2018": 0.0122}, "elapsed_s": 1.6}
+### S02_H05_nr7 disc-H05 H1/D1 {}  
+{"strategy": "disc-H05", "tf": "H1", "split": "train", "trades": 82, "avg_r": -0.0843, "ci90": [-0.2652, 0.1019], "pf": 0.834, "max_dd_r": 12.855, "net_r": -6.916, "by_year": {"2013": 0.0678, "2014": 0.0831, "2015": -0.0042, "2016": -0.0368, "2017": -0.7308, "2018": -0.1089}, "elapsed_s": 1.7}
+### S03_H07_rangeexp disc-H07 D1/NONE {}  
+{"strategy": "disc-H07", "tf": "D1", "split": "train", "trades": 48, "avg_r": 0.0651, "ci90": [-0.1098, 0.2351], "pf": 1.275, "max_dd_r": 3.413, "net_r": 3.124, "by_year": {"2013": -0.0433, "2014": -0.1271, "2015": 0.1098, "2016": 0.6529, "2017": 0.0252, "2018": -0.0998}, "elapsed_s": 0.4}
+### S04_h08_pdhpdl disc-h08 H1/D1 {"close_at_session_end": true} sess={"start":"07:00","end":"20:00","tz":"UTC","days":["MON","TUE","WED","THU","FRI"]} 
+{"strategy": "disc-h08", "tf": "H1", "split": "train", "trades": 859, "avg_r": -0.0446, "ci90": [-0.0927, 0.0069], "pf": 0.887, "max_dd_r": 56.721, "net_r": -38.342, "by_year": {"2013": 0.1563, "2014": -0.1525, "2015": -0.0105, "2016": -0.0205, "2017": -0.1288, "2018": -0.0246}, "elapsed_s": 2.3}
+### S05_H09_pwhpwl disc-H09 H4/D1 {}  
+{"strategy": "disc-H09", "tf": "H4", "split": "train", "trades": 214, "avg_r": -0.0625, "ci90": [-0.1822, 0.0582], "pf": 0.876, "max_dd_r": 26.349, "net_r": -13.365, "by_year": {"2013": -0.2009, "2014": 0.2155, "2015": -0.1012, "2016": -0.011, "2017": -0.3298, "2018": -0.008}, "elapsed_s": 1.3}
+### S06_H11_consec disc-H11 H4/NONE {}  
+{"strategy": "disc-H11", "tf": "H4", "split": "train", "trades": 427, "avg_r": -0.0723, "ci90": [-0.1156, -0.0322], "pf": 0.695, "max_dd_r": 31.617, "net_r": -30.879, "by_year": {"2013": -0.0887, "2014": -0.06, "2015": 0.0229, "2016": -0.0402, "2017": -0.0979, "2018": -0.1589}, "elapsed_s": 2.1}
+### S07_gh17_round10 disc-gold-h17 H1/NONE {"step_price": 10.0}  
+{"strategy": "disc-gold-h17", "tf": "H1", "split": "train", "trades": 429, "avg_r": -0.1306, "ci90": [-0.2196, -0.0517], "pf": 0.764, "max_dd_r": 60.231, "net_r": -56.039, "by_year": {"2013": -0.1228, "2014": -0.3328, "2015": -0.1601, "2016": 0.0462, "2017": -0.101, "2018": -0.147}, "elapsed_s": 2.8}
+### S08_h18_fakey disc-h18 H4/NONE {}  
+{"strategy": "disc-h18", "tf": "H4", "split": "train", "trades": 519, "avg_r": -0.0985, "ci90": [-0.189, -0.0018], "pf": 0.84, "max_dd_r": 65.029, "net_r": -51.11, "by_year": {"2013": -0.0144, "2014": -0.2177, "2015": 0.0366, "2016": -0.1356, "2017": -0.1085, "2018": -0.1674}, "elapsed_s": 1.9}
+### S09_h20_spike disc-h20 H1/NONE {}  
+{"strategy": "disc-h20", "tf": "H1", "split": "train", "trades": 184, "avg_r": -0.1095, "ci90": [-0.1936, -0.0252], "pf": 0.703, "max_dd_r": 20.917, "net_r": -20.15, "by_year": {"2013": -0.0308, "2014": -0.2411, "2015": 0.1236, "2016": -0.166, "2017": -0.227, "2018": -0.1276}, "elapsed_s": 1.5}
+### S10_H15_friday disc-H15 H1/D1 {}  
+{"strategy": "disc-H15", "tf": "H1", "split": "train", "trades": 128, "avg_r": 0.0058, "ci90": [-0.0774, 0.0909], "pf": 1.024, "max_dd_r": 4.713, "net_r": 0.738, "by_year": {"2013": 0.0084, "2014": 0.0166, "2015": -0.0191, "2016": -0.0365, "2017": -0.0115, "2018": 0.1069}, "elapsed_s": 2.9}
+### S11_H07_m15 disc-H07 D1/NONE {"h07_m": 1.5}  
+{"strategy": "disc-H07", "tf": "D1", "split": "train", "trades": 116, "avg_r": -0.0238, "ci90": [-0.1436, 0.0978], "pf": 0.926, "max_dd_r": 10.579, "net_r": -2.758, "by_year": {"2013": -0.1624, "2014": -0.1386, "2015": -0.203, "2016": 0.3854, "2017": 0.0862, "2018": -0.1786}, "elapsed_s": 0.4}
+### S12_H07_m15_hold2 disc-H07 D1/NONE {"h07_m": 1.5, "h07_hold_days": 2}  
+{"strategy": "disc-H07", "tf": "D1", "split": "train", "trades": 111, "avg_r": 0.0366, "ci90": [-0.1191, 0.1991], "pf": 1.092, "max_dd_r": 10.455, "net_r": 4.062, "by_year": {"2013": -0.3917, "2014": -0.0445, "2015": -0.1357, "2016": 0.4374, "2017": 0.3124, "2018": -0.0498}, "elapsed_s": 0.5}
+### S13_H07_m18_hold2 disc-H07 D1/NONE {"h07_hold_days": 2}  
+{"strategy": "disc-H07", "tf": "D1", "split": "train", "trades": 47, "avg_r": 0.0594, "ci90": [-0.1437, 0.2776], "pf": 1.178, "max_dd_r": 6.203, "net_r": 2.793, "by_year": {"2013": -0.4561, "2014": -0.2888, "2015": 0.4221, "2016": 0.5719, "2017": 0.1871, "2018": 0.1386}, "elapsed_s": 0.4}
+### S14_H07_m18_hold3 disc-H07 D1/NONE {"h07_hold_days": 3}  
+{"strategy": "disc-H07", "tf": "D1", "split": "train", "trades": 45, "avg_r": 0.2251, "ci90": [-0.0541, 0.5138], "pf": 1.581, "max_dd_r": 9.071, "net_r": 10.132, "by_year": {"2013": -0.2922, "2014": -0.6008, "2015": 1.0167, "2016": 0.9963, "2017": 0.6597, "2018": 0.3718}, "elapsed_s": 0.4}
+### S15_H07_m18_clv07 disc-H07 D1/NONE {"h07_clv": 0.7}  
+{"strategy": "disc-H07", "tf": "D1", "split": "train", "trades": 57, "avg_r": -0.0359, "ci90": [-0.194, 0.1354], "pf": 0.882, "max_dd_r": 4.705, "net_r": -2.044, "by_year": {"2013": -0.1809, "2014": -0.1779, "2015": 0.1962, "2016": 0.3032, "2017": 0.0252, "2018": -0.2401}, "elapsed_s": 0.3}
+### S16_H15_k075 disc-H15 H1/D1 {"h15_k": 0.75}  
+{"strategy": "disc-H15", "tf": "H1", "split": "train", "trades": 164, "avg_r": 0.0122, "ci90": [-0.0586, 0.089], "pf": 1.053, "max_dd_r": 5.063, "net_r": 1.998, "by_year": {"2013": 0.0555, "2014": 0.0148, "2015": -0.0222, "2016": -0.0115, "2017": -0.0194, "2018": 0.0924}, "elapsed_s": 2.5}
+### S17_H15_k05 disc-H15 H1/D1 {"h15_k": 0.5}  
+{"strategy": "disc-H15", "tf": "H1", "split": "train", "trades": 203, "avg_r": -0.028, "ci90": [-0.0935, 0.0378], "pf": 0.887, "max_dd_r": 8.795, "net_r": -5.676, "by_year": {"2013": 0.041, "2014": 0.0099, "2015": -0.0642, "2016": -0.0616, "2017": -0.0812, "2018": 0.0396}, "elapsed_s": 3.1}
+### S18_H15_entry15 disc-H15 H1/D1 {"h15_entry_hour": 15}  
+{"strategy": "disc-H15", "tf": "H1", "split": "train", "trades": 133, "avg_r": -0.0402, "ci90": [-0.1055, 0.0244], "pf": 0.803, "max_dd_r": 8.982, "net_r": -5.348, "by_year": {"2013": 0.1002, "2014": -0.0782, "2015": -0.0295, "2016": -0.1743, "2017": -0.0893, "2018": 0.1095}, "elapsed_s": 2.9}
+### S19_h08_tp2R disc-h08 H1/D1 {"close_at_session_end": true, "h08_tp_mode": "2R"} sess={"start":"07:00","end":"20:00","tz":"UTC","days":["MON","TUE","WED","THU","FRI"]} 
+{"strategy": "disc-h08", "tf": "H1", "split": "train", "trades": 862, "avg_r": -0.0421, "ci90": [-0.0986, 0.0146], "pf": 0.905, "max_dd_r": 56.227, "net_r": -36.281, "by_year": {"2013": 0.1064, "2014": -0.126, "2015": -0.0884, "2016": 0.0254, "2017": -0.0842, "2018": -0.0247}, "elapsed_s": 1.9}
+### S20_h08_x01 disc-h08 H1/D1 {"close_at_session_end": true, "h08_x": 0.1} sess={"start":"07:00","end":"20:00","tz":"UTC","days":["MON","TUE","WED","THU","FRI"]} 
+{"strategy": "disc-h08", "tf": "H1", "split": "train", "trades": 582, "avg_r": -0.0358, "ci90": [-0.0916, 0.0165], "pf": 0.892, "max_dd_r": 36.649, "net_r": -20.841, "by_year": {"2013": 0.1481, "2014": -0.1947, "2015": -0.0623, "2016": -0.0522, "2017": 0.0327, "2018": -0.0314}, "elapsed_s": 1.8}
+## VALID (o singura rulare) + TRAIN ECN pentru configuratia aleasa S12
+### S12_H07_m15_hold2 valid data/research.db valid
+### S12_H07_m15_hold2 valid_ecn data/research_ecn.db valid
+### S12_H07_m15_hold2 train_ecn data/research_ecn.db train
+### S12_H07_m15_hold2 valid data/research.db valid
+{"strategy": "disc-H07", "tf": "D1", "split": "valid", "trades": 39, "avg_r": -0.0605, "ci90": [-0.3775, 0.2928], "pf": 0.886, "max_dd_r": 7.551, "net_r": -2.361, "by_year": {"2019": 0.1564, "2020": -0.2888}, "elapsed_s": 0.2}
+### S12_H07_m15_hold2 valid_ecn data/research_ecn.db valid
+{"strategy": "disc-H07", "tf": "D1", "split": "valid", "trades": 39, "avg_r": 0.0848, "ci90": [-0.2487, 0.4586], "pf": 1.187, "max_dd_r": 5.468, "net_r": 3.308, "by_year": {"2019": 0.3845, "2020": -0.2306}, "elapsed_s": 0.3}
+### S12_H07_m15_hold2 train_ecn data/research_ecn.db train
+{"strategy": "disc-H07", "tf": "D1", "split": "train", "trades": 111, "avg_r": 0.069, "ci90": [-0.0906, 0.2369], "pf": 1.176, "max_dd_r": 9.383, "net_r": 7.663, "by_year": {"2013": -0.3802, "2014": -0.0196, "2015": -0.1102, "2016": 0.4799, "2017": 0.3666, "2018": -0.0165}, "elapsed_s": 0.4}

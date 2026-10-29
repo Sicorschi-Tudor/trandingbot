@@ -1,0 +1,113 @@
+{
+ "strategy": "disc-H07",
+ "tf": "D1",
+ "htf": "NONE",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {},
+ "risk_params": {
+  "max_open_positions": 1,
+  "max_trades_per_day": 20,
+  "max_spread_points": 100,
+  "max_daily_loss_pct": 100,
+  "max_consecutive_losses": 1000,
+  "cooldown_after_loss_minutes": 0,
+  "rollover_blackout_minutes": 0,
+  "max_total_open_risk_pct": 100
+ },
+ "exit": null,
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0,
+  "swap_mode": "table"
+ },
+ "elapsed_s": 0.4,
+ "summary": {
+  "trades": 48,
+  "win_rate": 0.5417,
+  "avg_r": 0.0651,
+  "expectancy_r": 0.0651,
+  "profit_factor": 1.275,
+  "max_dd_r": 3.413,
+  "max_consec_losses": 4,
+  "net_r": 3.124,
+  "net_usd": 25.4,
+  "ci90_avg_r": [
+   -0.1098,
+   0.2351
+  ],
+  "swap_r": 0.0,
+  "swap_usd": 0.0,
+  "swap_days": 0,
+  "sample_days": 2037.0
+ },
+ "by_year": {
+  "2013": {
+   "n": 6,
+   "avg_r": -0.0433,
+   "sum_r": -0.26
+  },
+  "2014": {
+   "n": 12,
+   "avg_r": -0.1271,
+   "sum_r": -1.53
+  },
+  "2015": {
+   "n": 6,
+   "avg_r": 0.1098,
+   "sum_r": 0.66
+  },
+  "2016": {
+   "n": 8,
+   "avg_r": 0.6529,
+   "sum_r": 5.22
+  },
+  "2017": {
+   "n": 5,
+   "avg_r": 0.0252,
+   "sum_r": 0.13
+  },
+  "2018": {
+   "n": 11,
+   "avg_r": -0.0998,
+   "sum_r": -1.1
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 48,
+   "win_rate": 0.5417,
+   "avg_r": 0.0651,
+   "expectancy_r": 0.0651,
+   "profit_factor": 1.275,
+   "max_dd_r": 3.413,
+   "max_consec_losses": 4,
+   "net_r": 3.124,
+   "net_usd": 25.4
+  }
+ },
+ "by_outcome": {
+  "FLIP": 41,
+  "SL": 7
+ },
+ "counts": {
+  "blocked_market": 0,
+  "blocked_context": {},
+  "signals": 48,
+  "risk_rejected": {},
+  "filled": 48,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 0,
+  "analyses": 1440,
+  "candidates": 48
+ },
+ "warnings": [
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate.",
+  "Swap estimat (tabel implicit -5/-5 puncte/zi long/short) pentru XAUUSD \u2014 trimite cost.swap_pts_per_day pentru valorile brokerului."
+ ]
+}

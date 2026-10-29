@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     COOLDOWN_AFTER_LOSS_MINUTES: int = 30
     # no new entries within ±N minutes of the 17:00 America/New_York rollover (DST-safe; 0 = off)
     ROLLOVER_BLACKOUT_MINUTES: int = 20
+    # pyramiding: up to N bot positions on one symbol (default 1 = one position per symbol, the historical rule).
+    # A further position is allowed only in the SAME direction and only while every open position on the symbol is at
+    # least PYRAMID_MIN_R in open profit (R = initial risk); an in-flight OPEN blocks adding. MAX_OPEN_POSITIONS still caps.
+    MAX_POSITIONS_PER_SYMBOL: int = 1
+    PYRAMID_MIN_R: float = 0.5
     ATR_SL_MULT: float = 1.5
     ATR_TP_MULT: float = 2.5
     MIN_SL_POINTS: int = 60
@@ -174,6 +179,8 @@ class Settings(BaseSettings):
             "loss_streak_pause_minutes": self.LOSS_STREAK_PAUSE_MINUTES,
             "cooldown_after_loss_minutes": self.COOLDOWN_AFTER_LOSS_MINUTES,
             "rollover_blackout_minutes": self.ROLLOVER_BLACKOUT_MINUTES,
+            "max_positions_per_symbol": self.MAX_POSITIONS_PER_SYMBOL,
+            "pyramid_min_r": self.PYRAMID_MIN_R,
         }
 
     def default_schedule(self) -> dict:

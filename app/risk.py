@@ -130,6 +130,9 @@ class RiskContext:
     open_bot_positions: int = 0
     ea_magic_ok: bool = True
     has_bot_position_on_symbol: bool = False
+    # pyramiding (risk.max_positions_per_symbol > 1): True when the rule allows one more position on the symbol
+    pyramid_ok: bool = False
+    pyramid_note: str = ""
     symbol: str = ""
     open_exposures: list = field(default_factory=list)  # [(symbol, side)] of bot positions + in-flight opens
     trades_today: int = 0
@@ -331,11 +334,20 @@ def evaluate(ctx: RiskContext) -> dict:
     min_fm = float(r.get("min_free_margin_pct", 50))
     add("free_margin_ok", fm_pct >= min_fm, f"marjă liberă {fm_pct:.1f}% / minim {min_fm:g}%")
     corr_limit = int(r.get("max_same_currency_direction", 1))
-    conflict = currency_conflict(ctx.symbol or ctx.symbol_info.get("symbol") or "", ctx.side, ctx.open_exposures, corr_limit)
+    sym_ = ctx.symbol or ctx.symbol_info.get("symbol") or ""
+    exposures = ctx.open_exposures
+    if int(r.get("max_positions_per_symbol", 1) or 1) > 1:  # the pyramid itself is not a correlated exposure
+        exposures = [e for e in exposures if not (e[0] == sym_ and e[1] == ctx.side)]
+    conflict = currency_conflict(sym_, ctx.side, exposures, corr_limit)
     add("currency_exposure_ok", conflict is None,
         f"corelație: {conflict} (max {corr_limit})" if conflict else f"nicio expunere duplicată pe monedă (max {corr_limit})")
-    add("no_existing_bot_position_on_symbol", not ctx.has_bot_position_on_symbol,
-        "există deja o poziție a botului pe simbol" if ctx.has_bot_position_on_symbol else "nicio poziție a botului pe simbol")
+    if not ctx.has_bot_position_on_symbol:
+        add("no_existing_bot_position_on_symbol", True, "nicio poziție a botului pe simbol")
+    elif int(r.get("max_positions_per_symbol", 1) or 1) > 1:
+        add("no_existing_bot_position_on_symbol", ctx.pyramid_ok,
+            ctx.pyramid_note or ("piramidare permisă" if ctx.pyramid_ok else "piramidare nepermisă"))
+    else:
+        add("no_existing_bot_position_on_symbol", False, "există deja o poziție a botului pe simbol")
 
     passed = all(c["ok"] for c in checks)
     return {"passed": passed, "checks": checks, "volume": volume}
