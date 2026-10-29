@@ -1,0 +1,115 @@
+{
+ "strategy": "trend-v1",
+ "tf": "M15",
+ "htf": "H1",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {},
+ "risk_params": {
+  "max_open_positions": 1,
+  "max_trades_per_day": 20,
+  "max_spread_points": 100,
+  "max_daily_loss_pct": 100,
+  "max_consecutive_losses": 1000,
+  "cooldown_after_loss_minutes": 0,
+  "rollover_blackout_minutes": 0
+ },
+ "exit": null,
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0
+ },
+ "elapsed_s": 50.0,
+ "summary": {
+  "trades": 6689,
+  "win_rate": 0.5224,
+  "avg_r": -0.1877,
+  "expectancy_r": -0.1877,
+  "profit_factor": 0.61,
+  "max_dd_r": 1255.2,
+  "max_consec_losses": 11,
+  "net_r": -1255.2,
+  "net_usd": -9305.59,
+  "ci90_avg_r": [
+   -0.2071,
+   -0.1685
+  ],
+  "sample_days": 2037.9
+ },
+ "by_year": {
+  "2013": {
+   "n": 737,
+   "avg_r": -0.1954,
+   "sum_r": -143.98
+  },
+  "2014": {
+   "n": 1218,
+   "avg_r": -0.1778,
+   "sum_r": -216.6
+  },
+  "2015": {
+   "n": 1224,
+   "avg_r": -0.2042,
+   "sum_r": -249.99
+  },
+  "2016": {
+   "n": 1244,
+   "avg_r": -0.1741,
+   "sum_r": -216.59
+  },
+  "2017": {
+   "n": 1118,
+   "avg_r": -0.1947,
+   "sum_r": -217.66
+  },
+  "2018": {
+   "n": 1148,
+   "avg_r": -0.1833,
+   "sum_r": -210.37
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 6689,
+   "win_rate": 0.5224,
+   "avg_r": -0.1877,
+   "expectancy_r": -0.1877,
+   "profit_factor": 0.61,
+   "max_dd_r": 1255.2,
+   "max_consec_losses": 11,
+   "net_r": -1255.2,
+   "net_usd": -9305.59
+  }
+ },
+ "by_outcome": {
+  "SL": 3022,
+  "RESCUE": 1632,
+  "TIME": 278,
+  "TP": 1060,
+  "BE": 697
+ },
+ "counts": {
+  "blocked_market": 24508,
+  "blocked_context": {
+   "Exist\u0103": 17178,
+   "Limita": 18597
+  },
+  "signals": 6752,
+  "risk_rejected": {},
+  "filled": 6689,
+  "skipped_gap": 1,
+  "expired_unfilled": 62,
+  "closed_at_end": 0,
+  "analyses": 130964,
+  "candidates": 67035
+ },
+ "warnings": [
+  "Drawdown 3% atins la 2013-06-17T11:00:00Z \u2014 \u00een live intr\u0103rile s-ar fi oprit (backtestul continu\u0103; halt_on_drawdown=true pentru oprire).",
+  "Ie\u0219irea RESCUE e simulat\u0103 pe \u00eenchiderile barelor M15 (live: e\u0219antioane de 1 minut) \u2014 modelul e valid doar pentru M5 sau mai mic; rezultatele RESCUE nu sunt concludente.",
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate."
+ ]
+}
