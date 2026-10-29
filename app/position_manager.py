@@ -66,6 +66,22 @@ def rescue_close(pos: dict, info: dict, cfg: dict, now_ts: float, initial_sl: fl
     return None
 
 
+def profit_lock_sl(side: str, cur: float, open_px: float, risk_dist: float, cfg: dict, digits: int) -> float | None:
+    """Profit-lock trailing (owner's rule): once the open profit reaches profit_lock_activate_r × initial risk, the SL
+    follows the CURRENT price at profit_lock_gap_r × risk behind it and only ever moves towards profit. Example with a
+    1.50 USD risk, activate 0.67 R (≈ +1.00), gap 0.33 R (≈ 0.50): at +1.00 the SL goes to +0.50, at +1.30 to +0.80;
+    a fast drop then closes the trade at +0.80 instead of a loss. Returns the candidate SL or None (not armed)."""
+    if not cfg.get("profit_lock_enabled") or risk_dist <= 0:
+        return None
+    sign = 1 if side == "BUY" else -1
+    profit = (cur - open_px) * sign
+    activate = float(cfg.get("profit_lock_activate_r") or 0)
+    gap = float(cfg.get("profit_lock_gap_r") or 0)
+    if activate <= 0 or gap < 0 or profit < activate * risk_dist:
+        return None
+    return round(cur - sign * gap * risk_dist, digits)
+
+
 def plan(pos: dict, info: dict, cfg: dict, now_ts: float, session_open: bool,
          initial_sl: float | None = None, atr: float | None = None, news_event: dict | None = None,
          rescue_state: dict | None = None) -> list[dict]:
@@ -126,6 +142,13 @@ def plan(pos: dict, info: dict, cfg: dict, now_ts: float, session_open: bool,
         step_ok = (not floor) or (tr_sl - floor) * sign >= 0.1 * atr
         if improves(tr_sl) and valid(tr_sl) and step_ok and (best is None or (tr_sl - best[0]) * sign > 0):
             best = (tr_sl, "TRAILING")
+    pl_sl = profit_lock_sl(side, cur, open_px, risk_dist, cfg, digits)
+    if pl_sl is not None:
+        # ratchet: move only when the gain over the current SL is at least profit_lock_step_r × risk (no MODIFY churn)
+        step = max(float(cfg.get("profit_lock_step_r") or 0) * risk_dist, 2 * point)
+        step_ok = (not sl) or (pl_sl - sl) * sign >= step - point / 2
+        if improves(pl_sl) and valid(pl_sl) and step_ok and (best is None or (pl_sl - best[0]) * sign > 0):
+            best = (pl_sl, "PROFIT_LOCK")
     if news_event and risk_dist > 0 and profit_dist >= NEWS_BE_MIN_R * risk_dist - point / 2:
         nb_sl = round(open_px + sign * 2 * point, digits)
         if improves(nb_sl) and valid(nb_sl) and (best is None or (nb_sl - best[0]) * sign > 0):

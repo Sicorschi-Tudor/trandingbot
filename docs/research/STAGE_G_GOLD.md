@@ -30,3 +30,15 @@ Referință: **`trend-v1` (strategia live a botului) pe XAUUSD H1, VALID: n 1 87
 - **Nicio strategie nu e armată pe aur**: toate cele 60 de configurații + strategia live sunt ≤ 0 sau nemăsurabile. Armarea cu `trend-v1` pe aur înseamnă o pierdere așteptată de ≈ 0,09 R pe tranzacție.
 - **Piramidarea rămâne oprită** (`MAX_POSITIONS_PER_SYMBOL=1`).
 - Când arhiva reală a proprietarului acoperă ≥ 6 luni de XAUUSD cu spread real și calendar, se re-rulează acest studiu pe datele reale cu ipoteza breakout-asiatic pre-înregistrată.
+
+## Profit lock (trailing cu blocare de profit) — efect măsurat
+
+Regula cerută de proprietar (SL urmărește prețul de la +0,67 R, la 0,33 R în urmă, doar în sus) a fost implementată live (`position_manager.profit_lock_sl`) și în simulator (`--exit profit_lock`) și măsurată pe TRAIN (2013-06 → 2019-01), cont standard:
+
+| Strategie / univers | ieșire `base` | ieșire `profit_lock` | Efect |
+|---|---|---|---|
+| breakout-v1 H1, XAUUSD | n 513, **+0,070 R**, PF 1,16 | n 516, **+0,036 R**, PF 1,08 | **−0,034 R** — taie câștigătorii mari (2017: +0,29 → +0,26; 2014: +0,07 → +0,02) |
+| breakout-v1 H1, EURUSD | n 626, −0,023 R, PF 0,95 | n 633, −0,036 R, PF 0,92 | −0,013 R |
+| trend-v1 H1, 12 instrumente | n 8 933, −0,061 R, PF 0,85 | n 9 328, −0,058 R, PF 0,85 | +0,004 R (nesemnificativ) |
+
+Concluzie: blocarea rapidă a profitului **scade** expectanța acolo unde există câștigători mari (aur) și nu salvează o strategie pierzătoare. Face exact ce promite — mai multe închideri mici pe plus, mai puține pierderi complete — dar prețul este că retrage poziția înainte de mișcările mari, care sunt singura sursă de profit a strategiilor de breakout/trend. Rămâne disponibilă (implicit oprită); dacă se folosește, parametrii trebuie testați în backtest (`--exit profit_lock --exit-params '{"profit_lock_activate_r": 1.0, "profit_lock_gap_r": 0.5}'`), nu aleși după intuiție.

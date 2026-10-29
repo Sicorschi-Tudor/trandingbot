@@ -29,7 +29,8 @@ Fișierul `.env` există deja. `ADMIN_TOKEN` și `MT5_BRIDGE_KEY` sunt deja gene
 | `TELEGRAM_BOT_TOKEN` | (opțional) tokenul botului existent |
 | `TELEGRAM_CHAT_ID` | (opțional) ID-ul grupului |
 | `TELEGRAM_ENABLED` | `true` după ce ai pus token + chat_id |
-| `ACTIVE_SYMBOLS` | simbolurile exacte ale brokerului, ex. `EURUSD` sau `EURUSD.a,GBPUSD.a` |
+| `PROFILE` | `gold` = botul lucrează **doar pe aur (XAUUSD)**: grafic, analiză, tranzacții (mai multe poziții), istoric extins, AI în umbră — vezi [docs/PROFIL_AUR.md](docs/PROFIL_AUR.md) |
+| `ACTIVE_SYMBOLS` | simbolurile exacte ale brokerului, ex. `XAUUSD` sau `EURUSD.a,GBPUSD.a` (ignorat când `PROFILE=gold`) |
 | `SESSION_START` / `SESSION_END` | fereastra de 4 ore (ora Chișinău), implicit 09:00–13:00 |
 
 Nu trimite niciodată cheile în chat.

@@ -2,7 +2,15 @@
 
 Cum pornești botul pe aur, pe contul DEMO, cu mai multe poziții permise pe același instrument — și ce înseamnă fiecare setare. Valorile de mai jos se pun în `.env` (apoi repornești serverul) sau, cele de risc, din pagina *Control & Risc*.
 
-## 0. Configurația cerută: „tranzacționează doar aur, restul doar informație”
+## 0. Cel mai simplu: o singură linie în `.env`
+
+```
+PROFILE=gold
+```
+
+Apoi repornești serverul (`./run.sh`). Profilul **gold** setează automat tot ce urmează mai jos: doar XAUUSD (grafic, analiză, tranzacții), 3 poziții pe aur la niveluri diferite, istoric extins din MT5, AI trader în umbră, spread/SL/lot potrivite pentru aur — și **ignoră lista de simboluri salvată anterior din dashboard** (motivul pentru care, fără profil, aurul nu apărea și botul lucra pe EURUSD). Totul rămâne pe DEMO cu execuția dezarmată până o armezi tu din *Control & Risc*.
+
+## 0b. Aceeași configurație, scrisă manual (dacă nu vrei profilul)
 
 ```
 ACTIVE_SYMBOLS=EURUSD,GBPUSD,USDJPY,XAUUSD   # toate sunt cotate și analizate (context, etichete în umbră)
@@ -61,6 +69,17 @@ Regula implementată (`app/strategy.py: pyramid_blocker`, verificată și de Ris
 - toate celelalte verificări rămân (risc total deschis, număr maxim de poziții, limite zilnice, spread, știri).
 
 Ce **nu** face regula: nu creează avantaj. A doua poziție pe aur e același pariu ca prima (corelație 1). Dacă strategia are expectanță negativă, pierzi de două ori mai repede; dacă are expectanță pozitivă, câștigi de două ori mai repede cu drawdown de două ori mai mare. De aceea valoarea implicită rămâne 1 și de aceea o pornești doar pe DEMO.
+
+## 3b. Urmărirea fiecărei tranzacții: trailing cu blocare de profit
+
+```
+PROFIT_LOCK_ENABLED=true
+PROFIT_LOCK_ACTIVATE_R=0.67   # se armează la +0,67 R (cu risc 1,50 USD = +1,00 USD)
+PROFIT_LOCK_GAP_R=0.33        # SL la 0,33 R în urma prețului (0,50 USD)
+PROFIT_LOCK_STEP_R=0.1        # se mută doar în pași ≥ 0,1 R (fără MODIFY la fiecare tick)
+```
+
+Exact regula cerută: poziție cu SL inițial la −1,50 USD; prețul coboară puțin, apoi urcă la +1,00 → SL mutat la **+0,50**; prețul mai urcă 0,30 → SL la **+0,80**; dacă prețul cade brusc, poziția se închide la +0,80. SL-ul **nu coboară niciodată**. O face gestionarul de poziții, determinist, **la fiecare secundă**, pentru toate pozițiile botului, pe orice strategie — nu depinde de un apel AI (AI trader-ul poate, în plus, să strângă SL-ul când vede un motiv pe grafic). Aceeași regulă există în backtest (`--exit profit_lock`), ca să-i măsurăm efectul; rezultatele sunt în `docs/research/STAGE_G_GOLD.md` §Profit lock.
 
 ## 4. Ce strategie rulează pe aur
 

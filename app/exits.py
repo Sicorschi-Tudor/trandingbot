@@ -45,7 +45,8 @@ from dataclasses import dataclass, field
 
 from .labeler import be_lock_level
 
-MODES = ("base", "trailing", "partial", "invalidation", "stall", "giveback", "channel", "signal_flip", "rescue", "combo")
+MODES = ("base", "trailing", "partial", "invalidation", "stall", "giveback", "channel", "signal_flip", "rescue", "profit_lock",
+         "combo")
 DEFAULT_PARAMS: dict[str, dict] = {
     "base": {},
     "trailing": {"trail_start_r": 1.0, "trail_atr_mult": 1.5, "trail_min_r": 0.5},
@@ -57,6 +58,8 @@ DEFAULT_PARAMS: dict[str, dict] = {
     "signal_flip": {"flip_on_flat": 0},
     # long time under water, then exit at the first small profit
     "rescue": {"rescue_minutes": 30, "rescue_mae_r": 0.5, "rescue_neg_frac": 0.6, "rescue_close_r": 0.05},
+    # profit-lock trailing (live position_manager.profit_lock_sl): SL = close ∓ gap×R once r ≥ activate, ratchet by step
+    "profit_lock": {"profit_lock_activate_r": 0.67, "profit_lock_gap_r": 0.33, "profit_lock_step_r": 0.1},
     "combo": {"modes": ["trailing", "stall"]},
 }
 AT_CLOSE_REASONS = ("INVALIDATION", "STALL", "GIVEBACK", "CHANNEL", "FLIP")  # exits at the bar close (time = bar end)
@@ -204,6 +207,25 @@ RESCUE_KEYS = ("rescue_minutes", "rescue_mae_r", "rescue_neg_frac", "rescue_clos
 LIVE_RESCUE_DEFAULTS = {"rescue_minutes": 30, "rescue_mae_r": 0.3, "rescue_neg_frac": 0.6, "rescue_close_r": 0.1}
 
 
+PROFIT_LOCK_KEYS = ("profit_lock_activate_r", "profit_lock_gap_r", "profit_lock_step_r")
+
+
+def with_profit_lock(policy: "ExitPolicy | None", strat: dict | None) -> "ExitPolicy":
+    """`policy` plus the live profit-lock trailing when the strategy settings have profit_lock_enabled (same
+    composition rules as with_rescue)."""
+    policy = ExitPolicy.from_spec(policy)
+    strat = strat or {}
+    if not strat.get("profit_lock_enabled") or "profit_lock" in policy.modes:
+        return policy
+    pp = {k: (strat[k] if strat.get(k) is not None else DEFAULT_PARAMS["profit_lock"][k]) for k in PROFIT_LOCK_KEYS}
+    if policy.is_base:
+        return ExitPolicy("profit_lock", {**policy.p, **pp})
+    params = {k: v for k, v in policy.p.items()}
+    params.update(pp)
+    params["modes"] = list(policy.modes) + ["profit_lock"]
+    return ExitPolicy("combo", params)
+
+
 def with_rescue(policy: "ExitPolicy | None", strat: dict | None) -> "ExitPolicy":
     """`policy` plus the live RESCUE exit when the strategy settings have rescue_enabled (strategy rescue_* keys,
     LIVE_RESCUE_DEFAULTS for missing ones). base -> mode 'rescue'; another mode -> combo [mode, rescue]; a combo gets
@@ -338,6 +360,12 @@ def step(pos, bar: dict, spread_px: float) -> tuple[str, float] | None:
         d = xs["bias_fn"](bar)
         if d is not None and (d * sg < 0 or (d == 0 and p["flip_on_flat"] > 0)):
             return "FLIP", cpx
+    if "profit_lock" in modes and r_dist > 0 and r_now >= p["profit_lock_activate_r"]:
+        new_sl = cpx - sg * p["profit_lock_gap_r"] * r_dist
+        step = max(p["profit_lock_step_r"] * r_dist, 2 * pos.point)
+        if (new_sl - pos.sl) * sg >= step - pos.point / 2 and (cpx - new_sl) * sg >= max(spread_px, pos.stops_px) + pos.point:
+            pos.sl = new_sl
+            xs["trailed"] = True
     if "trailing" in modes and r_dist > 0:
         best = xs["best"]
         if best is None or (cpx - best) * sg > 0:
@@ -351,5 +379,5 @@ def step(pos, bar: dict, spread_px: float) -> tuple[str, float] | None:
     return None
 
 
-__all__ = ["ExitPolicy", "IncIndicators", "attach", "step", "with_rescue", "RESCUE_KEYS", "LIVE_RESCUE_DEFAULTS", "MODES", "DEFAULT_PARAMS", "AT_CLOSE_REASONS",
+__all__ = ["ExitPolicy", "IncIndicators", "attach", "step", "with_rescue", "with_profit_lock", "PROFIT_LOCK_KEYS", "RESCUE_KEYS", "LIVE_RESCUE_DEFAULTS", "MODES", "DEFAULT_PARAMS", "AT_CLOSE_REASONS",
            "WARMUP_BARS", "HOLD_KEYS", "MAX_HOLD_MINUTES"]
