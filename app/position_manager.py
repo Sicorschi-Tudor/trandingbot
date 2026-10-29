@@ -114,7 +114,8 @@ def plan(pos: dict, info: dict, cfg: dict, now_ts: float, session_open: bool,
 
     best: tuple[float, str] | None = None
     be_r = float(cfg.get("break_even_at_r") or 0)
-    if be_r > 0 and risk_dist > 0 and profit_dist >= be_r * risk_dist - point / 2:
+    be_done = bool(sl) and (sl - open_px) * sign >= 0  # SL already at/above entry: break-even applied once
+    if be_r > 0 and risk_dist > 0 and not be_done and profit_dist >= be_r * risk_dist - point / 2:
         lock = be_lock_distance(float(cfg.get("be_lock_r") or 0), spread, risk_dist, point)
         be_sl = round(open_px + sign * lock, digits)
         if improves(be_sl) and valid(be_sl):

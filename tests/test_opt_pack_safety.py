@@ -57,7 +57,7 @@ def test_rescue_close_backing_off_must_not_block_break_even(eng, monkeypatch):
     assert mods == ["BREAK_EVEN"]  # ...so the break-even must still go out
 
 
-def test_be_lock_only_tightens_and_ratchets_with_spread():
+def test_be_lock_only_tightens_and_is_applied_once():
     now = time.time()
     cfg = {"break_even_at_r": 1.0, "be_lock_r": 0.1}
     pos = {"side": "SELL", "price_open": 1.08000, "sl": 1.08060, "tp": 1.07700, "opened_ts": now}
@@ -67,9 +67,8 @@ def test_be_lock_only_tightens_and_ratchets_with_spread():
     # same spread: no new MODIFY; a narrower spread never loosens
     assert plan(pos, quote(bid=1.07920, spread_pts=10, now=now), cfg, now, True, 1.08060) == []
     assert plan(pos, quote(bid=1.07920, spread_pts=2, now=now), cfg, now, True, 1.08060) == []
-    # a wider spread re-tightens (one MODIFY per throttle while the spread keeps widening)
-    b = plan(pos, quote(bid=1.07910, spread_pts=20, now=now), cfg, now, True, 1.08060)
-    assert b and b[0]["sl"] == pytest.approx(1.07977)
+    # break-even is applied once: a wider spread later must not trigger MODIFY after MODIFY
+    assert plan(pos, quote(bid=1.07910, spread_pts=20, now=now), cfg, now, True, 1.08060) == []
 
 
 def _insert(e, key, mode, net, minutes_ago, now, ticket=None):

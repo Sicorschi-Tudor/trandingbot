@@ -54,3 +54,15 @@ def test_live_rescue_counts_swap():
     assert rescue_close(pos, info, cfg, 9000, 0.56326, state) is None
     pos["swap"] = 0.0
     assert rescue_close(pos, info, cfg, 9000, 0.56326, state) == {"type": "CLOSE", "reason": "RESCUE"}
+
+
+def test_break_even_applied_only_once():
+    from app.position_manager import plan
+    cfg = {"break_even_at_r": 1.0, "be_lock_r": 0.1}
+    pos = {"side": "BUY", "price_open": 111.348, "sl": 111.288, "tp": 111.463, "opened_ts": 0}
+    info = {"bid": 111.420, "ask": 111.423, "point": 0.001, "digits": 3}
+    first = plan(pos, info, cfg, 60, True, initial_sl=111.288)
+    assert first and first[0]["reason"] == "BREAK_EVEN"
+    pos["sl"] = first[0]["sl"]
+    info.update(bid=111.425, ask=111.431)  # spread widened: the lock target moves but BE must not repeat
+    assert plan(pos, info, cfg, 70, True, initial_sl=111.288) == []
