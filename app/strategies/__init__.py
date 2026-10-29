@@ -43,7 +43,7 @@ def forward_names() -> list[str]:
 def get(name: str | None) -> ModuleType:
     key = name or DEFAULT
     mod = _REGISTRY.get(key) or _RESEARCH.get(key) or _FORWARD.get(key)
-    if mod is None and str(key).startswith("disc-"):  # discovery research plugins (app/strategies/discovery)
+    if mod is None and str(key).startswith(("disc-", "pat-", "filt-")):  # research plugins (app/strategies/discovery)
         from .discovery import get_discovery
         try:
             mod = get_discovery(key)
