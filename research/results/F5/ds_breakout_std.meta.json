@@ -1,0 +1,31 @@
+{
+ "base": "breakout-v1",
+ "db": "data/research.db",
+ "out": "research/results/F5/ds_breakout_std.joblib",
+ "elapsed_s": 99.9,
+ "n_entry": 9072,
+ "n_exit": 34156,
+ "n_trades": 6553,
+ "exit_dropped": {
+  "no_decision": 0,
+  "path_mismatch": 0,
+  "no_bar": 0
+ },
+ "dataset_version": "ds-f1a554885aac",
+ "exit_policy": {
+  "mode": "base",
+  "params": {
+   "max_hold_hours": 24.0
+  }
+ },
+ "cost": {
+  "mode": "stats",
+  "fixed_spread_pts": null,
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0,
+  "per_symbol_spread_pts": {}
+ },
+ "n_entry_train": 6778,
+ "n_entry_valid": 2294,
+ "n_exit_rows_train": 26017
+}

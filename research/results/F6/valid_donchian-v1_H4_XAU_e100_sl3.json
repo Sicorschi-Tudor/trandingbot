@@ -1,0 +1,102 @@
+{
+ "strategy": "donchian-v1",
+ "tf": "H4",
+ "htf": "NONE",
+ "split": "valid",
+ "db": "data/research.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "entry_n": 100,
+  "sl_atr": 3.0
+ },
+ "risk_params": {
+  "max_open_positions": 12,
+  "max_trades_per_day": 50,
+  "max_same_currency_direction": 4,
+  "max_spread_points": 100,
+  "rollover_blackout_minutes": 0,
+  "cooldown_after_loss_minutes": 0,
+  "max_consecutive_losses": 1000,
+  "max_total_open_risk_pct": 100,
+  "max_daily_loss_pct": 100
+ },
+ "exit": null,
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0,
+  "swap_mode": "table"
+ },
+ "elapsed_s": 0.6,
+ "summary": {
+  "trades": 32,
+  "win_rate": 0.375,
+  "avg_r": 0.2113,
+  "expectancy_r": 0.2113,
+  "profit_factor": 1.415,
+  "max_dd_r": 4.803,
+  "max_consec_losses": 5,
+  "net_r": 6.762,
+  "net_usd": 188.48,
+  "ci90_avg_r": [
+   -0.3117,
+   0.794
+  ],
+  "swap_r": -0.704,
+  "swap_usd": -14.39,
+  "swap_days": 277,
+  "sample_days": 729.7
+ },
+ "by_year": {
+  "2019": {
+   "n": 17,
+   "avg_r": -0.2124,
+   "sum_r": -3.61
+  },
+  "2020": {
+   "n": 15,
+   "avg_r": 0.6916,
+   "sum_r": 10.37
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 32,
+   "win_rate": 0.375,
+   "avg_r": 0.2113,
+   "expectancy_r": 0.2113,
+   "profit_factor": 1.415,
+   "max_dd_r": 4.803,
+   "max_consec_losses": 5,
+   "net_r": 6.762,
+   "net_usd": 188.48
+  }
+ },
+ "by_outcome": {
+  "CHANNEL": 17,
+  "SL": 12,
+  "TP": 2,
+  "END": 1
+ },
+ "counts": {
+  "blocked_market": 0,
+  "blocked_context": {
+   "Exist\u0103": 118
+  },
+  "signals": 32,
+  "risk_rejected": {},
+  "filled": 32,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 1,
+  "analyses": 3087,
+  "candidates": 150
+ },
+ "warnings": [
+  "1 pozi\u021bii \u00eenchise for\u021bat la sf\u00e2r\u0219itul datelor (END).",
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate.",
+  "Swap estimat (tabel implicit -5/-5 puncte/zi long/short) pentru XAUUSD \u2014 trimite cost.swap_pts_per_day pentru valorile brokerului."
+ ]
+}

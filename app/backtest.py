@@ -284,6 +284,7 @@ def resolve(db, params: dict) -> dict:
             "workers": params.get("workers"), "strategy_name": strategy_name,
             "strategy_version": getattr(plugin, "VERSION", None) if plugin is not None else strategy.STRATEGY_VERSION,
             "exit": exit_policy, "live_rescue": live_rescue, "record_paths": bool(params.get("record_paths")),
+            "all_trades": bool(params.get("all_trades")),
             "paths_out": params.get("paths_out"), "max_hold_s": max_hold_s}
 
 
@@ -411,7 +412,9 @@ def scan_symbol(job: dict) -> dict:
         b = sig[i]
         T = b["t"] + sec
         k = bisect.bisect_right(htf_close, T)
-        sp_pts = spreads[i]
+        # decision at the bar CLOSE: the live bot reads the spread of that instant = the hour the NEXT bar opens in;
+        # spreads[i] is the decision bar's own (opening-hour / in-bar) spread — stale by one bar on stats/fixed series
+        sp_pts = spreads[i + 1] if job.get("decision_spread_next") and i + 1 < len(spreads) else spreads[i]
         quote = {"bid": b["c"], "ask": round(b["c"] + sp_pts * point, digits + 3), "spread_points": sp_pts,
                  "digits": digits, "point": point, "stops_level": stops_level}
         ctx = strategy.AnalysisContext(session_open=True, has_bot_position=False, signals_this_session=0,
@@ -692,7 +695,8 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
         p1_strat = {k: v for k, v in strat.items() if k not in PHASE2_STRATEGY_KEYS}
         p1_rsk = {k: v for k, v in rsk.items() if k not in PHASE2_RISK_KEYS}
         scan_key = ("scan", cfg["strategy_name"], _digest([p1_strat, p1_rsk, cfg["symbols"], start, end, tf, htf_tf,
-                                                           cfg["schedule"], cfg["tz"], specs, spreads]), data_key)
+                                                           cfg["schedule"], cfg["tz"], specs, spreads,
+                                                           cost["mode"] != "bar"]), data_key)
     hit = cache.get(scan_key) if scan_key is not None else None
     workers = cfg["workers"]
     if hit is not None:
@@ -715,12 +719,13 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
             htf_close = [b["t"] + hsec for b in htfs[sym]]
             for c0 in range(0, len(idx), CHUNK):
                 part = idx[c0:c0 + CHUNK]
-                lo, hi = max(0, part[0] - SIG_WINDOW + 1), part[-1] + 1
+                lo, hi = max(0, part[0] - SIG_WINDOW + 1), min(len(bars), part[-1] + 2)  # +1 bar: decision-time spread
                 k_lo = max(0, bisect.bisect_right(htf_close, bars[part[0]]["t"] + sec) - HTF_WINDOW)
                 k_hi = bisect.bisect_right(htf_close, bars[part[-1]]["t"] + sec)
                 jobs.append({"symbol": sym, "strategy": strat, "risk": rsk, "point": sp["point"],
                              "digits": sp["digits"], "stops_level": sp["stops_level"], "offset": lo,
                              "spreads": spreads[sym][lo:hi], "idx": [i - lo for i in part],
+                             "decision_spread_next": cost["mode"] != "bar",
                              "strategy_name": cfg["strategy_name"],
                              "sig": [(b["t"], b["o"], b["h"], b["l"], b["c"]) for b in bars[lo:hi]],
                              "htf": [(b["t"], b["o"], b["h"], b["l"], b["c"]) for b in htfs[sym][k_lo:k_hi]]})
@@ -803,7 +808,7 @@ def run_cached(db, params: dict, cache: dict | None, progress=None) -> dict:
         by_exit[t["outcome"]] = by_exit.get(t["outcome"], 0) + 1
     return {
         "summary": summary, "by_symbol": by_symbol, "by_hour": by_hour, "equity_r": curve,
-        "trades": ordered[-MAX_TRADES_OUT:], "warnings": warnings, "counts": counts,
+        "trades": ordered if cfg.get("all_trades") else ordered[-MAX_TRADES_OUT:], "warnings": warnings, "counts": counts,
         "final_equity": round(res["equity"], 2), "by_outcome": by_exit,
         "params": {"symbols": cfg["symbols"], "start_utc": iso(start), "end_utc": iso(end), "signal_tf": tf,
                    "htf_tf": htf_tf, "cost": cost, "session": cfg["schedule"], "initial_equity": cfg["initial_equity"],

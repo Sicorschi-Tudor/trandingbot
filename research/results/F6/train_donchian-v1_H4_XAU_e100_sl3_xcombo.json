@@ -1,0 +1,135 @@
+{
+ "strategy": "donchian-v1",
+ "tf": "H4",
+ "htf": "NONE",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "XAUUSD"
+ ],
+ "strategy_params": {
+  "entry_n": 100,
+  "sl_atr": 3.0
+ },
+ "risk_params": {
+  "max_open_positions": 12,
+  "max_trades_per_day": 50,
+  "max_same_currency_direction": 4,
+  "max_spread_points": 100,
+  "rollover_blackout_minutes": 0,
+  "cooldown_after_loss_minutes": 0,
+  "max_consecutive_losses": 1000,
+  "max_total_open_risk_pct": 100,
+  "max_daily_loss_pct": 100
+ },
+ "exit": {
+  "mode": "combo",
+  "params": {
+   "modes": [
+    "channel",
+    "trailing"
+   ],
+   "channel_n": 20,
+   "trail_start_r": 2.0,
+   "trail_atr_mult": 2.0,
+   "trail_min_r": 0.0
+  }
+ },
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0,
+  "swap_mode": "table"
+ },
+ "elapsed_s": 2.1,
+ "summary": {
+  "trades": 98,
+  "win_rate": 0.4082,
+  "avg_r": 0.1736,
+  "expectancy_r": 0.1736,
+  "profit_factor": 1.386,
+  "max_dd_r": 6.022,
+  "max_consec_losses": 5,
+  "net_r": 17.016,
+  "net_usd": 223.63,
+  "ci90_avg_r": [
+   -0.0424,
+   0.4072
+  ],
+  "swap_r": -2.254,
+  "swap_usd": -39.52,
+  "swap_days": 787,
+  "sample_days": 2037.9
+ },
+ "by_year": {
+  "2013": {
+   "n": 11,
+   "avg_r": -0.0625,
+   "sum_r": -0.69
+  },
+  "2014": {
+   "n": 18,
+   "avg_r": 0.2956,
+   "sum_r": 5.32
+  },
+  "2015": {
+   "n": 18,
+   "avg_r": 0.2493,
+   "sum_r": 4.49
+  },
+  "2016": {
+   "n": 15,
+   "avg_r": 0.1798,
+   "sum_r": 2.7
+  },
+  "2017": {
+   "n": 20,
+   "avg_r": 0.0433,
+   "sum_r": 0.87
+  },
+  "2018": {
+   "n": 16,
+   "avg_r": 0.2707,
+   "sum_r": 4.33
+  }
+ },
+ "by_symbol": {
+  "XAUUSD": {
+   "trades": 98,
+   "win_rate": 0.4082,
+   "avg_r": 0.1736,
+   "expectancy_r": 0.1736,
+   "profit_factor": 1.386,
+   "max_dd_r": 6.022,
+   "max_consec_losses": 5,
+   "net_r": 17.016,
+   "net_usd": 223.63
+  }
+ },
+ "by_outcome": {
+  "TRAIL": 24,
+  "CHANNEL": 38,
+  "SL": 34,
+  "TP": 1,
+  "END": 1
+ },
+ "counts": {
+  "blocked_market": 0,
+  "blocked_context": {
+   "Exist\u0103": 316
+  },
+  "signals": 98,
+  "risk_rejected": {},
+  "filled": 98,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 1,
+  "analyses": 8588,
+  "candidates": 414
+ },
+ "warnings": [
+  "1 pozi\u021bii \u00eenchise for\u021bat la sf\u00e2r\u0219itul datelor (END).",
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate.",
+  "Swap estimat (tabel implicit -5/-5 puncte/zi long/short) pentru XAUUSD \u2014 trimite cost.swap_pts_per_day pentru valorile brokerului."
+ ]
+}

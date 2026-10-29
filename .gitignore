@@ -10,3 +10,9 @@ __pycache__/
 *.db
 *.db-*
 .impeccable/
+
+# research artifacts: datasets and model bundles (large binaries); JSON/MD results are kept
+research/results/**/*.joblib
+research/results/**/*.out
+research/results/**/*.err
+research/results/**/*.log

@@ -1,0 +1,217 @@
+{
+ "strategy": "disc-H01",
+ "tf": "H1",
+ "htf": "D1",
+ "split": "train",
+ "db": "data/research.db",
+ "symbols": [
+  "AUDJPY",
+  "AUDUSD",
+  "EURCHF",
+  "EURGBP",
+  "EURJPY",
+  "EURUSD",
+  "GBPJPY",
+  "GBPUSD",
+  "USDCAD",
+  "USDCHF",
+  "USDJPY",
+  "XAUUSD"
+ ],
+ "strategy_params": {},
+ "risk_params": {
+  "max_open_positions": 6,
+  "max_trades_per_day": 30,
+  "max_same_currency_direction": 3
+ },
+ "exit": null,
+ "cost": {
+  "mode": "stats",
+  "commission_per_lot_usd": 7.0,
+  "slippage_pts": 1.0
+ },
+ "elapsed_s": 10.2,
+ "summary": {
+  "trades": 769,
+  "win_rate": 0.4616,
+  "avg_r": -0.173,
+  "expectancy_r": -0.173,
+  "profit_factor": 0.668,
+  "max_dd_r": 135.886,
+  "max_consec_losses": 13,
+  "net_r": -133.067,
+  "net_usd": -2667.55,
+  "ci90_avg_r": [
+   -0.2342,
+   -0.1153
+  ],
+  "swap_r": 0.0,
+  "swap_usd": 0.0,
+  "swap_days": 0,
+  "sample_days": 2038.0
+ },
+ "by_year": {
+  "2016": {
+   "n": 40,
+   "avg_r": 0.2495,
+   "sum_r": 9.98
+  },
+  "2017": {
+   "n": 134,
+   "avg_r": -0.2968,
+   "sum_r": -39.78
+  },
+  "2018": {
+   "n": 126,
+   "avg_r": -0.2406,
+   "sum_r": -30.31
+  }
+ },
+ "by_symbol": {
+  "AUDJPY": {
+   "trades": 192,
+   "win_rate": 0.4167,
+   "avg_r": -0.2216,
+   "expectancy_r": -0.2216,
+   "profit_factor": 0.605,
+   "max_dd_r": 44.435,
+   "max_consec_losses": 11,
+   "net_r": -42.543,
+   "net_usd": -829.8
+  },
+  "AUDUSD": {
+   "trades": 158,
+   "win_rate": 0.3987,
+   "avg_r": -0.2245,
+   "expectancy_r": -0.2245,
+   "profit_factor": 0.604,
+   "max_dd_r": 36.819,
+   "max_consec_losses": 13,
+   "net_r": -35.475,
+   "net_usd": -718.88
+  },
+  "EURCHF": {
+   "trades": 16,
+   "win_rate": 0.625,
+   "avg_r": 0.005,
+   "expectancy_r": 0.005,
+   "profit_factor": 1.015,
+   "max_dd_r": 2.365,
+   "max_consec_losses": 1,
+   "net_r": 0.08,
+   "net_usd": 4.31
+  },
+  "EURGBP": {
+   "trades": 21,
+   "win_rate": 0.5714,
+   "avg_r": -0.0173,
+   "expectancy_r": -0.0173,
+   "profit_factor": 0.958,
+   "max_dd_r": 4.536,
+   "max_consec_losses": 4,
+   "net_r": -0.364,
+   "net_usd": -14.44
+  },
+  "EURJPY": {
+   "trades": 95,
+   "win_rate": 0.5474,
+   "avg_r": 0.0014,
+   "expectancy_r": 0.0014,
+   "profit_factor": 1.003,
+   "max_dd_r": 8.501,
+   "max_consec_losses": 3,
+   "net_r": 0.136,
+   "net_usd": 23.0
+  },
+  "EURUSD": {
+   "trades": 30,
+   "win_rate": 0.3,
+   "avg_r": -0.539,
+   "expectancy_r": -0.539,
+   "profit_factor": 0.245,
+   "max_dd_r": 16.169,
+   "max_consec_losses": 6,
+   "net_r": -16.169,
+   "net_usd": -339.87
+  },
+  "GBPUSD": {
+   "trades": 29,
+   "win_rate": 0.5172,
+   "avg_r": -0.083,
+   "expectancy_r": -0.083,
+   "profit_factor": 0.835,
+   "max_dd_r": 5.447,
+   "max_consec_losses": 3,
+   "net_r": -2.407,
+   "net_usd": -41.36
+  },
+  "USDCAD": {
+   "trades": 21,
+   "win_rate": 0.4286,
+   "avg_r": -0.4015,
+   "expectancy_r": -0.4015,
+   "profit_factor": 0.331,
+   "max_dd_r": 8.431,
+   "max_consec_losses": 3,
+   "net_r": -8.431,
+   "net_usd": -179.3
+  },
+  "USDCHF": {
+   "trades": 27,
+   "win_rate": 0.5185,
+   "avg_r": -0.252,
+   "expectancy_r": -0.252,
+   "profit_factor": 0.466,
+   "max_dd_r": 8.441,
+   "max_consec_losses": 2,
+   "net_r": -6.803,
+   "net_usd": -139.19
+  },
+  "USDJPY": {
+   "trades": 112,
+   "win_rate": 0.4643,
+   "avg_r": -0.1967,
+   "expectancy_r": -0.1967,
+   "profit_factor": 0.609,
+   "max_dd_r": 24.036,
+   "max_consec_losses": 9,
+   "net_r": -22.027,
+   "net_usd": -448.17
+  },
+  "XAUUSD": {
+   "trades": 68,
+   "win_rate": 0.5735,
+   "avg_r": 0.0138,
+   "expectancy_r": 0.0138,
+   "profit_factor": 1.032,
+   "max_dd_r": 10.313,
+   "max_consec_losses": 4,
+   "net_r": 0.936,
+   "net_usd": 16.15
+  }
+ },
+ "by_outcome": {
+  "TP": 312,
+  "SL": 365,
+  "TIME": 92
+ },
+ "counts": {
+  "blocked_market": 194,
+  "blocked_context": {
+   "Expunere": 12
+  },
+  "signals": 769,
+  "risk_rejected": {},
+  "filled": 769,
+  "skipped_gap": 0,
+  "expired_unfilled": 0,
+  "closed_at_end": 0,
+  "analyses": 412705,
+  "candidates": 975
+ },
+ "warnings": [
+  "Drawdown 3% atins la 2014-01-15T08:00:00Z \u2014 \u00een live intr\u0103rile s-ar fi oprit (backtestul continu\u0103; halt_on_drawdown=true pentru oprire).",
+  "F\u0103r\u0103 calendar economic \u00een backtest: bloc\u0103rile pe \u0219tiri nu sunt simulate.",
+  "Swap estimat (tabel implicit -5/-5 puncte/zi long/short) pentru AUDJPY, AUDUSD, EURCHF, EURGBP, EURJPY, EURUSD, GBPJPY, GBPUSD, USDCAD, USDCHF, USDJPY, XAUUSD \u2014 trimite cost.swap_pts_per_day pentru valorile brokerului."
+ ]
+}
