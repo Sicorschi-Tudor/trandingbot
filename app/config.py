@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     SESSION_END: str = "13:00"
     SESSION_DAYS: str = "MON,TUE,WED,THU,FRI"
     ACTIVE_SYMBOLS: str = "EURUSD"
+    # symbols the bot may TRADE (subset of ACTIVE_SYMBOLS; empty = all). The others are still quoted, analysed and
+    # shadow-labelled (context for Claude / ML), but never get a signal or an order.
+    TRADE_SYMBOLS: str = ""
     SIGNAL_TIMEFRAME: str = "M5"
     HTF_TIMEFRAME: str = "H1"
     CHART_TIMEFRAMES: str = "M1,M5,M15,H1"
@@ -72,6 +75,8 @@ class Settings(BaseSettings):
     # least PYRAMID_MIN_R in open profit (R = initial risk); an in-flight OPEN blocks adding. MAX_OPEN_POSITIONS still caps.
     MAX_POSITIONS_PER_SYMBOL: int = 1
     PYRAMID_MIN_R: float = 0.5
+    # a further position on the symbol must be at least this many ATR(14) away from every open entry on it (0 = off)
+    PYRAMID_MIN_DISTANCE_ATR: float = 1.0
     ATR_SL_MULT: float = 1.5
     ATR_TP_MULT: float = 2.5
     MIN_SL_POINTS: int = 60
@@ -103,6 +108,16 @@ class Settings(BaseSettings):
     # Analysis only — it never changes settings, levels or orders.
     CLAUDE_TRADE_REVIEW_ENABLED: bool = True
     CLAUDE_DAILY_REVIEW_ENABLED: bool = True
+    # AI trader: Claude reads the chart on every closed bar of AI_TRADER_TIMEFRAME and decides entry / SL / TP / hold,
+    # then manages open bot positions (HOLD / TIGHTEN_SL / CLOSE). Modes: off | shadow (decisions are only recorded and
+    # labelled with what would have happened) | live (shadow + executed through the normal signal pipeline and Risk
+    # Engine). Defaults are the safe ones; the dashboard can switch modes (settings key 'ai_trader').
+    AI_TRADER_ENTRY_MODE: str = "off"
+    AI_TRADER_MANAGE_MODE: str = "off"
+    AI_TRADER_TIMEFRAME: str = "M15"
+    AI_TRADER_SYMBOLS: str = ""  # empty = ACTIVE_SYMBOLS
+    AI_TRADER_MANAGE_EVERY_MIN: int = 15
+    AI_TRADER_MAX_CALLS_PER_DAY: int = 300
     TELEGRAM_ENABLED: bool = False
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
@@ -181,6 +196,7 @@ class Settings(BaseSettings):
             "rollover_blackout_minutes": self.ROLLOVER_BLACKOUT_MINUTES,
             "max_positions_per_symbol": self.MAX_POSITIONS_PER_SYMBOL,
             "pyramid_min_r": self.PYRAMID_MIN_R,
+            "pyramid_min_distance_atr": self.PYRAMID_MIN_DISTANCE_ATR,
         }
 
     def default_schedule(self) -> dict:
@@ -197,6 +213,7 @@ class Settings(BaseSettings):
             "signal_timeframe": self.SIGNAL_TIMEFRAME.upper(),
             "htf_timeframe": self.HTF_TIMEFRAME.upper(),
             "symbols": split_csv(self.ACTIVE_SYMBOLS),
+            "trade_symbols": [s for s in split_csv(self.TRADE_SYMBOLS) if s in split_csv(self.ACTIVE_SYMBOLS)],
             "atr_sl_mult": self.ATR_SL_MULT,
             "atr_tp_mult": self.ATR_TP_MULT,
             "min_sl_points": self.MIN_SL_POINTS,

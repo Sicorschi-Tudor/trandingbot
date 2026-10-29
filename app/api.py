@@ -72,6 +72,7 @@ RISK_RULES: dict[str, tuple[type, float, float]] = {
     "rollover_blackout_minutes": (int, 0, 240),
     "max_positions_per_symbol": (int, 1, 10),
     "pyramid_min_r": (float, 0, 20),
+    "pyramid_min_distance_atr": (float, 0, 20),
 }
 STRATEGY_NUM: dict[str, tuple[type, float, float]] = {
     "atr_sl_mult": (float, 0.1, 20),
@@ -149,9 +150,26 @@ def validate_strategy_update(body: dict, current: dict) -> dict:
                 if s not in syms:
                     syms.append(s)
             out[k] = syms
+        elif k == "trade_symbols":
+            if isinstance(v, str):
+                v = [x for x in v.split(",") if x.strip()]
+            if v is None:
+                v = []
+            if not isinstance(v, list) or len(v) > 20:
+                raise HTTPException(status_code=422, detail="trade_symbols: listă cu 0–20 simboluri (gol = toate)")
+            out[k] = []
+            for s in v:
+                s = str(s).strip().upper()
+                if not SYMBOL_RE.match(s):
+                    raise HTTPException(status_code=422, detail=f"simbol invalid: {s}")
+                if s not in out[k]:
+                    out[k].append(s)
         else:
             raise HTTPException(status_code=422, detail=f"Cheie necunoscută: {k}")
     merged = {**current, **out}
+    bad = [s for s in merged.get("trade_symbols") or [] if s not in merged.get("symbols", [])]
+    if bad:
+        raise HTTPException(status_code=422, detail=f"trade_symbols trebuie să fie din symbols: {', '.join(bad)}")
     if TF_SECONDS[merged["htf_timeframe"]] <= TF_SECONDS[merged["signal_timeframe"]]:
         raise HTTPException(status_code=422, detail="htf_timeframe trebuie să fie mai mare decât signal_timeframe")
     return out
@@ -733,6 +751,59 @@ def _ml(request: Request):
     if ml is None:
         raise HTTPException(status_code=503, detail="Modulul ML nu este inițializat")
     return ml
+
+
+# ---- AI trader (shadow by default) -----------------------------------------
+@router.get("/ai-trader")
+def get_ai_trader(request: Request, limit: int = Query(50, ge=1, le=500), kind: str | None = Query(None),
+                  days: int = Query(60, ge=1, le=3650)):
+    if kind is not None and kind not in ("ENTRY", "MANAGE"):
+        raise HTTPException(status_code=422, detail="kind: ENTRY sau MANAGE")
+    t = get_engine(request).ai_trader
+    return {"status": t.status(), "stats": t.stats(days), "items": t.list_payload(limit, kind)}
+
+
+@router.put("/ai-trader/settings", dependencies=[Depends(require_admin)])
+async def put_ai_trader_settings(request: Request):
+    eng = get_engine(request)
+    body = await _json(request)
+    upd: dict[str, Any] = {}
+    for k, v in body.items():
+        if k in ("entry_mode", "manage_mode"):
+            if str(v).lower() not in ("off", "shadow", "live"):
+                raise HTTPException(status_code=422, detail=f"{k}: off | shadow | live")
+            if str(v).lower() == "live" and body.get("confirm") != "ACCEPT AI LIVE":
+                raise HTTPException(status_code=400, detail='Modul live cere {"confirm":"ACCEPT AI LIVE"}')
+            upd[k] = str(v).lower()
+        elif k == "timeframe":
+            if str(v).upper() not in TF_SECONDS:
+                raise HTTPException(status_code=422, detail="timeframe necunoscut")
+            upd[k] = str(v).upper()
+        elif k == "symbols":
+            upd[k] = str(v or "")
+        elif k in ("manage_every_min", "max_calls_per_day"):
+            upd[k] = _num(k, v, int, 0 if k == "max_calls_per_day" else 1, 5000 if k == "max_calls_per_day" else 240)
+        elif k == "confirm":
+            continue
+        else:
+            raise HTTPException(status_code=422, detail=f"Cheie necunoscută: {k}")
+    out = eng.ai_trader.update_settings(upd)
+    eng.rt.log("WARN", "control", f"Setări AI trader actualizate: {upd}")
+    return out
+
+
+@router.post("/ai-trader/decide/{symbol}", dependencies=[Depends(require_admin)])
+async def ai_trader_decide_now(request: Request, symbol: str):
+    eng = get_engine(request)
+    symbol = symbol.upper()
+    if symbol not in eng.rt.active_symbols():
+        raise HTTPException(status_code=404, detail="Simbol inactiv")
+    if not eng.ai_trader.available:
+        raise HTTPException(status_code=409, detail="Claude este dezactivat sau lipsește ANTHROPIC_API_KEY")
+    row = await eng.ai_trader.decide(symbol, force=True)
+    if row is None:
+        raise HTTPException(status_code=409, detail="Fără decizie (date insuficiente sau o decizie este deja în curs)")
+    return row
 
 
 # ---- Claude trade analyst (analysis only) ----------------------------------

@@ -47,9 +47,10 @@ def _r(x, nd=6):
     return None if x is None else round(float(x), nd)
 
 
-def pyramid_blocker(side: str, positions: list | None, max_per: int, min_r: float) -> str | None:
+def pyramid_blocker(side: str, positions: list | None, max_per: int, min_r: float, min_dist_atr: float = 0.0) -> str | None:
     """Reason a further position on the symbol is NOT allowed under the pyramiding rule, else None.
-    positions: [{"side", "open_r"}] of the bot's open positions on the symbol (open_r None = order in flight)."""
+    positions: [{"side", "open_r", "distance_atr"}] of the bot's open positions on the symbol (open_r None = order in
+    flight; distance_atr = |current price - that entry| / ATR, None = unknown)."""
     if not positions:
         return None
     n = len(positions)
@@ -63,6 +64,9 @@ def pyramid_blocker(side: str, positions: list | None, max_per: int, min_r: floa
             return f"Poziția existentă este {p.get('side')} — nu se adaugă în direcția opusă."
         if r < min_r:
             return f"Piramidare doar peste poziții pe profit: {r:+.2f}R < {min_r:g}R."
+        d = p.get("distance_atr")
+        if min_dist_atr > 0 and d is not None and d < min_dist_atr:
+            return f"Intrare prea aproape de poziția existentă: {d:.2f} ATR < {min_dist_atr:g} ATR."
     return None
 
 
@@ -73,7 +77,8 @@ def context_blockers(symbol: str, side: str, ctx: AnalysisContext, risk: dict) -
     if not ctx.session_open:
         out.append("Sesiunea de tranzacționare este închisă.")
     max_per = int(risk.get("max_positions_per_symbol", 1) or 1)
-    pyramid = pyramid_blocker(side, ctx.symbol_positions, max_per, float(risk.get("pyramid_min_r", 0.5) or 0))
+    pyramid = pyramid_blocker(side, ctx.symbol_positions, max_per, float(risk.get("pyramid_min_r", 0.5) or 0),
+                              float(risk.get("pyramid_min_distance_atr", 0) or 0))
     if ctx.has_bot_position and (max_per <= 1 or ctx.symbol_positions is None):
         out.append("Există deja o poziție a botului pe acest simbol.")
     elif pyramid:

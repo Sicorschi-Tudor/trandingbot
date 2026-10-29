@@ -1166,6 +1166,63 @@ async function enterIntegrations() {
   if (!S.settings) { try { S.settings = await api('/settings'); } catch (e) { /* render from status */ } }
   renderIntegrations();
   loadTradeReviews();
+  loadAiTrader();
+}
+async function loadAiTrader() {
+  const box = $('#int-aitrader');
+  if (!box) return;
+  try { renderAiTrader(await api('/ai-trader?limit=25')); }
+  catch (e) { box.innerHTML = emptyState('AI trader indisponibil', ' ' + (e.detail || e.message)); }
+}
+function modeSel(id, val) {
+  return `<select id="${id}"><option value="off"${val === 'off' ? ' selected' : ''}>oprit</option><option value="shadow"${val === 'shadow' ? ' selected' : ''}>umbră (doar înregistrează)</option><option value="live"${val === 'live' ? ' selected' : ''}>live (execută)</option></select>`;
+}
+function renderAiTrader(d) {
+  const box = $('#int-aitrader');
+  const st = d.status || {}, sh = (d.stats || {}).shadow || {}, items = d.items || [];
+  const on = st.entry_mode !== 'off' || st.manage_mode !== 'off';
+  const lvl = !st.available ? 'DEGRADED' : on ? 'ONLINE' : null;
+  const r = (x, dgt = 3) => isNum(x) ? Number(x).toFixed(dgt) : '—';
+  box.innerHTML = `
+    <div class="card-head"><h2>AI trader (Claude decide pe grafic)</h2>${lvl ? pill(lvl, st.available ? (on ? st.entry_mode.toUpperCase() : 'OPRIT') : 'FĂRĂ CHEIE') : '<span class="pill">OPRIT</span>'}</div>
+    <p class="faint" style="font-size:12px;margin:0 0 10px">La fiecare bară închisă (${esc(st.timeframe || '—')}) Claude primește lumânările (TF, H1, H4), contextul de termen lung (ani de D1), spread-ul, știrile, pozițiile și propriile statistici, și decide NONE / BUY / SELL cu SL, TP și durată. În <b>umbră</b> deciziile sunt doar înregistrate și etichetate cu ce s-ar fi întâmplat; în <b>live</b> trec prin același Risk Engine ca orice semnal. Gestionarea poate doar strânge SL-ul sau închide. Simboluri: ${esc((st.symbols_effective || []).join(', ') || '—')} · apeluri azi ${(d.stats || {}).calls_today ?? 0}/${st.max_calls_per_day ?? '—'}.</p>
+    <div class="grid g-4" style="margin-bottom:10px">
+      <div class="card status-tile"><div class="title">Decizii etichetate</div><div class="num">${sh.labeled ?? 0}</div></div>
+      <div class="card status-tile"><div class="title">Rată de câștig</div><div class="num">${isNum(sh.win_rate) ? Math.round(sh.win_rate * 100) + '%' : '—'}</div></div>
+      <div class="card status-tile"><div class="title">R mediu (CI90)</div><div class="num">${r(sh.avg_r)} <span class="faint" style="font-size:12px">${sh.ci90_avg_r ? '[' + r(sh.ci90_avg_r[0], 2) + '; ' + r(sh.ci90_avg_r[1], 2) + ']' : ''}</span></div></div>
+      <div class="card status-tile"><div class="title">Profit factor · ΣR</div><div class="num">${r(sh.profit_factor, 2)} · ${r(sh.sum_r, 1)}</div></div>
+    </div>
+    <div class="filters" style="margin-bottom:10px">
+      <label class="field">Intrări ${modeSel('ait-entry', st.entry_mode)}</label>
+      <label class="field">Gestionare poziții ${modeSel('ait-manage', st.manage_mode)}</label>
+      <label class="field">Timeframe <input id="ait-tf" value="${esc(st.timeframe || 'M15')}" style="width:70px"></label>
+      <button class="btn sm" id="ait-save" style="margin-bottom:3px">Salvează</button>
+      <button class="btn sm" id="ait-now" style="margin-bottom:3px">Decide acum</button>
+    </div>
+    ${items.length ? `<table class="tbl"><thead><tr><th>Când</th><th>Tip</th><th>Simbol</th><th>Decizie</th><th>SL / TP</th><th>Încredere</th><th>Stare</th><th>Rezultat</th></tr></thead><tbody>${items.map(it => `<tr>
+      <td>${fmtDT(it.time_utc)}</td><td>${esc(it.kind)}</td><td>${esc(it.symbol)}</td>
+      <td title="${esc(it.reasoning || '')}">${esc(it.action)}${it.setup ? ' · ' + esc(it.setup) : ''}${it.mode === 'live' ? ' <b>LIVE</b>' : ''}</td>
+      <td class="mono">${it.sl ?? '—'} / ${it.tp ?? '—'}${it.hold_minutes ? ' · ' + it.hold_minutes + ' min' : ''}</td>
+      <td>${isNum(it.confidence) ? Math.round(it.confidence * 100) + '%' : '—'}</td>
+      <td>${esc(it.status)}${it.note ? ' <span class="faint" title="' + esc(it.note) + '">ⓘ</span>' : ''}</td>
+      <td>${it.outcome ? esc(it.outcome) + ' ' + (isNum(it.outcome_r) ? (it.outcome_r >= 0 ? '+' : '') + Number(it.outcome_r).toFixed(2) + 'R' : '') : (it.action === 'BUY' || it.action === 'SELL') && it.status === 'VALID' ? '<span class="faint">în așteptare</span>' : '—'}</td>
+    </tr>`).join('')}</tbody></table>` : emptyState('Nicio decizie încă', ' Pornește modul umbră: deciziile apar la fiecare bară închisă în sesiune.')}`;
+  $('#ait-save').onclick = async () => {
+    const entry = $('#ait-entry').value, manage = $('#ait-manage').value;
+    const body = { entry_mode: entry, manage_mode: manage, timeframe: $('#ait-tf').value.trim().toUpperCase() };
+    if (entry === 'live' || manage === 'live') {
+      if (!confirm('Modul LIVE lasă AI-ul să trimită ordine reale pe contul (demo) prin Risk Engine. Confirmi?')) return;
+      body.confirm = 'ACCEPT AI LIVE';
+    }
+    try { await api('/ai-trader/settings', { method: 'PUT', body }); toast('Setări AI trader salvate'); await loadAiTrader(); }
+    catch (e) { toast(e.detail || e.message, 'error'); }
+  };
+  $('#ait-now').onclick = async () => {
+    const sym = (st.symbols_effective || [])[0] || prompt('Simbol:', 'XAUUSD');
+    if (!sym) return;
+    try { await api('/ai-trader/decide/' + enc(sym), { method: 'POST' }); toast('Decizie cerută pentru ' + sym); await loadAiTrader(); }
+    catch (e) { toast(e.detail || e.message, 'error'); }
+  };
 }
 async function loadTradeReviews() {
   const box = $('#int-reviews');
