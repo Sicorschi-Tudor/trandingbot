@@ -10,13 +10,14 @@ import importlib
 import pkgutil
 from types import ModuleType
 
+_PREFIXES = ("disc_", "pat_")  # pat_*.py: pattern research plugins (NAME 'pat-<id>' standalone, 'filt-<id>' filter)
 _CACHE: dict[str, ModuleType] = {}
 _ERRORS: dict[str, str] = {}  # module -> import error (a half-written file of another builder must not break the rest)
 
 
 def _load() -> dict[str, ModuleType]:
     for info in pkgutil.iter_modules(__path__):
-        if not info.name.startswith("disc_") or info.name in _CACHE:
+        if not info.name.startswith(_PREFIXES) or info.name in _CACHE:
             continue
         try:
             mod = importlib.import_module(f"{__name__}.{info.name}")
