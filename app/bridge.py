@@ -281,7 +281,7 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
     if first:
         acc = rt.mt5_account or {}
         rt.log("INFO", "bridge", f"EA conectat (v{rt.bridge['ea_version']}), server {acc.get('server')}, "
-                                 f"trade_mode={acc.get('trade_mode')} ({'DEMO' if acc.get('trade_mode') == 0 else 'NU este DEMO'})")
+                                 f"trade_mode={acc.get('trade_mode')} ({'DEMO' if acc.get('trade_mode') == 0 else 'REAL'})")
 
     # research-only symbols (RESEARCH_SYMBOLS) are archive-only: never quoted / analysed even if an EA sends them
     research_only = archive.research_only_names(rt)
@@ -368,13 +368,10 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
                 hist.append((s, tf))
 
     commands: list[str] = []
-    acc = rt.mt5_account or {}
     if not magic_ok:
         engine.fail_queued_commands(f"Magic EA ({ea_magic}) != MT5_MAGIC ({engine.settings.MT5_MAGIC})")
-    elif acc.get("trade_mode") == 0:
-        commands = engine.executor.take_commands(now)
     else:
-        engine.fail_queued_commands("Contul MT5 nu este DEMO (trade_mode != 0) — comenzile nu sunt livrate")
+        commands = engine.executor.take_commands(now)
     if calendar_request_needed(rt, now):
         commands = ["CALENDAR"] + commands
     if archive.ARCHIVE_EA_VERSION <= ea_version_tuple(rt.bridge.get("ea_version")) and engine.settings.ARCHIVE_ENABLED:

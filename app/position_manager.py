@@ -66,6 +66,87 @@ def rescue_close(pos: dict, info: dict, cfg: dict, now_ts: float, initial_sl: fl
     return None
 
 
+def open_profit_money(pos: dict, info: dict) -> float | None:
+    """Net open profit of a position in account currency (price + swap + commission). The broker's own floating
+    profit (MT5 POSITION_PROFIT) wins when present: some brokers report a tick_value that does not match it."""
+    costs = float(pos.get("swap") or 0) + float(pos.get("commission") or 0)
+    if pos.get("profit") is not None:
+        return float(pos["profit"]) + costs
+    bid, ask = info.get("bid"), info.get("ask")
+    tick_size, tick_value = float(info.get("tick_size") or 0), float(info.get("tick_value") or 0)
+    volume = float(pos.get("volume") or 0)
+    if not bid or not ask or tick_size <= 0 or tick_value <= 0 or volume <= 0:
+        return None
+    sign = 1 if pos["side"] == "BUY" else -1
+    cur = bid if pos["side"] == "BUY" else ask
+    gross = (cur - float(pos["price_open"])) * sign / tick_size * tick_value * volume
+    return gross + costs
+
+
+def money_per_price(pos: dict, info: dict) -> float:
+    """Account money per 1.0 of price on this position: contract size first (some brokers report a tick_value that
+    does not match the real P/L), tick_value / tick_size otherwise; 0 when unknown."""
+    volume = float(pos.get("volume") or 0)
+    contract = float(info.get("contract_size") or 0)
+    if contract > 0:
+        return contract * volume
+    tick_size, tick_value = float(info.get("tick_size") or info.get("point") or 0), float(info.get("tick_value") or 0)
+    return tick_value / tick_size * volume if tick_size > 0 and tick_value > 0 else 0.0
+
+
+def ladder_levels(tp_money: float, profit: float, cfg: dict) -> tuple[float, float | None]:
+    """(new TP money, SL money to lock or None) for the profit ladder; tp_money unchanged when no step is due."""
+    trig, step = float(cfg.get("ladder_trigger_usd") or 0), float(cfg.get("ladder_step_usd") or 0)
+    lag, cap = float(cfg.get("ladder_sl_lag_usd") or 0), float(cfg.get("ladder_cap_usd") or 0)
+    if step <= 0 or cap <= 0:
+        return tp_money, None
+    new_tp, lock = tp_money, None
+    while profit >= new_tp - trig and new_tp < cap - 1e-9:
+        lock = max(0.0, new_tp - trig - lag)
+        new_tp = min(new_tp + step, cap)
+    return new_tp, lock
+
+
+def ladder_modify(pos: dict, info: dict, cfg: dict) -> dict | None:
+    """Profit ladder MODIFY (reason LADDER): TP further out, SL locked in profit, SL never moved backwards."""
+    if not cfg.get("ladder_enabled") or not pos.get("tp"):
+        return None
+    per = money_per_price(pos, info)
+    bid, ask = info.get("bid"), info.get("ask")
+    if per <= 0 or not bid or not ask:
+        return None
+    sign = 1 if pos["side"] == "BUY" else -1
+    open_px, tp = float(pos["price_open"]), float(pos["tp"])
+    cur = bid if pos["side"] == "BUY" else ask
+    tp_money = (tp - open_px) * sign * per
+    new_tp_money, lock = ladder_levels(tp_money, (cur - open_px) * sign * per, cfg)
+    if lock is None:
+        return None
+    digits = int(info.get("digits") or 5)
+    point = float(info.get("point") or 0.00001)
+    new_tp = round(open_px + sign * new_tp_money / per, digits)
+    sl = float(pos.get("sl") or 0)
+    new_sl = round(open_px + sign * lock / per, digits)
+    min_gap = max(ask - bid, float(info.get("stops_level") or 0) * point) + point
+    if (sl and (new_sl - sl) * sign <= point / 2) or (cur - new_sl) * sign < min_gap:
+        new_sl = sl  # never backwards; too close to the price for the broker -> keep the old SL this round
+    if (new_tp - cur) * sign < min_gap:
+        return None
+    return {"type": "MODIFY", "sl": new_sl, "tp": new_tp, "reason": "LADDER"}
+
+
+def profit_target_close(pos: dict, info: dict, cfg: dict) -> dict | None:
+    """Scalp exit: CLOSE (reason PROFIT_TARGET) once the net open profit reaches cfg scalp_target_usd (> 0), or the
+    ladder cap when the profit ladder is on."""
+    target = float(cfg.get("ladder_cap_usd") if cfg.get("ladder_enabled") else cfg.get("scalp_target_usd") or 0)
+    if target <= 0:
+        return None
+    money = open_profit_money(pos, info)
+    if money is not None and money >= target:
+        return {"type": "CLOSE", "reason": "PROFIT_TARGET"}
+    return None
+
+
 def profit_lock_sl(side: str, cur: float, open_px: float, risk_dist: float, cfg: dict, digits: int) -> float | None:
     """Profit-lock trailing (owner's rule): once the open profit reaches profit_lock_activate_r × initial risk, the SL
     follows the CURRENT price at profit_lock_gap_r × risk behind it and only ever moves towards profit. Example with a
@@ -106,6 +187,9 @@ def plan(pos: dict, info: dict, cfg: dict, now_ts: float, session_open: bool,
         return [{"type": "CLOSE", "reason": "TIME_STOP"}]
     if cfg.get("close_at_session_end") and not session_open:
         return [{"type": "CLOSE", "reason": "SESSION_END"}]
+    target = profit_target_close(pos, info, cfg)
+    if target is not None:
+        return [target]
     rescue_a = rescue_close(pos, info, cfg, now_ts, initial_sl, rescue_state)
     if rescue_a is not None:
         return [rescue_a]
@@ -113,6 +197,10 @@ def plan(pos: dict, info: dict, cfg: dict, now_ts: float, session_open: bool,
     freeze = float(info.get("freeze_level") or 0) * point
     if freeze > 0 and ((sl and abs(cur - sl) <= freeze) or (tp and abs(cur - tp) <= freeze)):
         return []  # inside broker freeze zone: modification would be rejected
+
+    ladder = ladder_modify(pos, info, cfg)
+    if ladder is not None:
+        return [ladder]
 
     profit_dist = (cur - open_px) * sign
     ref_sl = initial_sl if initial_sl else sl
@@ -230,14 +318,13 @@ class PositionManager:
         items: list[tuple[str, dict, float | None]] = []
         for p in list(eng.paper.positions.values()):
             items.append(("PAPER", p, p.get("initial_sl")))
-        acc = rt.mt5_account or {}
-        if rt.bridge_connected() and acc.get("trade_mode") == 0:
+        if rt.bridge_connected():
             for p in rt.mt5_positions:
                 if int(p.get("magic") or 0) != rt.settings.MT5_MAGIC:
                     continue
                 pos = {"ticket": int(p["ticket"]), "symbol": p["symbol"], "side": "BUY" if int(p.get("type", 0)) == 0 else "SELL",
                        "price_open": p.get("price_open"), "sl": p.get("sl"), "tp": p.get("tp"), "opened_ts": p.get("time"),
-                       "volume": p.get("volume"),
+                       "volume": p.get("volume"), "profit": p.get("profit"),
                        # accrued swap/commission (EA positions payload) so the rescue "net profit" test counts them
                        "swap": p.get("swap"), "commission": p.get("commission")}
                 oi = eng.executor.open_intent_for_ticket(pos["ticket"]) or eng.executor.open_intent_by_comment(p.get("comment") or "")

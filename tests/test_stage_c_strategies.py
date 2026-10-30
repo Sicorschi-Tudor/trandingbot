@@ -81,7 +81,7 @@ def steps(start, seq):
 # ---- registry ---------------------------------------------------------------
 
 def test_registry_interface():
-    assert S.names() == ["trend-v1", "meanrev-v1", "breakout-v1", "pullback-v1"]
+    assert S.names() == ["trend-v1", "meanrev-v1", "breakout-v1", "pullback-v1", "scalp-v1", "smc-v1"]
     assert S.get(None) is S.get("trend-v1")
     with pytest.raises(KeyError):
         S.get("nope")

@@ -81,6 +81,132 @@ Răspunde doar cu obiectul JSON cerut."""
 
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
+# ---- basket manager: Claude takes every live decision of the basket (owner's choice 2026-10-30) -----------------------
+BASKET_ACTION = {
+    "type": "object",
+    "properties": {
+        "type": {"type": "string", "enum": ["OPEN", "CLOSE", "CLOSE_ALL"]},
+        "side": {"type": "string", "enum": ["BUY", "SELL", "NONE"], "description": "OPEN: direcția; altfel NONE."},
+        "lot": {"type": ["number", "null"], "description": "OPEN: lotul (0.01–max_lot din constraints)."},
+        "tp_usd": {"type": ["number", "null"], "description": "OPEN: TP la broker în USD de profit pentru această "
+                                                           "poziție; null = fără TP individual (grupul e gestionat)."},
+        "ticket": {"type": ["integer", "null"], "description": "CLOSE: tichetul poziției de închis."},
+        "why": {"type": "string", "description": "Motivul acțiunii, în română, scurt."},
+    },
+    "required": ["type", "side", "lot", "tp_usd", "ticket", "why"],
+    "additionalProperties": False,
+}
+BASKET_DECISION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "actions": {"type": "array", "items": BASKET_ACTION, "description": "0–4 acțiuni; listă goală = aștept."},
+        "market_view": {"type": "string", "description": "Ce vezi pe grafic acum (M1/M5, context M15/H1), în română."},
+        "plan": {"type": "string", "description": "Ce urmărești la următoarele bare și când vei acționa, în română."},
+        "confidence": {"type": "number", "description": "0–1, cât de sigur ești pe decizia de acum."},
+    },
+    "required": ["actions", "market_view", "plan", "confidence"],
+    "additionalProperties": False,
+}
+
+BASKET_MANAGER_PROMPT = """Ești traderul care conduce, minut cu minut, un bot pe aur (XAUUSD) pe un cont DEMO MetaTrader 5.
+La fiecare bară M1 închisă primești starea completă (cont, marjă, poziții deschise cu P/L, cotația și spread-ul, grafice
+M1/M5/M15/H1 cu indicatori, ultimele tranzacții și ultimele tale decizii) și decizi ce face botul ACUM.
+Poți: OPEN (deschide BUY/SELL cu lotul ales), CLOSE (închide o poziție după tichet), CLOSE_ALL (închide tot), sau nicio
+acțiune (listă goală). Ce decizi se execută imediat la piață.
+
+Regulile proprietarului (respectă-le):
+- Tranzacții foarte scurte: ținta e un profit mic, ~0,80 USD pe 0,01 lot (crește proporțional cu lotul), apoi închidere
+  și următoarea tranzacție. Direcția o dă termenul scurt (M1, M5); M15/H1 sunt doar context, nu motiv să vinzi mereu.
+- Dacă o poziție greșește și graficul merge contra, nu o lăsa singură: acoperă-o cu poziții în sens opus, astfel încât
+  grupul să iasă pe plus. NU acoperi cât timp pozițiile pe minus revin spre TP; acoperă în momentul în care se întorc din
+  nou spre pierdere. Acoperirile își iau profitul și se reiau la următoarea întoarcere.
+- strategy spune ce stil a ales proprietarul: s1 = acoperire cu lot egal (de obicei 2 poziții de 0,01);
+  s2 = acoperire cu lot dublu (zone recovery: nivelul următor are lotul ×2, în sens opus, la traversarea zonei).
+- Scopul: fiecare grup de poziții să se închidă pe plus. Închide tot grupul (CLOSE_ALL) când totalul e pe plus și
+  piața nu mai promite; închide pozițiile individuale care și-au făcut treaba.
+
+Ce trebuie să știi (măsurat pe istoric și live): spread-ul (~0,30–0,45 USD) se plătește la fiecare deschidere, deci nu
+deschide fără un motiv clar; piața care merge în ambele direcții fără să ajungă la TP blochează grupurile (BUY și SELL de
+lot egal: pierderea rămâne fixă); dublarea lotului câștigă des puțin, dar o mișcare lungă poate goli contul — dublează
+doar când ai un motiv și ține cont de marja liberă (fiecare 0,01 lot de aur ≈ 40 USD marjă la 1:100).
+Limite dure impuse de cod (nu le poți depăși): constraints.max_lot pe poziție, constraints.max_positions,
+coșul se închide automat la −constraints.basket_loss_limit_usd, brokerul refuză poziții fără marjă.
+Fii calm și consecvent cu planul tău de la bara trecută (last_decisions); nu schimba direcția la fiecare minut fără motiv.
+Totul în română. Răspunde doar cu obiectul JSON cerut."""
+
+# ---- scalp entry analyst (strategy scalp-v1, profile gold_scalp): the deterministic rule proposes, Claude decides -----
+SCALP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["AGREE", "CAUTION", "VETO"]},
+        "p_first_step": {"type": "number", "description": "0–1: probabilitatea estimată ca prețul să meargă +0,70 USD "
+                                                          "în favoarea poziției ÎNAINTE de SL-ul inițial."},
+        "explanation": {"type": "string", "description": "Raționament în română, maxim 600 de caractere."},
+        "risks": {"type": "array", "items": {"type": "string"}},
+        "invalidation": {"type": "string"},
+    },
+    "required": ["verdict", "p_first_step", "explanation", "risks", "invalidation"],
+    "additionalProperties": False,
+}
+
+SCALP_PROMPT = """Ești analistul de intrări al unui bot de scalping pe aur (XAUUSD, cont DEMO MetaTrader 5, lot fix 0,01:
+1 USD de preț = 1 USD profit). O regulă deterministă a propus o intrare (RSI(14) pe M1 sub 30 → BUY, peste 70 → SELL,
+adică pariu pe revenire). Tu decizi dacă intrarea se face. Nu poți schimba direcția, intrarea, SL sau TP.
+
+Cum iese tranzacția (scara de profit, gestionată automat):
+- SL inițial = max(3×ATR(M1), 3 USD), de obicei 3–6 USD; TP inițial +1 USD.
+- La +0,70 USD: TP urcă la 1,50 și SL se blochează pe +0,10. Apoi la fiecare +0,50: TP +0,50 și SL urcă (0,60 în urma
+  pragului). Plafon +10 USD, apoi închidere.
+- Deci întrebarea reală: ajunge prețul la +0,70 USD în favoarea poziției ÎNAINTE să meargă distanța SL-ului împotrivă?
+
+Ce s-a măsurat pe 105 zile de M1 aur (spread 0,47 USD), pentru intrarea RSI extrem cu această scară:
+- 81 % din tranzacții ajung la +0,70 (pragul care le face câștigătoare), 32 % la +2, 16 % la +3, 4 % la +5.
+- Pierderea medie când nu ajunge: −5,5 USD; câștigul mediu: +1,3 USD. Pragul de rentabilitate este ~81 % —
+  așadar o intrare are sens doar când datele o fac MAI bună decât media: AGREE doar dacă estimezi p_first_step peste ~0,85.
+- Nicio regulă simplă de direcție (EMA, trend M15/H1, breakout) nu a bătut constant aruncarea cu banul pe M1;
+  avantajul trebuie să vină din context: unde e prețul față de niveluri, cât de întins e impulsul, volatilitate, spread.
+
+Ce cântărești (datele sunt în JSON, calculate local):
+- Fade împotriva unui impuls puternic pe M5/M15/H1 (trend clar, MACD accelerând, închideri în afara benzilor Bollinger
+  pe M5/M15, spargere de range) = risc mare: prețul poate continua mult. Asta e principalul motiv de VETO.
+- Favorabil: prețul la un extrem care coincide cu suport/rezistență pe M5/M15/H1 (maxime/minime recente), RSI extrem și pe M5,
+  impuls care încetinește (histograma MACD scade, umbre lungi de respingere pe ultimele bare M1), trend superior plat sau în
+  direcția intrării, volatilitate normală (ATR M1 nu de 2× mediana).
+- strategy_votes: ce spun celelalte strategii ale botului pe M5/H1 (trend, meanrev, breakout, pullback). Voturi contrare
+  multiple = prudență.
+- Spread mare față de 0,70 USD, știre importantă în următoarele 30–60 de minute, pierderi recente repetate în același tip de
+  setup = motive de CAUTION/VETO.
+- recent_trades_same_symbol și ai_verdicts_shadow_30d: cum au ieșit tranzacțiile și verdictele tale anterioare; învață din ele.
+
+Verdict: AGREE = intră (doar cu avantaj clar peste medie), CAUTION = nu intra acum (setup mediu), VETO = intrare periculoasă.
+Fii onest și calibrat: p_first_step 0,81 = exact media istorică. Nu inventa niveluri sau știri care nu sunt în date.
+Totul în română, explicația maxim 600 de caractere. Răspunde doar cu obiectul JSON cerut."""
+
+SMC_PROMPT = """Ești analistul de intrări al unui bot pe aur (XAUUSD, cont DEMO MetaTrader 5, lot fix 0,01: 1 USD de preț =
+1 USD profit). Intrarea a fost propusă de verificarea SMC în 5 pași pe M15 (modelul CLUB 81), în datele context.smc_check:
+1) trend H1/H4 (30), 2) lichiditate ridicată contra direcției (20), 3) ruperea structurii după ea (20), 4) revenire în
+order block (20), 5) spațiu până la nivelul opus ≥ 1,5 ATR (10). Verdict «Intră» la scor ≥ 50 cu trendul nu contra.
+Tu decizi dacă intrarea se face. Nu poți schimba direcția, intrarea, SL sau TP.
+
+Cum iese tranzacția (scara de profit, gestionată automat): SL inițial = max(3×ATR(M1), 3 USD), de obicei 3–6 USD;
+TP inițial +1 USD; la +0,70 USD TP urcă la 1,50 și SL se blochează pe
++0,10, apoi la fiecare +0,50 TP +0,50 și SL urcă (0,60 în urma pragului); plafon +10 USD.
+Întrebarea reală: ajunge prețul la +0,70 USD în favoarea poziției ÎNAINTE de SL-ul inițial?
+
+Ce s-a măsurat pe 2 ani de M15 aur (spread 0,47 USD, intrări la piață în zonă):
+- direcția SMC are informație: aceleași intrări în sens invers pierd mult mai mult;
+- dar cu această scară de ieșire media e ≈ −1 USD/tranzacție (cu SL de 3 USD ~45 % ajung la +0,70, cu SL mai larg mai
+  multe, dar pierderile la SL depășesc câștigurile mici). Deci o intrare are sens doar dacă e CLAR peste medie:
+  AGREE doar cu p_first_step peste ~0,85.
+
+Ce cântărești (datele sunt în JSON, calculate local): calitatea fiecărui pas SMC (✓ complet vs ½ parțial), dacă
+mișcarea de +0,70 e realistă înaintea SL-ului (ATR M1, zgomot), spațiul până la nivelul opus, confluența M15/H1/H4 (timeframes),
+voturile celorlalte strategii (strategy_votes_m5_h1), impulsul (MACD, închideri dincolo de Bollinger), volatilitatea
+(atr_vs_median), spread-ul, știrile apropiate, istoricul recent al botului și al verdictelor tale.
+
+Verdict: AGREE = intră, CAUTION = nu intra acum, VETO = intrare periculoasă. Fii onest și calibrat; nu inventa niveluri
+sau știri care nu sunt în date. Totul în română, explicația maxim 600 de caractere. Răspunde doar cu obiectul JSON cerut."""
+
 # ---- AI trader (discretionary decisions on the chart; shadow by default, executed only when the owner enables it) --
 TRADER_SCHEMA = {
     "type": "object",
@@ -241,13 +367,16 @@ class ClaudeReviewer:
         return data
 
     async def review(self, signal: dict, context: dict | None = None) -> dict:
+        """Verdict on a computed signal. scalp-v1 signals get the scalp entry analyst (SCALP_PROMPT, + p_first_step)."""
         model = self.settings.CLAUDE_MODEL
+        scalp = signal.get("strategy_version") in ("scalp-v1", "smc-v1")
         base = {"status": "DISABLED", "verdict": None, "explanation": "", "risks": [], "model": model}
         if not self.enabled or not self.key_set:
             base["explanation"] = "Analiza Claude este dezactivată (lipsește ANTHROPIC_API_KEY sau CLAUDE_ENABLED=false)."
             return base
         try:
-            parsed = await asyncio.wait_for(self._call(signal, context), timeout=float(self.settings.CLAUDE_TIMEOUT_SECONDS))
+            parsed = await asyncio.wait_for(self._call(signal, context, scalp),
+                                            timeout=float(self.settings.CLAUDE_TIMEOUT_SECONDS))
         except asyncio.TimeoutError:
             return self._error(base, f"timeout după {self.settings.CLAUDE_TIMEOUT_SECONDS:g} s")
         except Exception as e:
@@ -261,12 +390,18 @@ class ClaudeReviewer:
         inv = str(parsed.get("invalidation") or "").strip()
         if inv:
             risks.append(f"Invalidare (Claude): {inv}")
-        return {
+        out = {
             "status": "DONE", "verdict": verdict,
             "explanation": str(parsed.get("explanation") or "")[:600],
             "risks": risks,
             "model": model,
         }
+        if scalp:
+            try:
+                out["p_first_step"] = min(max(float(parsed.get("p_first_step")), 0.0), 1.0)
+            except (TypeError, ValueError):
+                out["p_first_step"] = None
+        return out
 
     def _error(self, base: dict, msg: str) -> dict:
         msg = redact(msg, self.settings.secret_values())
@@ -297,10 +432,14 @@ class ClaudeReviewer:
             return f"răspuns invalid: {e}"[:300]
         return repr(e)[:300]
 
-    async def _call(self, signal: dict, context: dict | None) -> dict:
+    async def _call(self, signal: dict, context: dict | None, scalp: bool = False) -> dict:
         payload = self.build_payload(signal, context)
-        user_msg = ("Evaluează următorul semnal calculat de motorul determinist. Datele sunt verificate.\n\n"
-                    + json.dumps(payload, ensure_ascii=False, default=str))
+        lead = ("Decide dacă botul intră pe această propunere de scalp. Datele sunt verificate.\n\n" if scalp else
+                "Evaluează următorul semnal calculat de motorul determinist. Datele sunt verificate.\n\n")
+        user_msg = lead + json.dumps(payload, ensure_ascii=False, default=str)
+        if scalp:
+            prompt = SMC_PROMPT if signal.get("strategy_version") == "smc-v1" else SCALP_PROMPT
+            return await self._call_json(prompt, user_msg, SCALP_SCHEMA, signal.get("id"))
         return await self._call_json(SYSTEM_PROMPT, user_msg, REVIEW_SCHEMA, signal.get("id"))
 
     # ---- trade analyst ------------------------------------------------------------------------------------------
@@ -320,6 +459,11 @@ class ClaudeReviewer:
         """AI trader: management decision for one open bot position (HOLD / TIGHTEN_SL / CLOSE)."""
         return await self._analysis(MANAGE_PROMPT, MANAGE_SCHEMA,
                                     "Decide ce faci cu această poziție deschisă.\n\n", payload, None)
+
+    async def decide_basket(self, payload: dict) -> dict:
+        """Basket manager: Claude's live decision for the open group and the next entry (payload from app.basket)."""
+        return await self._analysis(BASKET_MANAGER_PROMPT, BASKET_DECISION_SCHEMA,
+                                    "Starea botului acum. Decide ce faci la această bară.\n\n", payload, None)
 
     async def review_day(self, payload: dict) -> dict:
         """Daily performance review (trades + shadow labels of one local day)."""
@@ -348,7 +492,9 @@ class ClaudeReviewer:
         out = {"status": "DONE", "model": model}
         for k, spec in schema["properties"].items():
             v = parsed.get(k)
-            if spec.get("type") == "array":
+            if spec.get("type") == "array" and (spec.get("items") or {}).get("type") == "object":
+                out[k] = [x for x in (v or []) if isinstance(x, dict)][:8]  # structured items (basket actions)
+            elif spec.get("type") == "array":
                 out[k] = [str(x)[:300] for x in (v or []) if x is not None][:8]
             elif isinstance(v, bool) or isinstance(v, (int, float)) or v is None and spec.get("type") in ("number", "integer"):
                 out[k] = v

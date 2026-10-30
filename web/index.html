@@ -12,7 +12,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/style.css?v=8">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233b82f6'/%3E%3Cpath d='M7 21l6-6 4 4 8-9' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
@@ -62,6 +62,7 @@
       <div><h1>Prezentare generală</h1><p>Starea serviciului, conturi, sesiune și ultimele semnale. Ora afișată: Europe/Chisinau.</p></div>
       <div class="page-actions"><span class="dim" id="ov-clock"></span></div>
     </div>
+    <div class="card" id="ov-live"></div>
     <div class="grid g-5" id="ov-status"></div>
     <div class="grid g-2" id="ov-accounts"></div>
     <div class="grid g-4">
@@ -148,10 +149,34 @@
       <div><h1>Poziții &amp; Ordine</h1><p>Poziții deschise, comenzi în așteptare, intenții de execuție și tranzacții închise.</p></div>
       <div class="page-actions"><button class="btn" id="btn-pos-refresh">Reîncarcă</button></div>
     </div>
+    <div class="card" id="basket-card">
+      <div class="card-head"><h2>Bot — strategie și coș</h2><span class="badge lg" id="bot-state">—</span></div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+        <label for="strategy-select">Strategia folosită</label>
+        <select id="strategy-select" style="min-width:320px"></select>
+        <button class="btn" id="btn-strategy-save">Aplică strategia</button>
+        <button class="btn danger" id="btn-bot-stop">Oprește botul</button>
+        <button class="btn primary" id="btn-bot-start">Pornește botul</button>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;margin:-4px 0 6px;cursor:pointer">
+        <input type="checkbox" id="claude-toggle"> <b>Claude ia deciziile</b>
+        <span class="faint" style="font-size:12px">(o decizie la fiecare minut: deschide / închide / dublează, în limitele de mai jos)</span>
+      </label>
+      <div id="claude-last" style="font-size:12.5px;margin:0 0 10px"></div>
+      <div class="faint" style="font-size:12px;margin:-4px 0 12px" id="strategy-note"></div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><b>Coș — limita de pierdere</b><span class="sub" id="basket-sub"></span></div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <label for="basket-limit">Închide tot coșul la pierdere de</label>
+        <span>−</span><input id="basket-limit" type="number" min="1" max="1000" step="1" style="width:110px"><span>USD</span>
+        <button class="btn primary" id="btn-basket-save">Salvează</button>
+        <span class="badge warn lg" id="basket-current">Valoare curentă: —</span>
+      </div>
+      <div class="faint" style="font-size:12px;margin-top:8px" id="basket-note"></div>
+    </div>
     <div class="card flush"><div class="card-head"><h2>Poziții deschise</h2><span class="sub" id="pos-open-sub"></span></div><div id="pos-open" style="padding:4px 4px 8px"></div></div>
     <div class="card flush"><div class="card-head"><h2>Comenzi în așteptare (către EA)</h2></div><div id="pos-pending" style="padding:4px 4px 8px"></div></div>
-    <div class="card flush"><div class="card-head"><h2>Intenții de execuție</h2><span class="sub">Apasă pe un rând pentru verificările de risc</span></div><div id="pos-intents" style="padding:4px 4px 8px"></div></div>
-    <div class="card flush"><div class="card-head"><h2>Tranzacții închise</h2></div><div id="pos-trades" style="padding:4px 4px 8px"></div></div>
+    <div class="card flush"><div class="card-head"><h2>Intenții de execuție</h2><span class="sub">Apasă pe un rând pentru verificările de risc</span><button class="btn danger sm" id="btn-clear-intents" style="margin-left:auto">Șterge istoricul</button></div><div id="pos-intents" style="padding:4px 4px 8px"></div></div>
+    <div class="card flush"><div class="card-head"><h2>Tranzacții închise</h2><button class="btn danger sm" id="btn-clear-trades" style="margin-left:auto">Șterge istoricul</button></div><div id="pos-trades" style="padding:4px 4px 8px"></div></div>
   </section>
 
   <!-- ============ PERFORMANCE ============ -->
@@ -252,7 +277,7 @@
       <div class="card">
         <div class="card-head"><h2>Mod de lucru</h2><span class="sub" id="ctl-mode-sub"></span></div>
         <div class="ctl-row">
-          <div><div class="t">Mod</div><div class="d">SIGNAL_ONLY = doar semnale · PAPER = simulare internă · DEMO = ordine pe contul demo MT5</div></div>
+          <div><div class="t">Mod</div><div class="d">SIGNAL_ONLY = doar semnale · PAPER = simulare internă · DEMO / LIVE = ordine pe contul MT5 conectat (demo sau real)</div></div>
           <div class="seg" id="ctl-mode">
             <button data-mode="SIGNAL_ONLY">SIGNAL_ONLY</button>
             <button data-mode="PAPER">PAPER</button>
@@ -363,6 +388,6 @@
 </dialog>
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
-<script src="/app.js"></script>
+<script src="/app.js?v=8"></script>
 </body>
 </html>

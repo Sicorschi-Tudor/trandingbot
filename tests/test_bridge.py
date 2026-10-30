@@ -95,7 +95,7 @@ def test_process_sync_hist_commands_and_results(engine):
     assert done["result"]["retcode_desc"] == "DONE"
 
 
-def test_commands_not_delivered_to_non_demo_account(engine):
+def test_commands_delivered_to_real_account(engine):
     now = time.time()
     process_sync(engine, payload(now), now)
     it = engine.executor.submit_open("DEMO", "EURUSD", "BUY", 0.01, 1.079, 1.082, engine.rt.quotes["EURUSD"],
@@ -103,8 +103,8 @@ def test_commands_not_delivered_to_non_demo_account(engine):
     p = payload(now + 1)
     p["account"]["trade_mode"] = 2
     txt = process_sync(engine, p, now + 1)
-    assert "OPEN|" not in txt
-    assert engine.executor.get(it["id"])["state"] == "FAILED"
+    assert "OPEN|" in txt
+    assert engine.executor.get(it["id"])["state"] == "DELIVERED"
 
 
 def test_deals_create_trade_once(engine):

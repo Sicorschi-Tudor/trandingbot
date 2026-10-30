@@ -335,7 +335,8 @@ class AITrader:
                             "hold_minutes_range": [15, 1440], "max_spread_points": rk.get("max_spread_points"),
                             "pyramiding": f"permisă până la {max_per} poziții, doar în aceeași direcție, peste poziții pe profit"
                             if max_per > 1 else "nepermisă (o singură poziție pe simbol)"},
-            "note": "Cont DEMO / PAPER: nu sunt bani reali." if self.engine.mode() != "LIVE" else None,
+            "note": "Cont DEMO / PAPER: nu sunt bani reali." if self.engine.mode() == "PAPER"
+            or (self.engine.rt.mt5_account or {}).get("trade_mode") == 0 else None,
         }
 
     def build_manage_payload(self, pos: dict) -> dict | None:

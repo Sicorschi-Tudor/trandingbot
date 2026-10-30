@@ -7,7 +7,7 @@ from __future__ import annotations
 import time
 
 from .. import indicators as ind
-from ..config import TF_SECONDS, iso
+from ..config import TF_SECONDS, iso, spread_cap
 from ..strategy import MIN_HTF_BARS, MIN_SIG_BARS, PROB_METHOD, context_blockers, probabilities
 
 SIG_TAIL = 160
@@ -137,7 +137,7 @@ def finish(a: dict, symbol: str, side: str, sl_price: float, tp_price: float | N
 
     blockers: list[str] = []
     spread_points = a["spread_points"]
-    max_spread = float(risk.get("max_spread_points", 30))
+    max_spread = spread_cap(risk.get("max_spread_points", 30), symbol, point)
     if spread_points is None:
         spread_points = round((ask - bid) / point)
     if bid > ask or spread_points < 0:

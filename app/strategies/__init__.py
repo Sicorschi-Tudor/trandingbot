@@ -20,10 +20,12 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from . import breakout_v1, donchian_v1, fade_v1, ma_trend_v1, meanrev_v1, pullback_v1, trend_v1, tsmom_v1
+from . import (breakout_v1, donchian_v1, fade_v1, ma_trend_v1, meanrev_v1, pullback_v1, scalp_v1, smc_v1, trend_v1,
+               tsmom_v1)
 
 DEFAULT = "trend-v1"
-_REGISTRY: dict[str, ModuleType] = {m.NAME: m for m in (trend_v1, meanrev_v1, breakout_v1, pullback_v1)}
+_REGISTRY: dict[str, ModuleType] = {m.NAME: m for m in (trend_v1, meanrev_v1, breakout_v1, pullback_v1, scalp_v1,
+                                                                  smc_v1)}
 _RESEARCH: dict[str, ModuleType] = {m.NAME: m for m in (donchian_v1, ma_trend_v1, tsmom_v1)}
 _FORWARD: dict[str, ModuleType] = {m.NAME: m for m in (fade_v1,)}
 

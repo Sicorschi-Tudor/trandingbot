@@ -217,16 +217,13 @@ def evaluate(ctx: RiskContext) -> dict:
     digits = int(info.get("digits") or 5)
     equity = float(acc.get("equity") or 0)
 
-    add("mode_allows_execution", mode in ("PAPER", "DEMO") and ctx.execution_enabled,
-        f"mod={mode}, execuție={'armată' if ctx.execution_enabled else 'dezarmată'}"
-        + (" (LIVE este dezactivat în v1)" if mode == "LIVE" else ""))
+    add("mode_allows_execution", mode in ("PAPER", "DEMO", "LIVE") and ctx.execution_enabled,
+        f"mod={mode}, execuție={'armată' if ctx.execution_enabled else 'dezarmată'}")
     add("entries_not_paused", not ctx.entries_paused, "intrări în pauză" if ctx.entries_paused else "intrări active")
     add("symbol_tradable", ctx.symbol_tradable,
         "simbol permis la tranzacționare" if ctx.symbol_tradable else "simbol doar pentru context (TRADE_SYMBOLS) — fără ordine")
-    if mode == "DEMO":
+    if mode in ("DEMO", "LIVE"):
         add("bridge_connected", ctx.bridge_connected, "bridge MT5 conectat" if ctx.bridge_connected else "bridge MT5 deconectat")
-        tm = (ctx.mt5_account or {}).get("trade_mode")
-        add("account_is_demo", tm == 0, f"trade_mode={tm} (0 = DEMO)")
         term_ok = bool((ctx.terminal or {}).get("trade_allowed")) and bool((ctx.mt5_account or {}).get("trade_expert"))
         add("terminal_trade_allowed", term_ok,
             "AutoTrading permis" if term_ok else "AutoTrading dezactivat în terminal sau trade_expert=false")
@@ -243,7 +240,7 @@ def evaluate(ctx: RiskContext) -> dict:
     spread_pts = info.get("spread_points")
     if spread_pts is None and bid and ask:
         spread_pts = round((ask - bid) / point)
-    max_spread = float(r.get("max_spread_points", 30))
+    max_spread = spread_cap(r.get("max_spread_points", 30), ctx.symbol, point)
     crossed = bool(bid and ask and bid > ask)
     add("quote_not_crossed", not crossed, f"bid {bid} / ask {ask}" + (" — cotație inversată" if crossed else ""))
     add("spread_ok", spread_pts is not None and 0 <= spread_pts <= max_spread, f"spread {spread_pts} / max {max_spread:g} puncte")
@@ -286,6 +283,13 @@ def evaluate(ctx: RiskContext) -> dict:
             add("ml_size_factor", True, f"factor ML {ctx.size_factor:g} → țintă risc {target_pct:.3f}% "
                                         f"(bază {max_risk_pct:g}%; limitele de risc rămân active)")
         volume = calc_volume(equity, target_pct, sl_dist, info) if equity > 0 else 0.0
+        fixed = float(r.get("fixed_volume_lots") or 0)
+        if fixed > 0:  # fixed lot mode: the size no longer depends on equity × risk %
+            step = float(info.get("volume_step") or 0.01)
+            volume = max(floor_to_step(fixed, step), vmin)
+            vmax = float(info.get("volume_max") or 0)
+            if vmax and volume > vmax:
+                volume = floor_to_step(vmax, step)
         vcap = float(r.get("max_volume_lots") or 0)
         if vcap and volume > vcap:
             volume = floor_to_step(vcap, float(info.get("volume_step") or 0.01))
@@ -295,7 +299,7 @@ def evaluate(ctx: RiskContext) -> dict:
             rm = risk_money(volume, sl_dist, tick_size, tick_value)
             new_risk = rm
             add("volume_ok", True, f"volum {volume} → risc {rm:.2f} ({rm / equity * 100:.2f}% din {equity:.2f}, "
-                                   f"țintă {target_pct:g}%)")
+                                   + (f"lot fix {fixed:g})" if fixed > 0 else f"țintă {target_pct:g}%)"))
 
     max_open = int(r.get("max_open_positions", 1))
     add("max_open_positions", ctx.open_bot_positions < max_open, f"{ctx.open_bot_positions}/{max_open} poziții deschise")

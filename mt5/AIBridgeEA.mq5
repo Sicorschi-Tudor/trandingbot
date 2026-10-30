@@ -35,7 +35,6 @@ input long   InpMagic            = 552211;                  // Magic number al b
 input int    InpTimerMs          = 500;                     // Interval sincronizare (ms)
 input int    InpDeviationPoints  = 20;                      // Deviatie maxima implicita (puncte)
 input int    InpHistoryBars      = 300;                     // Bare trimise la cererea HIST
-input bool   InpAllowRealAccount = false;                   // Permite OPEN pe cont REAL (v1: NU)
 
 //--- globals
 CTrade   g_trade;
@@ -1233,11 +1232,6 @@ void ExecOpen(const string &p[], const int k)
       PushFail(id, 0, "Directie invalida: " + side);
       return;
      }
-   if(!InpAllowRealAccount && AccountInfoInteger(ACCOUNT_TRADE_MODE) != ACCOUNT_TRADE_MODE_DEMO)
-     {
-      PushFail(id, 0, "EA refuza OPEN: contul nu este DEMO (v1)");
-      return;
-     }
    string why = "";
    if(!TradingPermitted(why))
      {
@@ -1802,7 +1796,7 @@ int OnInit()
      }
    Print("AIBridgeEA v", EA_VERSION, " pornit (instanta ", g_instance_id, "). Server: ", g_base_url, " | magic ", InpMagic,
          " | cont ", AccountInfoInteger(ACCOUNT_LOGIN),
-         (AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_DEMO ? " (DEMO)" : " (NU este DEMO!)"));
+         (AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_DEMO ? " (DEMO)" : " (REAL)"));
    UpdateChartStatus();
    return(INIT_SUCCEEDED);
   }

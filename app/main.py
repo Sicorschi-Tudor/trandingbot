@@ -65,9 +65,18 @@ async def healthz():
     return {"ok": True, "version": VERSION}
 
 
+class NoCacheStatic(StaticFiles):
+    """Dashboard files are revalidated on every load (ETag -> 304), so a new app.js is never stuck in a browser cache."""
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 WEB_DIR = ROOT_DIR / "web"
 if WEB_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
+    app.mount("/", NoCacheStatic(directory=str(WEB_DIR), html=True), name="web")
 else:
     @app.get("/", response_class=HTMLResponse)
     async def index_missing():

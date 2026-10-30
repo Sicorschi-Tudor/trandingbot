@@ -136,8 +136,19 @@ def research_list(rt) -> list[str]:
     active = set(rt.active_symbols())
     out: list[str] = []
     for sym in split_csv(raw):
-        if sym not in active and sym not in out:
+        # XAUUSD is already archived as an active symbol when the broker calls it XAUUSDm / XAUUSD.a
+        if sym not in active and sym not in out and not any(a.upper().startswith(sym.upper()) for a in active):
             out.append(sym)
+    return out
+
+
+def broker_suffixes(rt) -> list[str]:
+    """Suffixes the broker appends to symbol names, read off the active symbols (XAUUSDm -> "m", EURUSD.a -> ".a")."""
+    out: list[str] = []
+    for a in rt.active_symbols():
+        base = a[:6]
+        if len(a) > 6 and base.isalpha() and base.isupper() and a[6:] not in out:
+            out.append(a[6:])
     return out
 
 
@@ -153,7 +164,9 @@ def research_candidates(rt, sym: str) -> list[str]:
     """Broker names to try for a research symbol, in order; names of active symbols are never used."""
     active = set(rt.active_symbols())
     out: list[str] = []
-    for name in (sym,) + tuple(RESEARCH_ALIASES.get(sym, ())):
+    names = (sym,) + tuple(RESEARCH_ALIASES.get(sym, ()))
+    names += tuple(n + sfx for sfx in broker_suffixes(rt) for n in names)
+    for name in names:
         if name and name not in out and (name == sym or name not in active):
             out.append(name)
     return out

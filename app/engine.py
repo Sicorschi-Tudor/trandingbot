@@ -9,14 +9,15 @@ import re
 import sqlite3
 import threading
 import time
+import logging
 import uuid
 from datetime import datetime, timedelta
 
 from . import indicators as ind
 from . import risk as risk_mod
-from . import scheduler, strategy
+from . import scheduler, smc, strategy
 from .ai_claude import ClaudeReviewer
-from .config import STRATEGY_VERSION, TF_SECONDS, VERSION, Settings, iso, parse_iso, utcnow
+from .config import STRATEGY_VERSION, TF_SECONDS, VERSION, Settings, iso, parse_iso, spread_cap, utcnow
 from .db import DB
 from .executor import Executor
 from .forward import ForwardRunner
@@ -27,6 +28,7 @@ from .simfeed import SimFeed
 from .state import Runtime
 from . import trade_review as trade_review_mod
 from .ai_trader import AITrader
+from .basket import BasketTrader
 from .trade_review import TradeReviewer
 from .telegram import (TelegramNotifier, fmt_daily_start, fmt_intent, fmt_modify, fmt_risk_alert, fmt_signal,
                        fmt_trade)
@@ -43,6 +45,7 @@ DEAL_REASON = {4: "SL", 5: "TP", 3: "BOT", 0: "MANUAL", 1: "MANUAL", 2: "MANUAL"
 EQUITY_SNAPSHOT_S = 60.0
 LABEL_EVERY_S = 60.0
 DEFAULT_STRATEGY = "trend-v1"
+_hb = logging.getLogger("bot")  # per-bar heartbeat (data/bot.log only, not the DB)
 PATH_EVERY_S = 60  # live trade path rows: one per position per minute
 PATH_SOURCE = "live"
 # pre-AI arbitration: risk checks that may clear while Claude reviews (not a reason to skip the review)
@@ -74,6 +77,7 @@ class Engine:
         self.ai = ClaudeReviewer(settings)
         self.telegram = TelegramNotifier(settings, db, log_fn=self.rt.log)
         self.pm = PositionManager(self)
+        self.basket = BasketTrader(self)
         self.sim: SimFeed | None = SimFeed(self.rt) if settings.data_source == "sim" else None
         self.tasks: list[asyncio.Task] = []
         self.signal_tasks: set[asyncio.Task] = set()
@@ -119,8 +123,6 @@ class Engine:
         self.paper.load(self.db.get_setting("paper_state"))
         self.rt.load_bars_from_db()
         s = self.settings
-        if s.TRADING_MODE.strip().upper() == "LIVE":
-            self.rt.log("WARN", "engine", "TRADING_MODE=LIVE este refuzat în v1 → pornesc în PAPER")
         self.rt.log("INFO", "engine",
                     f"Pornire v{VERSION}: sursă={s.data_source} ({s.feed_label}), mod={self.rt.trading['mode']}, "
                     f"execuție={'armată' if self.rt.trading['execution_enabled'] else 'dezarmată'}, "
@@ -137,7 +139,7 @@ class Engine:
                                           f"hold {self.rt.strategy['max_hold_minutes']} min, sesiune "
                                           f"{self.rt.schedule['start']}–{self.rt.schedule['end']} {self.rt.schedule['tz']} "
                                           "(cheile fixate de profil ignoră valorile salvate din dashboard)")
-        elif "XAUUSD" not in self.rt.active_symbols():
+        elif not any("XAU" in x.upper() or "GOLD" in x.upper() for x in self.rt.active_symbols()):
             self.rt.log("INFO", "engine", "Pentru configurația „doar aur” pune PROFILE=gold în .env (docs/PROFIL_AUR.md)")
         self._perf_startup()
         try:
@@ -352,7 +354,8 @@ class Engine:
             return False, "o singură poziție pe simbol"
         positions = self.symbol_positions(symbol, mode)
         reason = strategy.pyramid_blocker(side, positions, max_per, float(rk.get("pyramid_min_r", 0.5) or 0),
-                                          float(rk.get("pyramid_min_distance_atr", 0) or 0))
+                                          float(rk.get("pyramid_min_distance_atr", 0) or 0),
+                                          allow_opposite=bool(rk.get("allow_hedge")))
         if reason:
             return False, reason.rstrip(".")
         return True, f"piramidare: {len(positions)}/{max_per} poziții, toate ≥ {float(rk.get('pyramid_min_r', 0.5)):g}R"
@@ -440,8 +443,55 @@ class Engine:
             self.telegram.enqueue(f"{trade.get('mode')}:{trade.get('ticket')}", "POSITION_CLOSED", fmt_trade(trade, self.tz()))
             self.trade_reviews.on_trade_closed(trade)
 
+    def history_reset_ts(self) -> float:
+        """Owner's 'start from zero' point (settings key history_reset): MT5 deals closed before it are never recorded
+        again, although the EA keeps resending the account's last 24 h of deals."""
+        r = self.db.get_setting("history_reset")
+        try:
+            return float((r or {}).get("ts") or 0)
+        except (TypeError, ValueError, AttributeError):
+            return 0.0
+
+    def clear_history(self, what: str) -> dict:
+        """Owner's 'clean page' buttons (Positions page): delete the finished execution intents ('intents') or the closed
+        trades ('trades'). Rows still needed live are kept: intents in flight and the intents of open positions (their
+        initial SL / signal), trade paths of open positions. The deleted rows are exported first to
+        data/backup/history-<what>-<time>.json. Clearing trades also moves the history_reset point to now, so the EA's
+        resent last-24h deals do not bring them back."""
+        if what not in ("intents", "trades"):
+            raise EngineError(400, "what = intents | trades")
+        from .config import ROOT_DIR
+        from .executor import PENDING_STATES
+        open_tickets = [int(p["ticket"]) for p in self.bot_positions("ALL") if p.get("ticket") is not None]
+        now = time.time()
+        if what == "intents":
+            ph_s = ",".join("?" * len(PENDING_STATES))
+            ph_t = ",".join("?" * len(open_tickets)) or "NULL"
+            where = f"state NOT IN ({ph_s}) AND (ticket IS NULL OR ticket NOT IN ({ph_t}))"
+            params = tuple(PENDING_STATES) + tuple(open_tickets)
+            table = "intents"
+        else:
+            where, params, table = "1=1", (), "trades"
+        rows = self.db.query(f"SELECT * FROM {table} WHERE {where}", params)
+        out_dir = ROOT_DIR / "data" / "backup"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"history-{what}-{datetime.fromtimestamp(now).strftime('%Y%m%d-%H%M%S')}.json"
+        path.write_text(json.dumps(rows, ensure_ascii=False, default=str))
+        self.db.execute(f"DELETE FROM {table} WHERE {where}", params)
+        if what == "trades":
+            ph_t = ",".join("?" * len(open_tickets))
+            self.db.execute("DELETE FROM trade_paths" + (f" WHERE trade_id NOT IN ({ph_t})" if open_tickets else ""),
+                            tuple(str(t) for t in open_tickets))
+            self.db.set_setting("history_reset", {"ts": now, "note": "dashboard: Tranzacții închise → Șterge istoricul"})
+        label = "intențiile de execuție" if what == "intents" else "tranzacțiile închise"
+        self.rt.log("WARN", "control", f"Istoric șters din dashboard: {len(rows)} {label} (copie {path.name})")
+        return {"ok": True, "deleted": len(rows), "backup": str(path.relative_to(ROOT_DIR))}
+
     def ingest_deals(self, deals: list[dict]) -> None:
         magic = self.settings.MT5_MAGIC
+        reset_ts = self.history_reset_ts()
+        if reset_ts:
+            deals = [d for d in deals if float(d.get("time") or 0) >= reset_ts]
         ins = {}
         bot_in = set()
         for d in deals:
@@ -921,7 +971,8 @@ class Engine:
 
     def _load_strategy_name(self) -> None:
         saved = self.db.get_setting("strategy")
-        name = saved.get("name") if isinstance(saved, dict) else None
+        # a profile's STRATEGY_NAME wins over the name saved from the dashboard
+        name = self.settings.STRATEGY_NAME.strip() or (saved.get("name") if isinstance(saved, dict) else None)
         if not name:
             return
         if name in self.strategy_names():
@@ -954,11 +1005,10 @@ class Engine:
 
     # ---- live trade paths -------------------------------------------------
     def _path_positions(self) -> list[tuple[str, dict]]:
-        """Open bot-owned positions (PAPER always, DEMO when the bridge serves a demo account)."""
+        """Open bot-owned positions (PAPER always, MT5 when the bridge is connected)."""
         rt = self.rt
         items = [("PAPER", p) for p in list(self.paper.positions.values())]
-        acc = rt.mt5_account or {}
-        if rt.bridge_connected() and acc.get("trade_mode") == 0:
+        if rt.bridge_connected():
             for p in rt.mt5_positions:
                 if int(p.get("magic") or 0) != self.settings.MT5_MAGIC:
                     continue
@@ -1084,9 +1134,14 @@ class Engine:
             if int(rt.risk.get("max_positions_per_symbol", 1) or 1) > 1 else None,
         )
         name, fn, cfg = self.active_strategy()
+        if name == "smc-v1":
+            ctx.htf_extra = {k: rt.closed_bars(symbol, k, now)[-150:] for k in smc.HTF_OF.get(tf, ("H1", "H4"))}
+            ctx.sl_bars = rt.closed_bars(symbol, "M1", now)[-120:]
         a = fn(symbol, sig_bars, htf_bars, rt.quotes.get(symbol), cfg, rt.risk, ctx)
         if name != DEFAULT_STRATEGY:
             a["strategy_version"] = name
+        if name == "scalp-v1":
+            self._attach_smc(symbol, a, sig_bars, now)
         self.record_analysis(a)
         try:
             self.ml.on_analysis(a)  # shadow logging in the ML thread; never changes `a` or the decision
@@ -1094,7 +1149,12 @@ class Engine:
             self._perf_warn_once("ml_analysis", f"ML umbră (analiză): {e!r}")
         rt.last_analysis[symbol] = a
         rt.engine_info["last_analysis_utc"] = a["time_utc"]
+        _hb.info("[analiză] %s %s %s → %s · %s", symbol, a.get("timeframe"), iso(a.get("bar_time")) if a.get("bar_time") else "",
+                 a["direction"], "; ".join(a.get("reasons") or [])[:200])
         rt.bus.publish("analysis", a)
+        if self.basket.enabled and a["direction"] in ("BUY", "SELL"):
+            a["reasons"].append("Mod coș activ: intrările le face managerul de coș, nu semnalele.")
+            allow_signal = False
         if a["direction"] in ("BUY", "SELL"):
             warm = self.warmup_reason(symbol, now) if allow_signal else None
             if symbol not in self.trade_symbols():
@@ -1114,6 +1174,26 @@ class Engine:
             else:
                 a["reasons"].append("Bara este prea veche pentru a emite un semnal nou (doar analiză).")
         return a
+
+    def _attach_smc(self, symbol: str, a: dict, sig_bars: list[dict], now: float) -> None:
+        """SMC 5-step check (app.smc, CLUB 81 model) on M15 with H1/H4: shown live (dashboard, Claude context) and turned
+        into the displayed direction lean, replacing the flat 40/40/20 of a HOLD. Display only: never opens a trade."""
+        tf = "M15"
+        try:
+            sig_bars = self.rt.closed_bars(symbol, tf, now)
+            htf = {k: self.rt.closed_bars(symbol, k, now)[-150:] for k in smc.HTF_OF[tf]}
+            q = self.rt.quotes.get(symbol) or {}
+            spread = float(q["ask"]) - float(q["bid"]) if q.get("ask") and q.get("bid") else 0.0
+            s = smc.analyze(sig_bars[-260:], htf, tf, spread, now)
+        except Exception as e:
+            self._perf_warn_once("smc", f"analiza SMC eșuată: {e!r}")
+            return
+        a["smc"] = s
+        if a["direction"] == "HOLD" and s.get("direction"):
+            # still a heuristic: the lean of the SMC picture (direction x completeness), not a calibrated probability
+            a["score"] = round(s["direction"] * s["score"] / 95.0, 3)
+            a["probabilities"] = strategy.probabilities(a["score"])
+            a["probability_method"] = f"SMC: {s.get('title')} (scor {s['score']}/95, euristic, NEcalibrat)"
 
     def _spawn_pipeline(self, sig: dict) -> None:
         try:
@@ -1235,6 +1315,11 @@ class Engine:
                 if ai.get("verdict") == "VETO" and self.settings.CLAUDE_VETO_ENABLED:
                     sig["status"] = "NO_TRADE"
                     sig["status_reason"] = "VETO Claude: " + (ai.get("explanation") or "")[:300]
+                elif (ai["status"] == "DONE" and ai.get("verdict") != "AGREE"
+                      and str(self.settings.CLAUDE_EXECUTE_ON).upper() == "AGREE"):
+                    sig["status"] = "NO_TRADE"
+                    sig["status_reason"] = (f"Claude nu a confirmat intrarea (verdict {ai.get('verdict')}): "
+                                            + (ai.get("explanation") or "")[:300])
                 elif ai["status"] == "ERROR" and self.settings.CLAUDE_REQUIRED:
                     sig["status"] = "NO_TRADE"
                     sig["status_reason"] = "Claude este obligatoriu (CLAUDE_REQUIRED=true) și a eșuat"
@@ -1288,7 +1373,59 @@ class Engine:
             ctx["local_time"] = datetime.fromtimestamp(now, scheduler._tz(self.tz())).strftime("%A %H:%M")
         except Exception as e:
             self._perf_warn_once("ai_context", f"context extins pentru Claude indisponibil: {e!r}")
+        if self.active_strategy_name() in ("scalp-v1", "smc-v1"):
+            try:
+                ctx["scalp"] = self._scalp_context(symbol)
+                ctx["smc_check"] = (self.rt.last_analysis.get(symbol) or {}).get("smc")
+            except Exception as e:
+                self._perf_warn_once("scalp_context", f"context scalp pentru Claude indisponibil: {e!r}")
         return ctx
+
+    def _scalp_context(self, symbol: str) -> dict:
+        """Multi-timeframe picture for the scalp entry analyst: compact bars + indicators on M1/M5/M15/H1 and the votes of
+        the bot's other strategies on M5 (H1 confirmation), so Claude weighs the RSI fade against the bigger trend."""
+        rt, now = self.rt, time.time()
+        q = rt.quotes.get(symbol) or {}
+        digits = int(q.get("digits") or 2)
+        r = lambda x, nd=digits: None if x is None else round(float(x), nd)  # noqa: E731
+        tfs = {}
+        for tf, n_show in (("M1", 30), ("M5", 24), ("M15", 16), ("H1", 24)):
+            bars = rt.closed_bars(symbol, tf, now)[-200:]
+            if len(bars) < 30:
+                continue
+            c = [b["c"] for b in bars]
+            h = [b["h"] for b in bars]
+            lo = [b["l"] for b in bars]
+            atr_s = ind.atr(h, lo, c, 14)
+            _, _, hist = ind.macd(c, 12, 26, 9)
+            mid, up, dn = ind.bollinger(c[-20:], 20, 2.0)
+            atr_hist = [x for x in atr_s[-100:] if x is not None]
+            tfs[tf] = {
+                "close": r(c[-1]), "rsi14": r(ind.last(ind.rsi(c, 14)), 1), "ema20": r(ind.last(ind.ema(c, 20))),
+                "ema50": r(ind.last(ind.ema(c, 50))), "atr14": r(ind.last(atr_s)),
+                "atr_vs_median": r((ind.last(atr_s) or 0) / (ind.median(atr_hist) or 1), 2) if atr_hist else None,
+                "macd_hist_last3": [r(x, digits + 1) for x in hist[-3:]],
+                "bollinger": {"lower": r(ind.last(dn)), "mid": r(ind.last(mid)), "upper": r(ind.last(up))},
+                "high20": r(max(h[-20:])), "low20": r(min(lo[-20:])), "high100": r(max(h[-100:])), "low100": r(min(lo[-100:])),
+                "bars": [[iso(b["t"])[11:16], r(b["o"]), r(b["h"]), r(b["l"]), r(b["c"])] for b in bars[-n_show:]],
+            }
+        votes = {}
+        reg = self.strategy_registry()
+        sig5, htf1 = rt.closed_bars(symbol, "M5", now)[-400:], rt.closed_bars(symbol, "H1", now)[-200:]
+        vctx = strategy.AnalysisContext(session_open=True, tick_age=0.0, now_ts=now, corr_limit=99)
+        for name in ("trend-v1", "meanrev-v1", "breakout-v1", "pullback-v1"):
+            try:
+                mod = reg.get(name)
+                cfg = {**reg.merged_cfg(name, self.rt.strategy), "signal_timeframe": "M5", "htf_timeframe": "H1",
+                       "min_sl_points": 60}
+                res = mod.analyze(symbol, sig5, htf1, q, cfg, {**self.rt.risk, "max_spread_points": 1e9}, vctx)
+                side = res["direction"] if res["direction"] in ("BUY", "SELL") else (res.get("candidate") or {}).get("side")
+                votes[name] = {"vote": side or "NONE", "why": "; ".join(res.get("reasons") or [])[:220]}
+            except Exception as e:
+                votes[name] = {"vote": "ERROR", "why": repr(e)[:120]}
+        return {"bars_format": "[ora UTC, open, high, low, close]", "timeframes": tfs,
+                "strategy_votes_m5_h1": votes, "spread_usd": r((q.get("ask") or 0) - (q.get("bid") or 0)),
+                "point": q.get("point")}
 
     def try_execute(self, sig: dict) -> None:
         mode = self.mode()
@@ -1366,6 +1503,8 @@ class Engine:
     # ---- intents → signals / notifications -------------------------------
     def _on_intent_update(self, it: dict, prev: str | None) -> None:
         st = it["state"]
+        if it.get("kind") == "OPEN" and st in ("FAILED", "REJECTED"):
+            self.basket.on_open_failed(it)
         if prev is None:
             key = "PAPER" if it.get("mode") == "PAPER" else (
                 f"DEMO:{it['account_login']}" if it.get("account_login") is not None else self.account_key("DEMO"))
@@ -1425,8 +1564,6 @@ class Engine:
         if src == "MT5":
             if not self.rt.bridge_connected():
                 raise EngineError(409, "Bridge MT5 deconectat")
-            if (self.rt.mt5_account or {}).get("trade_mode") != 0:
-                raise EngineError(409, "Contul MT5 nu este DEMO")
             if self.executor.has_pending_for_ticket(int(ticket), kinds=("CLOSE",), states=("QUEUED", "DELIVERED")):
                 raise EngineError(409, "Există deja o comandă de închidere în curs pentru această poziție")
         return self.executor.submit_close(src, int(ticket), p["symbol"], p["side"], p["volume"],
@@ -1436,7 +1573,7 @@ class Engine:
         out = []
         for p in self.paper.public_positions():
             out.append(self.close_position("PAPER", p["ticket"], reason="CLOSE_ALL"))
-        if self.rt.bridge_connected() and (self.rt.mt5_account or {}).get("trade_mode") == 0:
+        if self.rt.bridge_connected():
             for p in self.mt5_positions_public():
                 if not p["bot_owned"]:
                     continue
@@ -1445,14 +1582,14 @@ class Engine:
                     continue
                 out.append(self.close_position("MT5", p["ticket"], reason="CLOSE_ALL"))
         elif any(p["bot_owned"] for p in self.mt5_positions_public()):
-            self.rt.log("WARN", "control", "CLOSE ALL: pozițiile MT5 ale botului NU au fost închise (bridge deconectat sau cont non-demo)")
+            self.rt.log("WARN", "control", "CLOSE ALL: pozițiile MT5 ale botului NU au fost închise (bridge deconectat)")
         self.rt.log("WARN", "control", f"CLOSE ALL: {len(out)} comenzi de închidere (doar poziții ale botului)")
         return out
 
     def set_mode(self, mode: str) -> None:
         mode = (mode or "").upper()
         if mode == "LIVE":
-            raise EngineError(403, "LIVE disabled in v1")
+            mode = "DEMO"
         if mode not in ("SIGNAL_ONLY", "PAPER", "DEMO"):
             raise EngineError(400, "Mod invalid")
         if mode == "DEMO":
@@ -1460,8 +1597,6 @@ class Engine:
                 raise EngineError(409, "DEMO indisponibil: DATA_SOURCE=sim (feed simulat)")
             if not self.rt.bridge_connected():
                 raise EngineError(409, "DEMO indisponibil: bridge-ul MT5 nu este conectat")
-            if (self.rt.mt5_account or {}).get("trade_mode") != 0:
-                raise EngineError(409, "DEMO indisponibil: contul MT5 nu este de tip DEMO")
             if self.rt.bridge.get("magic_ok") is not True:
                 raise EngineError(409, f"DEMO indisponibil: magic EA ({self.rt.bridge.get('magic')}) diferit de MT5_MAGIC ({self.settings.MT5_MAGIC})")
         prev = self.rt.trading["mode"]
@@ -1474,8 +1609,8 @@ class Engine:
 
     def set_execution(self, enabled: bool) -> None:
         if enabled and self.mode() == "DEMO":
-            if not self.rt.bridge_connected() or (self.rt.mt5_account or {}).get("trade_mode") != 0:
-                raise EngineError(409, "Nu pot arma execuția DEMO: bridge deconectat sau cont non-demo")
+            if not self.rt.bridge_connected():
+                raise EngineError(409, "Nu pot arma execuția MT5: bridge deconectat")
             if self.rt.bridge.get("magic_ok") is not True:
                 raise EngineError(409, "Nu pot arma execuția DEMO: magic EA diferit de MT5_MAGIC")
         if enabled and not self.rt.trading["execution_enabled"]:
@@ -1515,6 +1650,177 @@ class Engine:
         self.rt.log("INFO", "control", f"Ordin de test {side} {symbol} ({mode})")
         return self.executor.submit_open(mode, symbol, side, rc["volume"], sl, tp, q, rc)
 
+    # ---- live pipeline status (what the bot is doing right now, step by step) ---------------------------------------
+    def live_status(self) -> dict:
+        """One snapshot per trade symbol: data feed -> analysis -> signal -> Claude -> order -> position (ladder), each
+        step with state ok | wait | bad | idle and a Romanian line, plus a headline saying what the bot does now."""
+        rt, now = self.rt, time.time()
+        mode = self.mode()
+        tf = rt.strategy["signal_timeframe"]
+        sec = TF_SECONDS.get(tf, 60)
+        bridge_ok = self.settings.data_source == "sim" or rt.bridge_connected()
+        armed = mode in ("PAPER", "DEMO") and rt.trading["execution_enabled"] and not rt.trading["entries_paused"]
+        rows = self.db.query("SELECT data_json FROM signals WHERE created_at_utc >= ? ORDER BY created_at_utc DESC LIMIT 300",
+                             (self.day_start_iso(),))
+        today = [json.loads(r["data_json"]) for r in rows]
+        verdicts: dict[str, int] = {}
+        for sg in today:
+            v = (sg.get("ai") or {}).get("verdict") or (sg.get("ai") or {}).get("status")
+            if v:
+                verdicts[v] = verdicts.get(v, 0) + 1
+        out = []
+        for sym in self.trade_symbols() or rt.active_symbols():
+            q = rt.quotes.get(sym) or {}
+            a = rt.last_analysis.get(sym) or {}
+            age = rt.tick_age(sym, now)
+            spread, max_sp = q.get("spread_points"), spread_cap(rt.risk.get("max_spread_points", 30), sym, q.get("point"))
+            steps = []
+
+            def step(name, state, text):
+                steps.append({"step": name, "state": state, "text": text})
+
+            if not bridge_ok:
+                step("Date MT5", "bad", "Bridge MT5 deconectat — pornește MT5 cu EA-ul AIBridgeEA pe grafic.")
+            elif age is None or age > float(rt.risk.get("max_tick_age_seconds", 10)):
+                step("Date MT5", "bad", f"Fără cotații proaspete (ultimul tick acum {age if age is None else round(age)} s) — "
+                                        "piață închisă (weekend / pauza zilnică) sau EA oprit.")
+            else:
+                sp_txt = f"spread {spread} puncte (max {max_sp:g})" if spread is not None else "spread necunoscut"
+                step("Date MT5", "ok" if spread is None or spread <= max_sp else "bad",
+                     f"Cotații live, tick acum {age:.1f} s, {sp_txt}.")
+            warm = self.warmup_reason(sym, now)
+            a_ts = _ts(a.get("time_utc"))
+            next_bar = (math.floor(now / sec) + 1) * sec
+            if warm:
+                step("Analiză", "wait", f"Încălzire după pornire: {warm}.")
+            elif not a:
+                step("Analiză", "wait", "Aștept prima bară închisă.")
+            else:
+                stale = a_ts is not None and now - a_ts > 3 * sec
+                ind_ = a.get("indicators") or {}
+                rsi_txt = f"RSI {ind_['rsi']:.1f}" if isinstance(ind_.get("rsi"), (int, float)) else "RSI —"
+                step("Analiză", "bad" if stale else "ok",
+                     f"Ultima analiză {tf} acum {round(now - a_ts) if a_ts else '?'} s ({rsi_txt}); următoarea în "
+                     f"{max(0, round(next_bar - now))} s. " + ("; ".join(a.get("reasons") or [])[:300]))
+            cand = a.get("candidate") or {}
+            if a.get("direction") in ("BUY", "SELL"):
+                step("Semnal", "ok", f"Propunere {a['direction']} la {a.get('entry')} (SL {a.get('stop_loss')}, TP {a.get('take_profit')}).")
+            elif cand.get("blockers"):
+                step("Semnal", "bad", f"Setup {cand.get('side')} blocat: " + "; ".join(cand["blockers"])[:300])
+            else:
+                rsi_now = (a.get("indicators") or {}).get("rsi")
+                cond = ("Condiția de intrare: RSI(14) pe M1 sub 30 → BUY sau peste 70 → SELL"
+                        + (f"; acum RSI {rsi_now:.1f}" if isinstance(rsi_now, (int, float)) else "")
+                        if self.active_strategy_name() == "scalp-v1" else
+                        "Condiția de intrare: verdict SMC «Intră» (scor ≥ 50, trend H1/H4 nu e contra, lichiditate ridicată "
+                        "sau BOS) cu prețul deja în order block" if self.active_strategy_name() == "smc-v1"
+                        else "Condiția de intrare a strategiei")
+                step("Semnal", "idle", f"Nicio propunere pe ultima bară. {cond} — nu e îndeplinită.")
+            sm = a.get("smc")
+            if sm:
+                sm_state = {"ENTER": "ok", "WAIT": "wait", "STOP": "bad"}.get(sm.get("verdict"), "idle")
+                done = " · ".join(f"{x['name']}: {'✓' if x['status'] == 'pass' else '½' if x['status'] == 'partial' else '✗'}"
+                                  for x in sm.get("steps") or [])
+                step("SMC", sm_state, f"{sm.get('title')} · {done}")
+            last = next((sg for sg in today if sg.get("symbol") == sym), None)
+            pending = [sg for sg in today if sg.get("symbol") == sym and sg.get("status") == "NEW"
+                       and (sg.get("ai") or {}).get("status") == "PENDING"]
+            if not self.ai.enabled:
+                step("Claude", "idle", "Analiza Claude este dezactivată.")
+            elif pending:
+                waited = now - (pending[0].get("created_ts") or now)
+                step("Claude", "wait", f"Claude analizează propunerea {pending[0]['direction']} de {waited:.0f} s "
+                                       f"(model {self.settings.CLAUDE_MODEL}, efort {self.ai.effort}).")
+            elif last and (last.get("ai") or {}).get("status") in ("DONE", "ERROR"):
+                ai = last["ai"]
+                pf = ai.get("p_first_step")
+                step("Claude", "bad" if ai.get("status") == "ERROR" else "ok",
+                     f"Ultimul verdict: {ai.get('verdict') or ai.get('status')}"
+                     + (f" (p={pf:.2f})" if isinstance(pf, (int, float)) else "")
+                     + f" — {(ai.get('explanation') or '')[:240]}")
+            else:
+                step("Claude", "idle", "Aștept o propunere de analizat.")
+            if not armed:
+                step("Ordin", "bad", f"Execuția nu e armată (mod {mode}, "
+                                     f"{'pauză intrări' if rt.trading['entries_paused'] else 'dezarmat'}).")
+            elif last:
+                st_ = last.get("status")
+                step("Ordin", "ok" if st_ in ("EXECUTED", "INTENT_CREATED") else "idle",
+                     f"Ultimul semnal {last.get('direction')} {fmt_hm(last.get('created_at_utc'))}: {st_} — "
+                     f"{(last.get('status_reason') or '')[:240]}")
+            else:
+                step("Ordin", "idle", "Niciun semnal azi.")
+            bs = self.basket.status(sym)
+            if bs is not None:
+                if bs.get("analysis") and not bs.get("n"):
+                    step("Analiză" + (" termen scurt" if bs.get("vote") == "short" else " 4 grafice"), "wait",
+                         f"Ultima analiză: {bs['analysis']}")
+                cl = self.basket.claude_last if self.basket.claude_on() else None
+                if self.basket.claude_on():
+                    step("Claude decide", "ok" if (cl or {}).get("status") == "DONE" else "wait",
+                         (f"{cl.get('time_utc')}: " + ("; ".join(cl.get("done") or []) or "aștept")
+                          + f" · {str(cl.get('market_view') or '')[:160]} · plan: {str(cl.get('plan') or '')[:160]}")
+                         if cl else "Claude decide la fiecare bară M1 închisă — prima decizie vine imediat.")
+                if bs.get("n") and bs.get("zr"):
+                    step("Coș", "wait" if bs["n"] > 1 else "ok",
+                         f"Strategia 2 (lot dublu): {bs.get('side')}, total {bs.get('total', 0):+.2f} USD · "
+                         f"închid tot la +{bs['target']:g} sau −{bs['stop_usd']:g} · zona {bs.get('levels_line')}")
+                elif bs.get("n") and bs.get("recovery"):
+                    step("Coș", "wait", f"ACOPERIRE continuă (runda {bs.get('rounds') or 0}): {bs.get('side')}, total "
+                                        f"{bs.get('total', 0):+.2f} USD — închid tot grupul la +{bs['target']:g} "
+                                        f"(scos pe zero) sau la −{bs['stop_usd']:g}"
+                                        + (f" · {bs['analysis']}" if bs.get("analysis") else ""))
+                elif bs.get("n"):
+                    step("Coș", "ok", f"{bs.get('side')} {bs['n']}/{bs['max']} poziții, total {bs.get('total', 0):+.2f} USD · "
+                                      + (f"analiză: {bs['analysis']} · " if bs.get("analysis") else "")
+                                      + f"închid toate la +{bs.get('target', bs['tp']):g} sau "
+                                        f"−{bs.get('stop_usd', bs['stop']):g}"
+                                      + ("" if bs.get("entry") == "mtf" else
+                                         f" · următoarea poziție la {bs['next_add']}" if bs.get("next_add") else " · coș plin"))
+                elif bs.get("strategy") == "s2":
+                    step("Coș", "wait", "Strategia 2 (lot dublu): fără poziții — deschid prima poziție când M1 și M5 "
+                                        "arată aceeași direcție.")
+                elif bs.get("entry") == "mtf":
+                    step("Coș", "wait", ("Fără poziții — analizez termenul scurt (M1 + M5) la fiecare bară M1 închisă și "
+                                         "deschid o poziție doar când amândouă arată aceeași direcție; M15/H1 doar ca "
+                                         "context." if bs.get("vote") == "short" else
+                                         f"Fără poziții — analizez M1/M5/M15/H1 la fiecare bară M1 închisă și deschid o "
+                                         f"poziție doar când minim {bs.get('min_votes')} din 4 sunt de acord."))
+                else:
+                    step("Coș", "wait", f"Coș gol — deschid {bs['start']} poziții în direcția impulsului ({bs['mom']} bare "
+                                        f"M1); +1 la fiecare {bs['step']:g} USD contra, max {bs['max']}; închid toate la "
+                                        + (f"+{bs['tp_pos']:g} USD/poziție." if bs.get("tp_pos") else f"+{bs['tp']:g} USD."))
+            pos = [p for p in self.bot_positions(mode) if p.get("symbol") == sym]
+            pos_txt = None
+            if pos:
+                p0 = pos[0]
+                pos_txt = (f"{p0.get('side')} {p0.get('volume')} @ {p0.get('price_open')}: profit {p0.get('profit')} · "
+                           f"SL {p0.get('sl')} · TP {p0.get('tp')}")
+                step("Poziție", "ok", pos_txt + " — managerul urcă TP/SL pe scară la fiecare secundă.")
+            else:
+                step("Poziție", "idle", "Nicio poziție deschisă.")
+
+            # headline: the first problem, else what the bot is waiting for
+            bad = next((s_ for s_ in steps if s_["state"] == "bad" and s_["step"] in ("Date MT5", "Analiză", "Ordin")), None)
+            if bad:
+                headline, level = f"Oprit: {bad['text']}", "bad"
+            elif pos:
+                headline, level = f"Poziție deschisă — {pos_txt}", "ok"
+            elif warm:
+                headline, level = f"Pornire: {warm} — apoi analizează fiecare bară {tf}.", "wait"
+            elif pending:
+                headline, level = "Claude analizează o propunere de intrare…", "wait"
+            elif cand.get("blockers"):
+                headline, level = "Setup găsit, dar blocat de filtre (vezi pasul Semnal).", "wait"
+            else:
+                headline, level = (f"Lucrează normal — analizează fiecare bară {tf} și așteaptă condiția de intrare. "
+                                   f"Următoarea analiză în {max(0, round(next_bar - now))} s."), "ok"
+            out.append({"symbol": sym, "level": level, "headline": headline, "steps": steps, "time_utc": iso(now)})
+        return {"symbols": out, "strategy": self.active_strategy_name(), "mode": mode, "armed": armed,
+                "today": {"signals": len(today), "verdicts": verdicts,
+                          "executed": sum(1 for sg in today if sg.get("status") == "EXECUTED"),
+                          "trades_closed": len(self.closed_today(mode if mode in ("PAPER", "DEMO") else None))}}
+
     # ---- status ----------------------------------------------------------
     def status(self) -> dict:
         rt, s = self.rt, self.settings
@@ -1546,7 +1852,7 @@ class Engine:
             "session": self.session(),
             "trading": {"mode": mode, "execution_enabled": rt.trading["execution_enabled"],
                         "trade_symbols": self.trade_symbols(), "profile": s.profile_name or None,
-                        "entries_paused": rt.trading["entries_paused"], "live_allowed": False},
+                        "entries_paused": rt.trading["entries_paused"], "live_allowed": bool(s.LIVE_TRADING_ALLOWED)},
             "ai": self.ai.status(),
             "telegram": self.telegram.status(),
             "counts": {
@@ -1574,7 +1880,7 @@ class Engine:
                 "symbol": sym, "enabled": True, "bid": (q or {}).get("bid"), "ask": (q or {}).get("ask"),
                 "spread_points": (q or {}).get("spread_points"), "digits": (q or {}).get("digits"),
                 "point": (q or {}).get("point"), "tick_age_s": round(age, 1) if age is not None else None,
-                "quality": quality, "max_spread_points": rt.risk.get("max_spread_points"),
+                "quality": quality, "max_spread_points": spread_cap(rt.risk.get("max_spread_points", 30), sym, (q or {}).get("point")),
                 "analysis": rt.last_analysis.get(sym),
             })
         return out
@@ -2078,6 +2384,11 @@ class Engine:
             self.pm.run(now)
         except Exception as e:
             rt.log("ERROR", "positions", f"position manager: {e!r}")
+        if not self.warmup_reason("", now):
+            try:
+                self.basket.tick(now)
+            except Exception as e:
+                rt.log("ERROR", "basket", f"coș: {e!r}")
         try:
             self.track_trade_paths(now)
         except Exception as e:
@@ -2246,6 +2557,12 @@ def shadow_group(rows: list[dict]) -> dict:
         "avg_mfe_r": round(sum(mfe) / len(mfe), 3) if mfe else None, "avg_mae_r": round(sum(mae) / len(mae), 3) if mae else None,
         "outcomes": outcomes, "small_sample": n < SHADOW_MIN_N,
     }
+
+
+def fmt_hm(s: str | None) -> str:
+    """'HH:MM UTC' of an ISO time, '' when missing."""
+    dt = parse_iso(s) if s else None
+    return dt.strftime("%H:%M UTC") if dt else ""
 
 
 def _ts(s: str | None) -> float | None:

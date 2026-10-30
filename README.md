@@ -17,7 +17,7 @@ MT5 (cont demo) ──EA AIBridgeEA──HTTP 127.0.0.1──▶ Server Python (
 ```
 
 - **De ce EA și nu pachetul Python `MetaTrader5`?** Pachetul Python merge doar pe Windows; tu ești pe macOS. EA-ul MQL5 merge și în MT5 pentru Mac, și pe Windows/VPS.
-- Moduri: `SIGNAL_ONLY` (doar semnale), `PAPER` (simulator intern), `DEMO` (ordine reale în contul demo; botul verifică singur că este cont demo). `LIVE` e refuzat.
+- Moduri: `SIGNAL_ONLY` (doar semnale), `PAPER` (simulator intern), `DEMO` / `LIVE` (ordine reale în contul MT5 conectat, demo sau real — tipul contului nu mai este verificat).
 
 ## Pasul 1 — completează `.env`
 

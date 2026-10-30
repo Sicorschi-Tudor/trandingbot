@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Any, Callable
 
-from .config import PROFILE_PINNED, TF_SECONDS, Settings, iso, redact, utcnow
+from .config import TF_SECONDS, Settings, iso, profile_pins, redact, utcnow
 from .db import DB
 
 log = logging.getLogger("bot")
@@ -108,15 +108,17 @@ class Runtime:
                         cur[k] = v
         if s.profile_name:
             # a named profile pins its symbols, the measured strategy frame, the session and the risk caps over
-            # anything saved from the dashboard (see config.PROFILE_PINNED); dashboard edits still apply until restart
+            # anything saved from the dashboard (see config.PROFILE_PINNED / profile_pins); dashboard edits still apply until restart
             defaults = {"strategy": s.default_strategy(), "schedule": s.default_schedule(), "risk": s.default_risk()}
-            for attr, keys in PROFILE_PINNED.items():
+            for attr, keys in profile_pins(s.profile_name).items():
                 cur = getattr(self, attr)
                 for k in keys:
                     if k in defaults[attr]:
                         cur[k] = defaults[attr][k]
         self.risk["must_have_sl_tp"] = True
         mode = s.TRADING_MODE.strip().upper()
+        if mode == "LIVE":
+            mode = "DEMO"
         if mode not in ("SIGNAL_ONLY", "PAPER", "DEMO"):
             mode = "PAPER"
         if mode == "DEMO" and s.data_source == "sim":

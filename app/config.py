@@ -42,7 +42,106 @@ PROFILES: dict[str, dict] = {
         "AI_TRADER_ENTRY_MODE": "shadow", "AI_TRADER_MANAGE_MODE": "shadow", "AI_TRADER_TIMEFRAME": "M15",
         "AI_TRADER_SYMBOLS": "XAUUSD",
     },
+    # owner's rule (2026-10-29): gold only, continuous M1 scalping — open one position, close it as soon as it is
+    # +SCALP_TARGET_USD in net profit (broker TP at the same distance as a backup), then look for the next entry on the
+    # next closed M1 bar. No session window, no daily/streak/news/cooldown/rollover limits, no Claude veto. The SL stays
+    # (broker-side protection) at max(ATR_SL_MULT x ATR(M1), MIN_SL_POINTS). NOT measured: with a ~1.2 USD demo spread a
+    # +1 USD target vs a ~3 USD stop needs a win rate above ~75 % to break even.
+    "gold_scalp": {
+        "ACTIVE_SYMBOLS": "XAUUSD", "TRADE_SYMBOLS": "XAUUSD", "CHART_TIMEFRAMES": "M1,M5,M15,H1",
+        "STRATEGY_NAME": "scalp-v1", "SIGNAL_TIMEFRAME": "M1", "HTF_TIMEFRAME": "M1",
+        "SCALP_TARGET_USD": 1.0, "FIXED_VOLUME_LOTS": 0.01,
+        # profit ladder measured on 105 days of M1 gold (scratch backtest, spread 0.47): with cap 10 the RSI entry made
+        # +0.03 USD/trade, 81 % of trades closed positive; a fixed +1 TP lost -0.44 USD/trade (losses are full SLs)
+        "LADDER_ENABLED": True, "LADDER_TRIGGER_USD": 0.3, "LADDER_STEP_USD": 0.5, "LADDER_SL_LAG_USD": 0.6,
+        "LADDER_CAP_USD": 10.0, "ATR_SL_MULT": 3.0, "ATR_TP_MULT": 1.0, "MIN_SL_POINTS": 300,
+        "MAX_HOLD_MINUTES": 0, "RESCUE_ENABLED": False, "BREAK_EVEN_AT_R": 0.0,
+        "TRAILING_ENABLED": False, "PROFIT_LOCK_ENABLED": False, "CLOSE_AT_SESSION_END": False,
+        "SESSION_ENABLED": False, "SESSION_START": "00:00", "SESSION_END": "23:59",
+        "SESSION_DAYS": "MON,TUE,WED,THU,FRI,SAT,SUN",
+        # spread is the main cost: at 0.20 USD every variant was positive, at 0.47 most were negative
+        "MAX_SPREAD_POINTS": 60.0, "MAX_VOLUME_LOTS": 0.05, "NEWS_BLACKOUT_MINUTES": 0, "MAX_OPEN_POSITIONS": 1,
+        "MAX_POSITIONS_PER_SYMBOL": 1, "MAX_SAME_CURRENCY_DIRECTION": 3, "MAX_TRADES_PER_DAY": 100000,
+        "MAX_CONSECUTIVE_LOSSES": 100000, "LOSS_STREAK_PAUSE_MINUTES": 0, "COOLDOWN_AFTER_LOSS_MINUTES": 0,
+        "ROLLOVER_BLACKOUT_MINUTES": 0, "MAX_SIGNALS_PER_SYMBOL_PER_SESSION": 100000, "MAX_DAILY_LOSS_PCT": 100.0,
+        "MAX_EQUITY_DRAWDOWN_PCT": 100.0, "MAX_TOTAL_OPEN_RISK_PCT": 100.0, "MIN_FREE_MARGIN_PCT": 10.0,
+        # Claude (claude-opus-5-5, effort high) decides every entry the RSI rule proposes: only an explicit AGREE trades,
+        # no answer = no trade. ~37 proposals/day x ~0.03-0.05 USD. Expiry 3 min covers the 10-60 s analysis.
+        "CLAUDE_ENABLED": True, "CLAUDE_VETO_ENABLED": True, "CLAUDE_REQUIRED": True, "CLAUDE_EXECUTE_ON": "AGREE",
+        "CLAUDE_REVIEW_EFFORT": "high", "CLAUDE_TIMEOUT_SECONDS": 60, "SIGNAL_EXPIRY_MINUTES": 3,
+        "CLAUDE_TRADE_REVIEW_ENABLED": False, "CLAUDE_DAILY_REVIEW_ENABLED": False,
+        "AI_TRADER_ENTRY_MODE": "off", "AI_TRADER_MANAGE_MODE": "off", "AI_TRADER_SYMBOLS": "XAUUSD",
+        "ARCHIVE_EXTRA": "off",  # no multi-year history downloads competing with the M1 feed
+    },
 }
+# owner's choice (2026-10-29): only the entry step changes = the CLUB 81 SMC check on M15 with H1/H4; steps 2-4 unchanged
+# (0.01 lot, SL max(3xATR(M1), 3 USD), TP +1, ladder to +10, Claude AGREE gate). Measured in the scratch backtest at -1 USD/trade with this exit; kept on DEMO by decision.
+PROFILES["gold_smc"] = {
+    **PROFILES["gold_scalp"], "STRATEGY_NAME": "smc-v1", "SIGNAL_TIMEFRAME": "M15", "HTF_TIMEFRAME": "H1",
+    "CHART_TIMEFRAMES": "M1,M5,M15,H1,H4", "SIGNAL_EXPIRY_MINUTES": 10,
+}
+
+# owner's choice (2026-10-29): many quick trades. gold_scalp's M1 RSI entry + ladder exit (the only fast frame that did not
+# lose in the scratch backtest: ~37 trades/day, 81 % positive, +0.03 USD/trade; SMC aggressive M1 was -0.29), with
+# Claude as a safety check only: everything but a VETO executes, no answer = trade anyway, medium effort for speed.
+PROFILES["gold_scalp_fast"] = {
+    **PROFILES["gold_scalp"], "CHART_TIMEFRAMES": "M1,M5,M15,H1,H4", "CLAUDE_EXECUTE_ON": "VETO",
+    "CLAUDE_REQUIRED": False, "CLAUDE_REVIEW_EFFORT": "medium", "CLAUDE_TIMEOUT_SECONDS": 30,
+}
+
+# owner's EXPERIMENT (2026-10-29): the basket scheme exactly as in the owner's video: 5 x 0.01 lot on gold
+# opened together in one direction, +1 every 0.50 USD against (max 8), all closed together once they average +1 USD
+# each; safety stop 30 % of the balance (not in the video); lot and target scale with the balance as in the video.
+# Scratch backtest (15 weeks M1): every week ended with the account lost - an experiment, not a measured edge.
+PROFILES["gold_basket"] = {
+    **PROFILES["gold_scalp"], "BASKET_ENABLED": True, "BASKET_START_POSITIONS": 5, "BASKET_STEP_USD": 0.5,
+    "BASKET_MAX_POSITIONS": 3, "BASKET_TP_PER_POSITION_USD": 0.8, "BASKET_POSITION_TP_USD": 0.8,
+    # scaled with the balance like the video: 0.01 lot per 150 USD (0.01 at 188, 0.02 at 300 ...), target 1 USD per
+    # 0.01 lot per position
+    "BASKET_LOT_PER_USD": 150.0, "MAX_VOLUME_LOTS": 1.0,
+    # 2026-10-30: entries from the 4-timeframe analysis, one position per closed M1 bar, max 3 (the demo margin limit)
+    "BASKET_ENTRY_MODE": "mtf", "BASKET_MTF_MIN_VOTES": 3,
+    # 2026-10-30 (owner): small basket stop -3 USD instead of 30 % of the balance; broker SL 3 USD per position as the
+    # offline protection. Scratch backtest of these rules (76 trading days, spread 0.30): -0.50 USD per close at -3 vs
+    # -0.42 at -51 - smaller losses, more of them, still negative.
+    "BASKET_MAX_LOSS_PCT": 0.0, "BASKET_MAX_LOSS_USD": 3.0,
+    # 2026-10-30 (owner): recovery hedge instead of the -3 stop: down 2 USD and the 4-TF analysis flipped -> 2 positions
+    # the other way; the group closes at +0.10 (about zero) or -15 USD. Broker SL 15 USD = offline protection only.
+    "BASKET_RECOVERY_ENABLED": True, "BASKET_RECOVERY_TRIGGER_USD": 2.0, "BASKET_RECOVERY_POSITIONS": 2,
+    "BASKET_RECOVERY_EXIT_USD": 0.1,
+    # 2026-10-30 (owner): let wrong positions run while the hedges work -> group cap -40 USD, broker SL 40 USD each
+    "BASKET_RECOVERY_MAX_LOSS_USD": 40.0, "BASKET_SL_DISTANCE": 40.0,
+    "ALLOW_HEDGE_POSITIONS": True, "BASKET_RECOVERY_FLIP": "fast",
+    # 2026-10-30 (owner): the trades are minutes long and close at +0.80 -> the direction comes from M1 + M5 only
+    "BASKET_ENTRY_VOTE": "short",
+    "LADDER_ENABLED": False, "SCALP_TARGET_USD": 0.0, "MAX_OPEN_POSITIONS": 8, "MAX_POSITIONS_PER_SYMBOL": 8,
+    "PYRAMID_MIN_R": -1000.0, "PYRAMID_MIN_DISTANCE_ATR": 0.0, "MAX_SPREAD_POINTS": 80.0,
+    # Claude is on so the "Claude ia deciziile" switch on the Positions page can use it (one call per M1 bar when on);
+    # with the switch off the basket rules decide and Claude is never called
+    "CLAUDE_ENABLED": True, "CLAUDE_REVIEW_EFFORT": "medium", "CLAUDE_TIMEOUT_SECONDS": 30,
+}
+
+# keys pinned by a profile on top of PROFILE_PINNED (the scalp profile also owns the limits it switches off)
+PROFILE_EXTRA_PINNED: dict[str, dict[str, tuple[str, ...]]] = {
+    "gold_scalp": {
+        "strategy": ("scalp_target_usd", "ladder_enabled", "ladder_trigger_usd", "ladder_step_usd",
+                     "ladder_sl_lag_usd", "ladder_cap_usd", "signal_expiry_minutes", "break_even_at_r", "trailing_enabled",
+                     "profit_lock_enabled"),
+        "risk": ("fixed_volume_lots", "max_trades_per_day", "max_consecutive_losses", "loss_streak_pause_minutes",
+                 "cooldown_after_loss_minutes", "rollover_blackout_minutes", "max_signals_per_symbol_per_session",
+                 "max_daily_loss_pct", "max_equity_drawdown_pct", "max_total_open_risk_pct", "min_free_margin_pct"),
+    },
+}
+
+
+PROFILE_EXTRA_PINNED["gold_smc"] = PROFILE_EXTRA_PINNED["gold_scalp"]
+PROFILE_EXTRA_PINNED["gold_scalp_fast"] = PROFILE_EXTRA_PINNED["gold_scalp"]
+PROFILE_EXTRA_PINNED["gold_basket"] = PROFILE_EXTRA_PINNED["gold_scalp"]
+
+
+def profile_pins(name: str) -> dict[str, tuple[str, ...]]:
+    extra = PROFILE_EXTRA_PINNED.get(name, {})
+    return {attr: keys + extra.get(attr, ()) for attr, keys in PROFILE_PINNED.items()}
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 VERSION = "0.1.0"
@@ -51,6 +150,16 @@ STRATEGY_VERSION = "trend-v1"
 TF_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}
 DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 MODES = ("SIGNAL_ONLY", "PAPER", "DEMO", "LIVE")
+
+
+def spread_cap(max_points, symbol: str, point) -> float:
+    """MAX_SPREAD_POINTS in the symbol's own points. Gold caps are measured in 0.01 USD points (2-digit quotes);
+    a broker quoting gold with 3 digits (Exness XAUUSDm, point 0.001) needs the cap x10 for the same USD spread."""
+    cap = float(max_points)
+    sym = (symbol or "").upper()
+    if ("XAU" in sym or "GOLD" in sym) and point and 0 < float(point) < 0.01:
+        cap *= 0.01 / float(point)
+    return round(cap, 6)
 
 
 class Settings(BaseSettings):
@@ -80,12 +189,14 @@ class Settings(BaseSettings):
     # symbols the bot may TRADE (subset of ACTIVE_SYMBOLS; empty = all). The others are still quoted, analysed and
     # shadow-labelled (context for Claude / ML), but never get a signal or an order.
     TRADE_SYMBOLS: str = ""
+    # live strategy plugin pinned by a profile ("" = the one saved from the dashboard, default trend-v1)
+    STRATEGY_NAME: str = ""
     SIGNAL_TIMEFRAME: str = "M5"
     HTF_TIMEFRAME: str = "H1"
     CHART_TIMEFRAMES: str = "M1,M5,M15,H1"
     TRADING_MODE: str = "PAPER"
     EXECUTION_ENABLED: bool = False
-    LIVE_TRADING_ALLOWED: bool = False
+    LIVE_TRADING_ALLOWED: bool = True
     MUST_HAVE_SL_TP: bool = True
     MAX_RISK_PER_TRADE_PCT: float = 0.25
     MAX_DAILY_LOSS_PCT: float = 1.0
@@ -96,6 +207,8 @@ class Settings(BaseSettings):
     MAX_SPREAD_POINTS: float = 30
     MAX_SLIPPAGE_POINTS: int = 20
     MAX_VOLUME_LOTS: float = 1.0
+    # > 0: every bot entry uses exactly this lot size (broker min/max/step apply) instead of risk-based sizing
+    FIXED_VOLUME_LOTS: float = 0.0
     MAX_SAME_CURRENCY_DIRECTION: int = 1
     MIN_FREE_MARGIN_PCT: float = 50
     MAX_TICK_AGE_SECONDS: float = 10
@@ -112,6 +225,8 @@ class Settings(BaseSettings):
     # A further position is allowed only in the SAME direction and only while every open position on the symbol is at
     # least PYRAMID_MIN_R in open profit (R = initial risk); an in-flight OPEN blocks adding. MAX_OPEN_POSITIONS still caps.
     MAX_POSITIONS_PER_SYMBOL: int = 1
+    # allow bot positions in BOTH directions on one symbol (basket recovery hedge only); default False
+    ALLOW_HEDGE_POSITIONS: bool = False
     PYRAMID_MIN_R: float = 0.5
     # a further position on the symbol must be at least this many ATR(14) away from every open entry on it (0 = off)
     PYRAMID_MIN_DISTANCE_ATR: float = 1.0
@@ -132,6 +247,63 @@ class Settings(BaseSettings):
     PROFIT_LOCK_GAP_R: float = 0.33
     PROFIT_LOCK_STEP_R: float = 0.1
     MAX_HOLD_MINUTES: int = 240
+    # > 0: the position manager closes a bot position once its net open profit (price + swap + commission) reaches
+    # this many account-currency units (CLOSE reason PROFIT_TARGET); 0 = off
+    SCALP_TARGET_USD: float = 0.0
+    # profit ladder (with SCALP_TARGET_USD as the first TP): once the open profit is within LADDER_TRIGGER_USD of the
+    # current TP, the TP moves LADDER_STEP_USD further and the SL locks max(0, trigger - LADDER_SL_LAG_USD) of profit
+    # (never backwards); at LADDER_CAP_USD the position is closed. Example 0.3 / 0.5 / 0.6 / 10: +0.70 -> TP 1.50,
+    # SL +0.10; +1.20 -> TP 2.00, SL +0.60; ... up to +10.
+    LADDER_ENABLED: bool = False
+    # basket / grid EXPERIMENT (app/basket.py): replaces the signal entries while on; see that module for the rules
+    BASKET_ENABLED: bool = False
+    BASKET_START_POSITIONS: int = 1
+    BASKET_STEP_USD: float = 3.0
+    BASKET_MAX_POSITIONS: int = 5
+    BASKET_TP_USD: float = 10.0
+    # > 0: the basket closes at this net profit per position (per 0.01 lot) instead of BASKET_TP_USD
+    BASKET_TP_PER_POSITION_USD: float = 0.0
+    # > 0: lot = 0.01 per this much balance (the profit target per position scales with it); 0 = fixed lot
+    BASKET_LOT_PER_USD: float = 0.0
+    # > 0: broker TP of every basket position at this profit per 0.01 lot (closes on its own); 0 = far TP
+    BASKET_POSITION_TP_USD: float = 0.0
+    # basket entries: momentum (burst of START positions + averaging every STEP) | mtf (one position per closed M1 bar
+    # when M1/M5/M15/H1 agree on >= BASKET_MTF_MIN_VOTES, re-analysis after every close)
+    BASKET_ENTRY_MODE: str = "momentum"
+    BASKET_MTF_MIN_VOTES: int = 3
+    # basket entry direction: short = M1 + M5 (EMA9 vs EMA21) both agree (M15/H1 only shown) | mtf = 4-TF consensus
+    BASKET_ENTRY_VOTE: str = "mtf"
+    # recovery hedge (app/basket.py): basket down TRIGGER and the 4-TF analysis flipped -> POSITIONS the other way, then
+    # the whole group closes at +EXIT_USD or -MAX_LOSS_USD
+    BASKET_RECOVERY_ENABLED: bool = False
+    BASKET_RECOVERY_TRIGGER_USD: float = 2.0
+    BASKET_RECOVERY_POSITIONS: int = 2
+    BASKET_RECOVERY_EXIT_USD: float = 0.1
+    BASKET_RECOVERY_MAX_LOSS_USD: float = 15.0
+    # a new hedge round also opens when the price moved this much further against the losers since the last round
+    BASKET_RECOVERY_STEP_USD: float = 1.0
+    # wait while the losers come back: hedge only once they worsened again by this much from their best level since the
+    # last round (with M1 against), or by BASKET_RECOVERY_STEP_USD without M1
+    BASKET_RECOVERY_TURN_USD: float = 0.5
+    # Strategy 2 (zone recovery, chosen on the Positions page): zone width, lot multiplier, max levels, group exit
+    BASKET_ZR_ZONE_USD: float = 2.0
+    BASKET_ZR_MULT: float = 2.0
+    BASKET_ZR_MAX_LEVELS: int = 4
+    BASKET_ZR_EXIT_USD: float = 1.0
+    # Claude manager (basket.claude on the Positions page): max lot per position and max open positions it may use
+    CLAUDE_MAX_LOT: float = 0.08
+    BASKET_MAX_POSITIONS_CLAUDE: int = 8
+    # how the "chart turned" is read: fast = M1 + M5 (EMA9 vs EMA21) both against the basket | mtf = the 4-TF consensus
+    BASKET_RECOVERY_FLIP: str = "fast"
+    # > 0: basket stop = this % of the balance at the basket's first entry, instead of BASKET_MAX_LOSS_USD
+    BASKET_MAX_LOSS_PCT: float = 0.0
+    BASKET_MAX_LOSS_USD: float = 60.0
+    BASKET_SL_DISTANCE: float = 30.0
+    BASKET_MOMENTUM_BARS: int = 20
+    LADDER_TRIGGER_USD: float = 0.3
+    LADDER_STEP_USD: float = 0.5
+    LADDER_SL_LAG_USD: float = 0.6
+    LADDER_CAP_USD: float = 10.0
     CLOSE_AT_SESSION_END: bool = False
     # rescue exit: after RESCUE_MINUTES open, MAE ≥ RESCUE_MAE_R and ≥ RESCUE_NEG_FRAC of the 1-min samples under
     # water, close at the first r ≥ RESCUE_CLOSE_R (CLOSE reason RESCUE; never moves the SL)
@@ -146,6 +318,8 @@ class Settings(BaseSettings):
     CLAUDE_MODEL: str = "claude-opus-5-5"
     CLAUDE_VETO_ENABLED: bool = True
     CLAUDE_REQUIRED: bool = False
+    # which verdict lets a signal execute: VETO (default: everything but a VETO) | AGREE (only an explicit AGREE)
+    CLAUDE_EXECUTE_ON: str = "VETO"
     CLAUDE_TIMEOUT_SECONDS: float = 45
     # reasoning depth of every Claude call (adaptive thinking is always on): low | medium | high | xhigh | max
     CLAUDE_REVIEW_EFFORT: str = "medium"
@@ -246,6 +420,7 @@ class Settings(BaseSettings):
             "max_spread_points": self.MAX_SPREAD_POINTS,
             "max_slippage_points": self.MAX_SLIPPAGE_POINTS,
             "max_volume_lots": self.MAX_VOLUME_LOTS,
+            "fixed_volume_lots": self.FIXED_VOLUME_LOTS,
             "max_same_currency_direction": self.MAX_SAME_CURRENCY_DIRECTION,
             "min_free_margin_pct": self.MIN_FREE_MARGIN_PCT,
             "max_tick_age_seconds": self.MAX_TICK_AGE_SECONDS,
@@ -257,6 +432,7 @@ class Settings(BaseSettings):
             "cooldown_after_loss_minutes": self.COOLDOWN_AFTER_LOSS_MINUTES,
             "rollover_blackout_minutes": self.ROLLOVER_BLACKOUT_MINUTES,
             "max_positions_per_symbol": self.MAX_POSITIONS_PER_SYMBOL,
+            "allow_hedge": self.ALLOW_HEDGE_POSITIONS,
             "pyramid_min_r": self.PYRAMID_MIN_R,
             "pyramid_min_distance_atr": self.PYRAMID_MIN_DISTANCE_ATR,
         }
@@ -288,6 +464,12 @@ class Settings(BaseSettings):
             "profit_lock_gap_r": self.PROFIT_LOCK_GAP_R,
             "profit_lock_step_r": self.PROFIT_LOCK_STEP_R,
             "max_hold_minutes": self.MAX_HOLD_MINUTES,
+            "scalp_target_usd": self.SCALP_TARGET_USD,
+            "ladder_enabled": self.LADDER_ENABLED,
+            "ladder_trigger_usd": self.LADDER_TRIGGER_USD,
+            "ladder_step_usd": self.LADDER_STEP_USD,
+            "ladder_sl_lag_usd": self.LADDER_SL_LAG_USD,
+            "ladder_cap_usd": self.LADDER_CAP_USD,
             "close_at_session_end": self.CLOSE_AT_SESSION_END,
             "be_lock_r": self.BE_LOCK_R,
             "rescue_enabled": self.RESCUE_ENABLED,

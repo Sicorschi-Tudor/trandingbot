@@ -106,7 +106,7 @@ Cifre: ~36 000 de linii, ~60 de module Python, EA MQL5 de ~1 800 de linii, dashb
 |---|---|
 | `SIGNAL_ONLY` | Analizează și produce semnale, dar nu execută nimic. |
 | `PAPER` | Execută ordinele într-un **broker simulat intern** folosind bid/ask-ul live. Nu atinge MT5. |
-| `DEMO` | Trimite ordine **reale** către contul MT5 — **doar** dacă EA-ul raportează `trade_mode == 0` (cont DEMO). Orice altceva e blocat. |
+| `DEMO` | Trimite ordine **reale** către contul MT5 conectat (demo sau real; tipul contului nu este verificat). `LIVE` este echivalent. |
 | `LIVE` | Există doar ca nume; serverul îl **refuză** (403). |
 
 Pe lângă mod, există comutatorul **Execuție: armată / dezarmată** (pornește mereu dezarmată) și **Pauză intrări noi** (kill switch). După o repornire, botul **nu** revine singur în DEMO armat decât dacă `.env` spune explicit `TRADING_MODE=DEMO` și `EXECUTION_ENABLED=true`.
@@ -307,10 +307,10 @@ Fișier: `app/risk.py`. Complet **independent de AI**. Fiecare verificare produc
 
 | # | Verificare | Ce verifică |
 |---|---|---|
-| 1 | `mode_allows_execution` | mod PAPER/DEMO și execuție armată (nu SIGNAL_ONLY, nu LIVE) |
+| 1 | `mode_allows_execution` | mod PAPER/DEMO/LIVE și execuție armată (nu SIGNAL_ONLY) |
 | 2 | `entries_not_paused` | kill switch-ul nu e activ |
 | 3 | `bridge_connected` | (DEMO) EA-ul e conectat |
-| 4 | `account_is_demo` | (DEMO) `trade_mode == 0` |
+| 4 | ~~`account_is_demo`~~ | eliminat — tipul contului nu mai este verificat |
 | 5 | `terminal_trade_allowed` | (DEMO) terminalul și contul permit trading algoritmic |
 | 6 | `ea_magic_matches` | (DEMO) EA-ul folosește același magic ca serverul |
 | 7 | `account_settled` | (DEMO) contul nu e în curs de actualizare (după schimbări) |
@@ -602,7 +602,7 @@ CLI: `python -m app.ml train | list | approve | retire | shadow`.
 
 ## 30. Securitate și reguli de siguranță
 
-- **LIVE blocat** în cod; DEMO doar pe cont verificat ca demo (`trade_mode == 0`).
+- DEMO/LIVE rulează pe orice cont MT5 (demo sau real); tipul contului nu este verificat.
 - **SL și TP obligatorii** pe fiecare ordin (`MUST_HAVE_SL_TP`).
 - Botul atinge **doar** pozițiile cu magicul lui (`552211`); pozițiile manuale sunt afișate, dar nu modificate.
 - **Kill switch** (pauză intrări) separat de **close-all** (care cere dublă confirmare).

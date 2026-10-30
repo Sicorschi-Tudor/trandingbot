@@ -308,7 +308,7 @@ function renderOverview() {
   if (st.data_source === 'sim') { mt5Empty = 'neconfigurat'; mt5Msg = ' Feed simulat activ — nu există cont MT5.'; }
   else if (b.connected) { mt5Empty = 'neconfigurat'; mt5Msg = ' EA conectat, dar contul nu a fost raportat încă.'; }
   const acc = st.account;
-  const mt5Tag = acc ? (acc.is_demo ? '<span class="badge ok">DEMO</span>' : '<span class="badge bad">REAL — execuția blocată</span>') : '<span class="badge">—</span>';
+  const mt5Tag = acc ? (acc.is_demo ? '<span class="badge ok">DEMO</span>' : '<span class="badge bad">REAL</span>') : '<span class="badge">—</span>';
   $('#ov-accounts').innerHTML =
     accountCard('Cont MT5', mt5Tag, acc, mt5Empty, mt5Msg) +
     accountCard('Cont PAPER (simulare)', '<span class="badge violet">PAPER</span>', st.paper_account || null, 'neconfigurat', ' Contul paper nu este disponibil.');
@@ -347,6 +347,34 @@ function renderOverview() {
     </dl>`;
   renderNewsCard();
 }
+
+/* live pipeline status (GET /live): what the bot is doing right now, step by step; refreshed every 3 s */
+const LIVE_CLS = { ok: 'ok', wait: 'warn', bad: 'bad', idle: '' };
+const LIVE_TXT = { ok: 'OK', wait: 'AȘTEAPTĂ', bad: 'PROBLEMĂ', idle: '—' };
+async function loadLive() {
+  let d;
+  try { d = await api('/live'); } catch (e) {
+    $('#ov-live').innerHTML = `<div class="card-head"><h2>Status live</h2><span class="badge bad">PROBLEMĂ</span></div><p class="down">${esc(e.message)}</p>`;
+    return;
+  }
+  const t = d.today || {};
+  const verd = Object.entries(t.verdicts || {}).map(([k, v]) => `${esc(k)} ${v}`).join(' · ') || '—';
+  const blocks = (d.symbols || []).map((s) => `
+    <div style="margin:6px 0 12px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <span class="badge ${LIVE_CLS[s.level] || ''} lg">${esc(s.symbol)}</span><b>${esc(s.headline)}</b></div>
+      <table class="tbl"><tbody>${s.steps.map((st) => `<tr>
+        <td style="width:110px;white-space:nowrap">${esc(st.step)}</td>
+        <td style="width:100px"><span class="badge ${LIVE_CLS[st.state] || ''}">${LIVE_TXT[st.state] || esc(st.state)}</span></td>
+        <td style="white-space:normal">${esc(st.text)}</td></tr>`).join('')}</tbody></table>
+    </div>`).join('');
+  $('#ov-live').innerHTML = `<div class="card-head"><h2>Status live</h2>
+      <span class="sub">strategie ${esc(d.strategy)} · mod ${esc(d.mode)} · ${d.armed ? '<b class="up">armat</b>' : '<b class="down">nearmat</b>'}
+      · azi: ${t.signals ?? 0} propuneri, verdicte Claude: ${verd}, executate ${t.executed ?? 0}, închise ${t.trades_closed ?? 0}</span></div>
+    ${blocks || emptyState('Niciun simbol', 'Nu există simboluri de tranzacționat.')}`;
+}
+setInterval(() => { if (S.route.page === 'overview') loadLive(); }, 3000);
+setInterval(() => { if (S.route.page === 'positions') loadBasket(); }, 10000);
 
 /* economic calendar (status.news) */
 const IMP_RO = { 1: 'scăzut', 2: 'moderat', 3: 'mare' };
@@ -686,6 +714,22 @@ function indicatorsKv(ind, sym) {
   const names = { ema_fast: 'EMA rapidă', ema_slow: 'EMA lentă', rsi: 'RSI', atr: 'ATR', macd_hist: 'MACD hist', htf_trend: 'Trend HTF' };
   return `<dl class="kv">${Object.entries(ind).map(([k, v]) => `<dt>${esc(names[k] || k)}</dt><dd class="num">${fmt(k, v)}</dd>`).join('')}</dl>`;
 }
+/* SMC 5-step check (app/smc.py, CLUB 81 model): verdict, score, steps, levels */
+const SMC_ST = { pass: ['ok', '✓'], partial: ['warn', '½'], fail: ['bad', '✗'] };
+function smcBlock(s) {
+  if (!s || !Array.isArray(s.steps) || !s.steps.length) return '';
+  const vc = { ENTER: 'ok', WAIT: 'warn', STOP: 'bad' }[s.verdict] || '';
+  const L = s.levels || {};
+  return `<hr class="section-sep">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h3>Verificare SMC</h3>
+      <span class="badge ${vc}">${esc(s.verdict)} · scor ${s.score}/95</span></div>
+    <div style="margin:6px 0 8px"><b>${esc(s.title)}</b> <span class="faint">· TF ${esc(s.tf)} cu ${esc((s.htf || []).join(', '))} · durată ${esc(s.hold_txt || '')}</span></div>
+    <table class="tbl"><tbody>${s.steps.map((x) => `<tr><td style="width:28px"><span class="badge ${SMC_ST[x.status][0]}">${SMC_ST[x.status][1]}</span></td>
+      <td style="white-space:normal"><b>${esc(x.name)}</b> <span class="faint">(${x.weight})</span><br><span class="faint">${esc(x.text)}</span></td></tr>`).join('')}</tbody></table>
+    ${s.direction && L.entry ? `<div class="faint" style="font-size:12px;margin-top:6px">${s.direction > 0 ? 'BUY' : 'SELL'} ${esc(L.etype)} ${L.entry} · SL ${L.sl} · TP 1:2 ${L.tp1}${L.target ? ' · nivel opus ' + L.target : ''}</div>` : ''}
+    ${(s.blocks || []).concat(s.warnings || []).map((w) => `<div class="warn-text" style="font-size:12px">⚠ ${esc(w)}</div>`).join('')}`;
+}
+
 function renderAnalysis(a) {
   const box = $('#ch-analysis');
   if (!a || typeof a !== 'object') {
@@ -705,6 +749,7 @@ function renderAnalysis(a) {
     <div class="faint" style="font-size:11.5px;margin-top:6px">${esc(a.probability_method || '')}</div>
     <hr class="section-sep">
     ${levelsBlock(a, sym)}
+    ${smcBlock(a.smc)}
     <hr class="section-sep">
     <h3>Motive</h3>
     ${Array.isArray(a.reasons) && a.reasons.length ? `<ul class="reasons">${a.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>` : '<div class="faint">—</div>'}
@@ -866,7 +911,7 @@ async function loadPositionsQuiet() {
 }
 async function enterPositions() {
   await ensureSymbols();
-  await Promise.all([loadPositionsQuiet(), loadIntents(), loadTrades()]);
+  await Promise.all([loadPositionsQuiet(), loadIntents(), loadTrades(), loadBasket()]);
   renderPositions();
 }
 const reloadPositionsPage = debounce(() => { if (S.route.page === 'positions') enterPositions(); }, 500);
@@ -892,6 +937,39 @@ function renderPositions() {
   const pend = p && Array.isArray(p.pending_commands) ? p.pending_commands : [];
   $('#pos-pending').innerHTML = pend.length ? intentsTable(pend, 'pend') : emptyState('Nicio comandă în așteptare', '');
 }
+/* basket loss limit (GET/PUT /basket): the group closes at -limit USD; editable from the Positions page */
+async function loadBasket() {
+  try {
+    const b = await api('/basket');
+    $('#basket-limit').value = b.max_loss_usd;
+    $('#basket-current').textContent = `Valoare curentă: −${b.max_loss_usd} USD`;
+    const sel = $('#strategy-select');
+    sel.innerHTML = (b.strategies || []).map((s) => `<option value="${esc(s.id)}"${s.id === b.strategy ? ' selected' : ''}>${esc(s.name)}${s.id === b.strategy ? ' (activă)' : ''}</option>`).join('');
+    sel.disabled = b.running;
+    $('#btn-strategy-save').disabled = b.running;
+    $('#btn-bot-stop').disabled = !b.running;
+    $('#btn-bot-start').disabled = b.running;
+    const st = $('#bot-state');
+    st.textContent = b.running ? 'BOT PORNIT' : 'BOT OPRIT';
+    st.className = 'badge lg ' + (b.running ? 'ok' : 'bad');
+    const ct = $('#claude-toggle');
+    ct.checked = !!b.claude;
+    ct.disabled = b.running;
+    const cl = b.claude_last;
+    $('#claude-last').innerHTML = b.claude ? (cl ? `<span class="badge ${cl.status === 'DONE' ? 'ok' : 'bad'}">Claude ${esc(cl.time_utc || '')}</span> ` +
+      `<b>${esc((cl.done || []).join('; ') || 'aștept')}</b> · ${esc(cl.market_view || '')}<br><span class="faint">Plan: ${esc(cl.plan || '')}</span>`
+      : '<span class="faint">Claude decide la următoarea bară M1…</span>') : '';
+    const zr = b.zr || {};
+    $('#strategy-note').textContent = (b.running ? 'Ca să schimbi strategia: Oprește botul → alege → Aplică → Pornește. ' :
+      'Botul e oprit: nu deschide și nu închide nimic (pozițiile rămân cu SL/TP la broker). ') +
+      (b.strategy === 's2' ? `Strategia 2: zonă ${zr.zone_usd} USD, lot ×${zr.mult} la fiecare nivel, max ${zr.levels} niveluri, grupul se închide la +${zr.exit_usd} USD.`
+                           : 'Strategia 1: intrări pe termen scurt, TP +0.80, acoperire cu 2 poziții de lot egal.');
+    $('#basket-sub').textContent = b.enabled ? `acum −${b.max_loss_usd} USD (${b.source})` : 'modul coș nu este activ';
+    $('#basket-note').textContent = `SL la broker pe fiecare poziție: ${b.position_sl_usd} USD · TP pe poziție: +${b.position_tp_usd} USD` +
+      (b.recovery ? ` · acoperirea pornește la −${b.recovery_trigger_usd} USD` : '');
+  } catch (e) { $('#basket-sub').textContent = 'eroare: ' + (e.detail || e.message); }
+}
+
 async function loadIntents() {
   const box = $('#pos-intents');
   try {
@@ -2218,7 +2296,7 @@ function route() {
   $('#menu-btn').setAttribute('aria-expanded', 'false');
   window.scrollTo(0, 0);
   switch (page) {
-    case 'overview': renderOverview(); loadOverviewSignals(); break;
+    case 'overview': renderOverview(); loadOverviewSignals(); loadLive(); break;
     case 'chart': enterChart(); break;
     case 'signals': enterSignals(); break;
     case 'signal': if (arg) enterSignalDetail(arg); break;
@@ -2299,6 +2377,58 @@ function init() {
   $('#sg-direction').addEventListener('change', loadSignals);
   $('#btn-csv').addEventListener('click', exportCsv);
   $('#btn-pos-refresh').addEventListener('click', enterPositions);
+  $('#btn-bot-stop').addEventListener('click', async (ev) => {
+    if (!confirm('Oprești botul? Nu va mai deschide și nu va mai închide nimic; pozițiile deschise rămân cu SL/TP la broker.')) return;
+    if (await act('/control/pause-entries', undefined, 'Botul este OPRIT', ev.currentTarget)) { refreshStatus(); loadBasket(); }
+  });
+  $('#btn-bot-start').addEventListener('click', async (ev) => {
+    if (await act('/control/resume-entries', undefined, 'Botul este PORNIT', ev.currentTarget)) { refreshStatus(); loadBasket(); }
+  });
+  $('#claude-toggle').addEventListener('change', async (ev) => {
+    const on = ev.target.checked;
+    if (on && !confirm('Pornești Claude ca decident? La fiecare minut Claude Opus 5.5 primește toată starea și decide singur ' +
+                       'deschiderile, închiderile și dublările (lot maxim 0.08). Fiecare decizie costă ~$0.02–0.03 din contul Anthropic.')) {
+      ev.target.checked = false; return;
+    }
+    try {
+      await api('/basket', { method: 'PUT', body: { claude: on } });
+      toast(on ? 'Claude ia deciziile (după pornirea botului)' : 'Reguli fixe (fără Claude)', 'ok');
+    } catch (e) { ev.target.checked = !on; toast(e.detail || e.message, 'err', 'Eroare' + (e.status ? ` (${e.status})` : '')); }
+    loadBasket();
+  });
+  $('#btn-strategy-save').addEventListener('click', async (ev) => {
+    const id = $('#strategy-select').value;
+    const btn = ev.currentTarget;
+    btn.classList.add('is-busy');
+    try {
+      const b = await api('/basket', { method: 'PUT', body: { strategy: id } });
+      toast((b.strategies.find((s) => s.id === b.strategy) || {}).name || b.strategy, 'ok', 'Strategie aplicată');
+      loadBasket();
+    } catch (e) {
+      toast(e.detail || e.message, 'err', 'Eroare' + (e.status ? ` (${e.status})` : ''));
+    } finally { btn.classList.remove('is-busy'); }
+  });
+  $('#btn-basket-save').addEventListener('click', async (ev) => {
+    const v = Number($('#basket-limit').value);
+    if (!Number.isFinite(v) || v < 1 || v > 1000) { toast('Introdu o valoare între 1 și 1000 USD', 'warn'); return; }
+    const btn = ev.currentTarget;
+    btn.classList.add('is-busy');
+    try {
+      const b = await api('/basket', { method: 'PUT', body: { max_loss_usd: v } });
+      toast(`Coșul se închide acum la −${b.max_loss_usd} USD`, 'ok', 'Salvat');
+      loadBasket();
+    } catch (e) {
+      toast(e.detail || e.message, 'err', 'Eroare' + (e.status ? ` (${e.status})` : ''));
+    } finally { btn.classList.remove('is-busy'); }
+  });
+  const clearHistory = async (what, label, btn) => {
+    if (!confirm(`Ștergi tot istoricul de ${label}? Se păstrează doar ce e încă activ (ordine în curs, poziții deschise). ` +
+                 'Înainte de ștergere se salvează o copie în data/backup.')) return;
+    const r = await act('/history/clear', { what, confirm: 'DELETE' }, null, btn);
+    if (r) { toast(`Șterse: ${r.deleted} · copie: ${r.backup}`, 'ok', 'Istoric curățat'); enterPositions(); }
+  };
+  $('#btn-clear-intents').addEventListener('click', (ev) => clearHistory('intents', 'intenții de execuție', ev.currentTarget));
+  $('#btn-clear-trades').addEventListener('click', (ev) => clearHistory('trades', 'tranzacții închise', ev.currentTarget));
   $('#log-level').addEventListener('change', loadLogs);
   $('#pf-account').addEventListener('change', (ev) => {
     PF.account = ev.target.value; lsSet('mt5bot.pfAccount', PF.account || null); lsSet('mt5bot.pfAccountAll', PF.account ? null : '1');

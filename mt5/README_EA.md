@@ -6,7 +6,7 @@ Ce face:
 - la fiecare 500 ms trimite serverului cotațiile, barele, datele contului, pozițiile și deal-urile botului (endpoint `/bridge/v1/sync`);
 - execută **doar** comenzile primite de la server (`OPEN`, `MODIFY`, `CLOSE`). EA-ul nu ia singur nicio decizie de tranzacționare;
 - nu atinge niciodată pozițiile care nu au magic number-ul botului (`552211` implicit);
-- în v1 refuză orice `OPEN` dacă contul nu este **DEMO** (parametrul `InpAllowRealAccount = false`).
+- trimite ordinele pe orice cont MT5 conectat (demo sau real; tipul contului nu este verificat).
 
 > Serverul botului și MetaTrader 5 trebuie să ruleze pe **același calculator** (EA-ul se conectează la `127.0.0.1`).
 
@@ -71,7 +71,6 @@ Apoi apasă butonul **Algo Trading** din bara de sus a terminalului, astfel înc
 | `InpTimerMs` | `500` | Intervalul de sincronizare (ms) |
 | `InpDeviationPoints` | `20` | Deviația maximă implicită la execuție |
 | `InpHistoryBars` | `300` | Câte bare de istoric trimite când serverul le cere |
-| `InpAllowRealAccount` | `false` | Lasă `false`. v1 tranzacționează doar pe DEMO |
 
 4. Apasă **OK**. În colțul din dreapta-sus al graficului trebuie să apară o „căciulă” albastră/zâmbet (EA activ). În stânga-sus, EA-ul afișează starea: `CONECTAT` / `DECONECTAT`, ultimul sync, simbolurile active.
 
@@ -95,7 +94,6 @@ Apoi apasă butonul **Algo Trading** din bara de sus a terminalului, astfel înc
 | Erori de compilare | Fișier copiat incomplet / versiune MT5 veche | Actualizează MetaTrader 5 (Help > Check for updates) și recompilează; trimite-ne textul exact al erorii |
 | `Butonul Algo Trading este oprit` la comenzi | Algo Trading dezactivat | Apasă butonul **Algo Trading** (verde) și bifează *Allow Algo Trading* în proprietățile EA |
 | `Brokerul nu permite tranzactionare prin EA` | Contul nu permite EA | Folosește alt cont demo sau contactează brokerul |
-| `EA refuza OPEN: contul nu este DEMO (v1)` | Ești logat pe cont real | Loghează-te pe contul demo |
 | `simbolul 'EURUSD' nu exista la acest broker` | Brokerul folosește alt nume (ex. `EURUSD.a`, `EURUSDm`) | Pune numele exact din Market Watch în `ACTIVE_SYMBOLS` în `.env` și repornește serverul |
 | Graficul aurului e gol / „EA-ul nu trimite cotații pentru XAUUSD” (dashboard) | Aurul se numește altfel la broker (`XAUUSD.a`, `GOLD`, `XAUUSDm`, `XAUUSD.cash`…) sau nu e în Market Watch | În MT5: Market Watch → click dreapta → *Show All* → caută „XAU”/„GOLD” → copiază numele exact în `ACTIVE_SYMBOLS` (cu `PROFILE=gold` numele tău e preluat automat); repornește serverul. EA ≥ 1.15 raportează singur simbolurile necunoscute în dashboard (recompilare opțională) |
 | Ordin respins: `Unsupported filling mode` | Mod de umplere nesuportat | EA-ul alege automat FOK > IOC > RETURN; raportează-ne simbolul și brokerul |

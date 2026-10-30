@@ -41,7 +41,6 @@ def test_all_pass_baseline():
 
 @pytest.mark.parametrize("kw,name", [
     (dict(mode="SIGNAL_ONLY"), "mode_allows_execution"),
-    (dict(mode="LIVE"), "mode_allows_execution"),
     (dict(execution_enabled=False), "mode_allows_execution"),
     (dict(entries_paused=True), "entries_not_paused"),
     (dict(tick_age=30.0), "quote_fresh"),
@@ -69,11 +68,12 @@ def test_each_blocking_check(kw, name):
 
 def test_demo_specific_checks():
     rc = evaluate(base_ctx(mode="DEMO", bridge_connected=False, mt5_account={"trade_mode": 2}, terminal={"trade_allowed": False}))
-    for n in ("bridge_connected", "account_is_demo", "terminal_trade_allowed"):
+    for n in ("bridge_connected", "terminal_trade_allowed"):
         assert check(rc, n)["ok"] is False
-    rc = evaluate(base_ctx(mode="DEMO", bridge_connected=True, mt5_account={"trade_mode": 0, "trade_expert": True},
-                           terminal={"trade_allowed": True}))
-    assert rc["passed"], [c for c in rc["checks"] if not c["ok"]]
+    for tm in (0, 2):  # demo and real accounts alike
+        rc = evaluate(base_ctx(mode="DEMO", bridge_connected=True, mt5_account={"trade_mode": tm, "trade_expert": True},
+                               terminal={"trade_allowed": True}))
+        assert rc["passed"], [c for c in rc["checks"] if not c["ok"]]
 
 
 def test_test_order_uses_min_volume_and_2x_limit():

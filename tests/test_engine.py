@@ -163,9 +163,10 @@ def test_admin_token_empty_403(tmp_path):
     assert r.status_code == 403 and r.json()["detail"] == "Set ADMIN_TOKEN in .env"
 
 
-def test_live_refused(client):
+def test_live_is_mt5_execution(client):
+    # LIVE = the MT5 execution path (same as DEMO): it still needs a connected bridge
     r = client.post("/api/v1/control/mode", json={"mode": "LIVE"}, headers=ADMIN)
-    assert r.status_code == 403 and r.json()["detail"] == "LIVE disabled in v1"
+    assert r.status_code == 409
 
 
 def test_demo_refused_without_bridge(client):
@@ -255,7 +256,7 @@ def test_startup_never_restores_armed_mode(tmp_path):
     s2 = make_settings(tmp_path, TRADING_MODE="LIVE")
     eng2 = Engine(s2, db)
     eng2.startup()
-    assert eng2.rt.trading["mode"] == "PAPER"
+    assert eng2.rt.trading["mode"] == "DEMO"
 
 
 def test_status_shape(client):
@@ -263,6 +264,6 @@ def test_status_shape(client):
     for k in ("app_env", "version", "data_source", "feed_label", "bridge", "account", "paper_account", "session",
               "trading", "ai", "telegram", "counts", "engine"):
         assert k in st
-    assert st["trading"]["live_allowed"] is False
+    assert st["trading"]["live_allowed"] is True
     assert st["account"] is None and st["paper_account"]["server"] == "PAPER"
     assert "adm-token" not in str(st) and "bridge-key" not in str(st)

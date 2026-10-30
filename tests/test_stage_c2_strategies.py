@@ -78,7 +78,7 @@ def d1_walk(n, seed, prefix=None, vol=0.006):
 # ---- registry ----------------------------------------------------------------------------------
 
 def test_registry_research_plugins():
-    assert S.names() == ["trend-v1", "meanrev-v1", "breakout-v1", "pullback-v1"]  # live/UI list unchanged
+    assert S.names() == ["trend-v1", "meanrev-v1", "breakout-v1", "pullback-v1", "scalp-v1", "smc-v1"]  # live/UI list unchanged
     assert S.names(include_research=True)[-3:] == C2 and S.research_names() == C2
     names = [d["name"] for d in S.describe()]
     for n in C2:

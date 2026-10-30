@@ -33,8 +33,8 @@ tradingBot/
 ```
 
 ## 1. Core rules (from spec — must hold)
-- Modes: SIGNAL_ONLY, PAPER, DEMO. LIVE exists as a name but is **refused in v1** (403). Default mode from env `TRADING_MODE` (default PAPER). Mode/arming is NEVER restored to DEMO automatically after restart unless `TRADING_MODE=DEMO` in .env AND `EXECUTION_ENABLED=true`; LIVE never.
-- DEMO orders only if bridge connected AND `account.trade_mode == 0` (MT5 ACCOUNT_TRADE_MODE_DEMO). Otherwise block + log.
+- Modes: SIGNAL_ONLY, PAPER, DEMO. LIVE is an alias of DEMO (MT5 execution). Default mode from env `TRADING_MODE` (default PAPER). Mode/arming is NEVER restored to DEMO automatically after restart unless `TRADING_MODE=DEMO` in .env AND `EXECUTION_ENABLED=true`; LIVE never.
+- DEMO/LIVE orders only if bridge connected; the account type (`trade_mode`) is not checked — demo and real accounts alike.
 - Claude never creates orders, never changes direction/levels. It returns AGREE / CAUTION / VETO + explanation. If `CLAUDE_VETO_ENABLED=true` and verdict == VETO → signal becomes NO_TRADE (it can only reduce risk). If Claude fails/times out → proceed without it (status ERROR), unless `CLAUDE_REQUIRED=true` → NO_TRADE.
 - Every order has SL and TP (MUST_HAVE_SL_TP). Bot positions identified by magic `MT5_MAGIC` (default 552211). Never touch non-bot positions.
 - Kill switch (pause entries) ≠ close-all. Close-all requires body `{"confirm":"CLOSE ALL"}`.
@@ -82,7 +82,7 @@ Admin endpoints (all POST/PUT) require header `X-Admin-Token: <ADMIN_TOKEN>`. If
 - `GET /risk` → risk settings object (§5 risk keys, lower_snake_case); `PUT /risk` (admin) partial update, validated, persisted in sqlite `settings` table (override .env).
 - `GET /settings` → `{"schedule":{"enabled","start","end","days","tz"},"strategy":{"signal_timeframe","htf_timeframe","symbols":[..],"atr_sl_mult","atr_tp_mult","min_score","signal_expiry_minutes","break_even_at_r","trailing_enabled","max_hold_minutes","close_at_session_end"},"telegram":{"enabled","configured","thread_id_set"},"ai":{"enabled","model","veto_enabled","required","key_set"}}`
 - `PUT /schedule`, `PUT /strategy` (admin) partial updates.
-- `POST /control/mode` `{"mode":"SIGNAL_ONLY|PAPER|DEMO|LIVE"}` (LIVE → 403 "LIVE disabled in v1"; DEMO → 409 if bridge not connected or account not demo).
+- `POST /control/mode` `{"mode":"SIGNAL_ONLY|PAPER|DEMO|LIVE"}` (LIVE = DEMO; DEMO → 409 if bridge not connected or EA magic mismatch).
 - `POST /control/execution` `{"enabled":true}`
 - `POST /control/pause-entries`, `POST /control/resume-entries`
 - `POST /control/session` `{"action":"start|stop|auto"}`
@@ -207,9 +207,9 @@ ACTIVE_SYMBOLS=EURUSD
 SIGNAL_TIMEFRAME=M5
 HTF_TIMEFRAME=H1
 CHART_TIMEFRAMES=M1,M5,M15,H1
-TRADING_MODE=PAPER              # SIGNAL_ONLY | PAPER | DEMO   (LIVE refused in v1)
+TRADING_MODE=PAPER              # SIGNAL_ONLY | PAPER | DEMO | LIVE   (LIVE = DEMO)
 EXECUTION_ENABLED=false
-LIVE_TRADING_ALLOWED=false
+LIVE_TRADING_ALLOWED=true
 MUST_HAVE_SL_TP=true
 MAX_RISK_PER_TRADE_PCT=0.25
 MAX_DAILY_LOSS_PCT=1.0
@@ -245,7 +245,7 @@ PUBLIC_APP_URL=http://127.0.0.1:8787
 ```
 
 ## 6. Risk Engine checks (each produces {"name","ok","detail"}; ALL must pass)
-mode_allows_execution (PAPER/DEMO and EXECUTION_ENABLED, not SIGNAL_ONLY, not LIVE) · entries_not_paused · bridge_connected (DEMO) · account_is_demo (DEMO) · terminal_trade_allowed (DEMO: terminal.trade_allowed && account.trade_expert) · quote_fresh · spread_ok · sl_tp_present · sl_distance_ok (≥ stops_level) · volume_ok (volume = floor_to_step(equity*risk_pct/100 / (sl_dist/tick_size*tick_value)); if < volume_min → fail "risk too small for min lot" except test-order uses volume_min and checks its risk ≤ 2×max_risk) · max_open_positions · max_trades_per_day · daily_loss_ok (equity vs day-start equity, day boundary in DEFAULT_TIMEZONE) · drawdown_ok (equity vs peak equity) · consecutive_losses_ok · free_margin_ok (margin_free/equity*100 ≥ MIN_FREE_MARGIN_PCT) · no_existing_bot_position_on_symbol.
+mode_allows_execution (PAPER/DEMO/LIVE and EXECUTION_ENABLED, not SIGNAL_ONLY) · entries_not_paused · bridge_connected (DEMO) · terminal_trade_allowed (DEMO: terminal.trade_allowed && account.trade_expert) · quote_fresh · spread_ok · sl_tp_present · sl_distance_ok (≥ stops_level) · volume_ok (volume = floor_to_step(equity*risk_pct/100 / (sl_dist/tick_size*tick_value)); if < volume_min → fail "risk too small for min lot" except test-order uses volume_min and checks its risk ≤ 2×max_risk) · max_open_positions · max_trades_per_day · daily_loss_ok (equity vs day-start equity, day boundary in DEFAULT_TIMEZONE) · drawdown_ok (equity vs peak equity) · consecutive_losses_ok · free_margin_ok (margin_free/equity*100 ≥ MIN_FREE_MARGIN_PCT) · no_existing_bot_position_on_symbol.
 
 ## 7. Storage additions (stage B; additive migrations on the existing `bot.db`)
 `app/db.py` creates these with `CREATE TABLE IF NOT EXISTS` and adds missing columns with `ALTER TABLE … ADD COLUMN` guarded by `PRAGMA table_info` (`DB.migrated` lists what was added). Nothing is dropped or rewritten.

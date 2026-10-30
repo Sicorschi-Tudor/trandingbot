@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import indicators as ind
-from .config import STRATEGY_VERSION, iso
+from .config import STRATEGY_VERSION, iso, spread_cap
 from .risk import currency_conflict, loss_cooldown_blocker, rollover_blocker
 
 PROB_METHOD = "heuristic-v1 (NOT calibrated)"
@@ -28,6 +28,10 @@ class AnalysisContext:
     # pyramiding (risk.max_positions_per_symbol > 1): open bot positions on this symbol as [{'side', 'open_r'}]
     # (open_r None = unknown / order in flight); None = caller does not support pyramiding (backtest, forward tests)
     symbol_positions: list | None = None
+    # extra closed higher-timeframe bars {tf: bars} for plugins that read two HTFs (smc-v1: H1 + H4); None = not given
+    htf_extra: dict | None = None
+    # closed M1 bars for plugins whose stop is measured on M1 while they analyse a higher timeframe (smc-v1)
+    sl_bars: list | None = None
 
 
 def probabilities(score: float) -> dict:
@@ -47,7 +51,8 @@ def _r(x, nd=6):
     return None if x is None else round(float(x), nd)
 
 
-def pyramid_blocker(side: str, positions: list | None, max_per: int, min_r: float, min_dist_atr: float = 0.0) -> str | None:
+def pyramid_blocker(side: str, positions: list | None, max_per: int, min_r: float, min_dist_atr: float = 0.0,
+                    allow_opposite: bool = False) -> str | None:
     """Reason a further position on the symbol is NOT allowed under the pyramiding rule, else None.
     positions: [{"side", "open_r", "distance_atr"}] of the bot's open positions on the symbol (open_r None = order in
     flight; distance_atr = |current price - that entry| / ATR, None = unknown)."""
@@ -61,6 +66,8 @@ def pyramid_blocker(side: str, positions: list | None, max_per: int, min_r: floa
         if p.get("side") is None or r is None:
             return "Un ordin pe acest simbol este încă în curs — nu se adaugă peste el."
         if p.get("side") != side:
+            if allow_opposite:  # recovery hedge (basket experiment): opposite positions are the point
+                continue
             return f"Poziția existentă este {p.get('side')} — nu se adaugă în direcția opusă."
         if r < min_r:
             return f"Piramidare doar peste poziții pe profit: {r:+.2f}R < {min_r:g}R."
@@ -237,7 +244,7 @@ def analyze(symbol: str, sig_bars: list[dict], htf_bars: list[dict], quote: dict
     tp = entry + sign * tp_dist
 
     blockers: list[str] = []
-    max_spread = float(risk.get("max_spread_points", 30))
+    max_spread = spread_cap(risk.get("max_spread_points", 30), symbol, point)
     if spread_points is None:
         spread_points = round((ask - bid) / point)
     if bid > ask or spread_points < 0:

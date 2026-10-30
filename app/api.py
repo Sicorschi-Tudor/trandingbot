@@ -219,6 +219,11 @@ async def get_status(request: Request):
     return get_engine(request).status()
 
 
+@router.get("/live")
+async def get_live(request: Request):
+    return get_engine(request).live_status()
+
+
 @router.get("/symbols")
 async def get_symbols(request: Request):
     return get_engine(request).symbols_payload()
@@ -297,6 +302,29 @@ async def get_intents(request: Request, limit: int = Query(100, ge=1, le=1000)):
 @router.get("/risk")
 async def get_risk(request: Request):
     return dict(get_engine(request).rt.risk)
+
+
+@router.get("/basket")
+async def get_basket(request: Request):
+    return get_engine(request).basket.settings_public()
+
+
+@router.put("/basket", dependencies=[Depends(require_admin)])
+async def put_basket(request: Request):
+    """Positions page: {"max_loss_usd": n} - the basket closes at -n USD (applied at once, kept across restarts)."""
+    body = await request.json()
+    basket = get_engine(request).basket
+    try:
+        out = basket.settings_public()
+        if "strategy" in body:
+            out = basket.set_strategy(str(body["strategy"]))
+        if "claude" in body:
+            out = basket.set_claude(bool(body["claude"]))
+        if "max_loss_usd" in body:
+            out = basket.set_loss_limit(body.get("max_loss_usd"))
+        return out
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 @router.put("/risk", dependencies=[Depends(require_admin)])
@@ -421,6 +449,17 @@ async def control_close_position(request: Request):
     found = eng.find_position(ticket)
     source = found[0] if found else "PAPER"
     return _engine_call(eng.close_position, source, ticket, "MANUAL")
+
+
+@router.post("/history/clear", dependencies=[Depends(require_admin)])
+async def history_clear(request: Request):
+    """Positions page buttons: {"what": "intents" | "trades", "confirm": "DELETE"} (finished rows only, see
+    Engine.clear_history; a JSON copy is written to data/backup first)."""
+    eng = get_engine(request)
+    body = await request.json()
+    if body.get("confirm") != "DELETE":
+        raise HTTPException(status_code=400, detail='Confirmare necesară: {"confirm":"DELETE"}')
+    return _engine_call(eng.clear_history, str(body.get("what") or ""))
 
 
 @router.post("/control/close-all", dependencies=[Depends(require_admin)])
