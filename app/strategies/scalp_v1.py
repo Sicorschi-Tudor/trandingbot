@@ -63,7 +63,7 @@ def analyze(symbol, sig_bars, htf_bars, quote, cfg, risk, ctx) -> dict:
     bid, ask = float(quote["bid"]), float(quote["ask"])
     sign = 1 if side == "BUY" else -1
     entry = ask if side == "BUY" else bid
-    sl_dist = max(float(g("atr_sl_mult")) * atr_v, float(g("min_sl_points")) * point)
+    sl_dist = max(float(g("atr_sl_mult")) * atr_v, spread_cap(g("min_sl_points"), symbol, point) * point)
 
     tick_size = float(quote.get("tick_size") or point)
     tick_value = float(quote.get("tick_value") or 0)

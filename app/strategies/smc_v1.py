@@ -57,7 +57,7 @@ def analyze(symbol, sig_bars, htf_bars, quote, cfg, risk, ctx) -> dict:
     m1 = getattr(ctx, "sl_bars", None) or []
     atr_m1 = ind.last(ind.atr([b["h"] for b in m1], [b["l"] for b in m1], [b["c"] for b in m1], 14)) if len(m1) >= 20 else None
     if atr_m1:
-        sl_dist = max(float(C.p(cfg, PARAMS, "atr_sl_mult")) * atr_m1, float(C.p(cfg, PARAMS, "min_sl_points")) * point)
+        sl_dist = max(float(C.p(cfg, PARAMS, "atr_sl_mult")) * atr_m1, spread_cap(C.p(cfg, PARAMS, "min_sl_points"), symbol, point) * point)
         sl_note = f"SL 3×ATR(M1) = {sl_dist:.2f} USD de preț"
     else:
         sl_note = f"SL structural SMC {sl_dist:.2f} USD de preț (fără bare M1)"

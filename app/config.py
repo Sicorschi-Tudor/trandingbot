@@ -116,6 +116,8 @@ PROFILES["gold_basket"] = {
     "BASKET_ENTRY_VOTE": "short",
     "LADDER_ENABLED": False, "SCALP_TARGET_USD": 0.0, "MAX_OPEN_POSITIONS": 8, "MAX_POSITIONS_PER_SYMBOL": 8,
     "PYRAMID_MIN_R": -1000.0, "PYRAMID_MIN_DISTANCE_ATR": 0.0, "MAX_SPREAD_POINTS": 80.0,
+    # 2026-10-30 (owner): trade the 11 USD real account anyway -> no cap on the total open risk (0 = off)
+    "MAX_TOTAL_OPEN_RISK_PCT": 0.0,
     # Claude is on so the "Claude ia deciziile" switch on the Positions page can use it (one call per M1 bar when on);
     # with the switch off the basket rules decide and Claude is never called
     "CLAUDE_ENABLED": True, "CLAUDE_REVIEW_EFFORT": "medium", "CLAUDE_TIMEOUT_SECONDS": 30,
@@ -153,8 +155,8 @@ MODES = ("SIGNAL_ONLY", "PAPER", "DEMO", "LIVE")
 
 
 def spread_cap(max_points, symbol: str, point) -> float:
-    """MAX_SPREAD_POINTS in the symbol's own points. Gold caps are measured in 0.01 USD points (2-digit quotes);
-    a broker quoting gold with 3 digits (Exness XAUUSDm, point 0.001) needs the cap x10 for the same USD spread."""
+    """A points setting (MAX_SPREAD_POINTS, MIN_SL_POINTS) in the symbol's own points. Gold settings are measured in
+    0.01 USD points (2-digit quotes); a broker quoting gold with 3 digits (Exness XAUUSDm, point 0.001) needs x10."""
     cap = float(max_points)
     sym = (symbol or "").upper()
     if ("XAU" in sym or "GOLD" in sym) and point and 0 < float(point) < 0.01:

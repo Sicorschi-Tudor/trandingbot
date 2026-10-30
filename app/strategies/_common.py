@@ -122,7 +122,7 @@ def finish(a: dict, symbol: str, side: str, sl_price: float, tp_price: float | N
     sign = 1 if side == "BUY" else -1
     entry = ask if side == "BUY" else bid
     raw_sl = sign * (entry - sl_price)
-    floor = float(cfg.get("min_sl_points", 60)) * point
+    floor = spread_cap(cfg.get("min_sl_points", 60), symbol, point) * point
     sl_dist = max(raw_sl, floor)
     tp_dist = sl_dist * float(tp_r) if tp_r is not None else sign * (float(tp_price) - entry)
     score = round(sign * len(comps) / float(n_comps), 3)

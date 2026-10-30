@@ -119,3 +119,15 @@ def test_risk_blocks_correlated_exposure():
     assert not check(rc, "currency_exposure_ok")["ok"] and not rc["passed"]
     rc = evaluate(base_ctx(symbol="EURUSD", open_exposures=[("AUDCAD", "BUY")]))
     assert check(rc, "currency_exposure_ok")["ok"]
+
+
+def test_gold_spread_cap_follows_broker_digits():
+    from app.config import spread_cap
+    assert spread_cap(80, "XAUUSD", 0.01) == 80  # 2-digit gold: as configured (0.80 USD)
+    assert spread_cap(80, "XAUUSDm", 0.001) == 800  # 3-digit gold (Exness): same 0.80 USD
+    assert spread_cap(30, "EURUSD", 0.00001) == 30  # FX untouched
+
+
+def test_total_open_risk_cap_off_at_zero():
+    rc = evaluate(base_ctx(risk={**RISK, "max_total_open_risk_pct": 0}, open_risk_money=1e6))
+    assert check(rc, "total_open_risk_ok")["ok"] is True

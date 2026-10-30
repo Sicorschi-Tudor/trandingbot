@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
 
+from .config import spread_cap
+
 ROLLOVER_TZ = ZoneInfo("America/New_York")
 ROLLOVER_HOUR = 17  # FX daily rollover: 17:00 New York (EST/EDT handled by zoneinfo)
 
@@ -333,9 +335,13 @@ def evaluate(ctx: RiskContext) -> dict:
     max_tor = float(r.get("max_total_open_risk_pct", 2.0))
     total_risk = ctx.open_risk_money + (new_risk if math.isfinite(new_risk) else 0.0)
     tor_pct = total_risk / equity * 100 if equity > 0 else float("inf")
-    add("total_open_risk_ok", equity > 0 and math.isfinite(new_risk) and tor_pct <= max_tor + 1e-9,
-        f"risc deschis {ctx.open_risk_money:.2f} + nou {new_risk:.2f} = {tor_pct:.2f}% / max {max_tor:g}%"
-        if equity > 0 else "equity indisponibil")
+    if max_tor <= 0:  # 0 = off: the open risk may exceed the equity (owner's choice on a tiny account)
+        add("total_open_risk_ok", True, f"risc deschis {ctx.open_risk_money:.2f} + nou {new_risk:.2f} = "
+            + (f"{tor_pct:.2f}%" if math.isfinite(tor_pct) else "—") + " (limită dezactivată)")
+    else:
+        add("total_open_risk_ok", equity > 0 and math.isfinite(new_risk) and tor_pct <= max_tor + 1e-9,
+            f"risc deschis {ctx.open_risk_money:.2f} + nou {new_risk:.2f} = {tor_pct:.2f}% / max {max_tor:g}%"
+            if equity > 0 else "equity indisponibil")
     add("news_blackout_ok", ctx.news_block is None, ctx.news_block or ctx.news_note or "fără știri importante în fereastră")
     mf = float(acc.get("margin_free") or 0)
     fm_pct = (mf / equity * 100) if equity > 0 else 0.0
