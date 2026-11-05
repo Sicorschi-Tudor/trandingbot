@@ -5,10 +5,7 @@ import random
 
 import pytest
 
-from app import strategy
 from app.patterns import p2
-from app.strategies import get as get_plugin
-from app.strategies.discovery import _pat2
 
 T0 = 1_780_000_000 - (1_780_000_000 % 86400) + 8 * 3600  # 08:00 UTC on some day
 PT = 0.00001
@@ -278,59 +275,3 @@ def _quote(c):
     return {**QUOTE, "bid": c, "ask": round(c + 2 * PT, 5)}
 
 
-def test_plugins_are_registered():
-    for pid in p2.SCANS:
-        assert get_plugin(f"pat-{pid}").NAME == f"pat-{pid}"
-        assert get_plugin(f"filt-{pid}").NAME == f"filt-{pid}"
-        assert not hasattr(get_plugin(f"filt-{pid}"), "RUN_DEFAULTS")  # live exits (incl. RESCUE) apply
-
-
-def test_standalone_inside_bar_plugin():
-    closes = [1.1000 + (0.0001 if k % 2 else -0.0001) for k in range(120)]
-    bars = mk(closes, wick=0.0002)
-    t = bars[-1]["t"]
-    bars += [{"t": t + 300, "o": 1.1000, "h": 1.1040, "l": 1.0990, "c": 1.1030},
-             {"t": t + 600, "o": 1.1030, "h": 1.1035, "l": 1.1000, "c": 1.1010},
-             {"t": t + 900, "o": 1.1010, "h": 1.1050, "l": 1.1005, "c": 1.1046}]
-    ctx = strategy.AnalysisContext(now_ts=bars[-1]["t"] + 300)
-    mod = get_plugin("pat-C3_INSIDEBAR")
-    a = mod.analyze("EURUSD", bars, [], _quote(1.1046), {"pat_R": 1.5, "min_sl_points": 60}, {}, ctx)
-    assert a["direction"] == "BUY", a["reasons"]
-    assert a["stop_loss"] == 1.099
-    risk = a["entry"] - a["stop_loss"]
-    assert abs(a["take_profit"] - (a["entry"] + 1.5 * risk)) < 2 * PT
-    # one bar earlier there is no event
-    b = mod.analyze("EURUSD", bars[:-1], [], _quote(1.1010), {}, {}, ctx)
-    assert b["direction"] == "HOLD" and b["candidate"] is None
-
-
-def test_filter_plugin_blocks_disagreeing_candidate(monkeypatch):
-    closes = [1.1000 + 0.0003 * k for k in range(150)]
-    bars = mk(closes, wick=0.0002)
-    c = bars[-1]["c"]
-
-    def fake(symbol, sig_bars, htf_bars, quote, cfg, risk, ctx, side="SELL"):
-        cand = {"side": side, "entry": c, "stop_loss": c + 0.003, "take_profit": c - 0.005, "score": -0.8,
-                "blockers": []}
-        return {"direction": side, "entry": c, "stop_loss": c + 0.003, "take_profit": c - 0.005, "rr": 1.67,
-                "reasons": ["x"], "candidate": cand}
-
-    monkeypatch.setattr(_pat2.strategy, "analyze", fake)
-    mod = get_plugin("filt-I3_SUPERTREND")
-    ctx = strategy.AnalysisContext(now_ts=bars[-1]["t"] + 300)
-    a = mod.analyze("EURUSD", bars, [], _quote(c), {"pat_K": 0}, {}, ctx)
-    assert a["direction"] == "HOLD" and a["entry"] is None
-    assert any(b.startswith("Filtru I3_SUPERTREND") for b in a["candidate"]["blockers"])
-    monkeypatch.setattr(_pat2.strategy, "analyze", lambda *x: fake(*x, side="BUY") | {
-        "candidate": {"side": "BUY", "entry": c, "stop_loss": c - 0.003, "take_profit": c + 0.005, "score": 0.8,
-                      "blockers": []}})
-    b = mod.analyze("EURUSD", bars, [], _quote(c), {"pat_K": 0}, {}, ctx)
-    assert b["direction"] == "BUY" and b["candidate"]["blockers"] == []
-
-
-def test_filter_plugin_is_trend_v1_when_no_candidate():
-    bars = mk([1.1] * 150)
-    ctx = strategy.AnalysisContext(now_ts=bars[-1]["t"] + 300)
-    want = strategy.analyze("EURUSD", bars, bars[:80], _quote(1.1), {}, {}, ctx)
-    got = get_plugin("filt-L1_SR").analyze("EURUSD", bars, bars[:80], _quote(1.1), {}, {}, ctx)
-    assert got == want

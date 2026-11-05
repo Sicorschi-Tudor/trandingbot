@@ -6,11 +6,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app import strategies as S
-from app import strategy
 from app.config import Settings
 from app.patterns import p1
-from app.strategy import AnalysisContext
 
 SET = Settings(_env_file=None)
 RISK = SET.default_risk()
@@ -243,75 +240,5 @@ def test_squeeze_release_up():
     assert p1.filter_i5_squeeze(rows, i, "BUY", 102.0, {"fvariant": "veto_on"})
 
 
-# ---- plugins -------------------------------------------------------------------------------------------------------
-
-def _quote(c, sp=10):
-    return {"bid": c, "ask": round(c + sp * 0.00001, 5), "spread_points": sp, "digits": 5, "point": 0.00001,
-            "stops_level": 0}
 
 
-def _ctx(now):
-    return AnalysisContext(session_open=True, has_bot_position=False, signals_this_session=0, tick_age=0.0,
-                           now_ts=now, open_exposures=[], corr_limit=1)
-
-
-def test_plugins_registered_research_only():
-    for pid in IDS:
-        assert S.get(f"pat-{pid}").NAME == f"pat-{pid}"
-        assert S.get(f"filt-{pid}").NAME == f"filt-{pid}"
-        assert f"pat-{pid}" not in S.names(True) and f"filt-{pid}" not in S.names(True)
-
-
-@pytest.mark.parametrize("pid", ["C2_PINBAR", "I2_ICHI_TK", "L3_PIVOTS"])
-def test_filter_plugin_is_trend_v1_plus_one_blocker(pid):
-    sig = walk(420, seed=5, sec=300, vol=0.0006)
-    htf = walk(220, seed=6, t0=sig[0]["t"] - 3600 * 120, sec=3600, vol=0.002)
-    live = {**SET.default_strategy(), "signal_timeframe": "M5", "htf_timeframe": "H1"}
-    mod = S.get(f"filt-{pid}")
-    cfg = S.merged_cfg(mod.NAME, live)
-    seen = blocked = 0
-    for end in range(300, 420):
-        sb = sig[end - 299:end + 1]
-        now = sb[-1]["t"] + 300
-        hb = [b for b in htf if b["t"] + 3600 <= now][-200:]
-        q = _quote(sb[-1]["c"])
-        base = strategy.analyze("EURUSD", sb, hb, q, cfg, RISK, _ctx(now))
-        got = mod.analyze("EURUSD", sb, hb, q, cfg, RISK, _ctx(now))
-        if not base["candidate"]:
-            assert got == base
-            continue
-        seen += 1
-        keep = p1.PATTERNS[pid][2](sb, len(sb) - 1, base["candidate"]["side"], base["candidate"]["entry"],
-                                   {k[4:]: v for k, v in mod.PARAMS.items() if k.startswith("pat_")},
-                                   htf=hb if pid in p1.NEEDS_HTF else None)
-        if keep:
-            assert got == base
-        else:
-            blocked += 1
-            assert got["direction"] == "HOLD"
-            assert got["candidate"]["blockers"][:-1] == base["candidate"]["blockers"]
-            assert got["candidate"]["blockers"][-1].startswith(f"Filtru {pid}")
-    assert seen > 0
-
-
-@pytest.mark.parametrize("pid", IDS)
-def test_standalone_plugin_runs_and_levels_are_consistent(pid):
-    sig = walk(700, seed=21, vol=0.0005)
-    htf = walk(300, seed=22, t0=sig[0]["t"] - 3600 * 100, sec=3600, vol=0.002)
-    mod = S.get(f"pat-{pid}")
-    cfg = S.merged_cfg(mod.NAME, {**SET.default_strategy(), "signal_timeframe": "M5", "htf_timeframe": "H1"})
-    n = 0
-    for end in range(399, 700):
-        sb = sig[end - 399:end + 1]
-        now = sb[-1]["t"] + 300
-        hb = [b for b in htf if b["t"] + 3600 <= now][-200:]
-        a = mod.analyze("EURUSD", sb, hb, _quote(sb[-1]["c"]), cfg, RISK, _ctx(now))
-        c = a["candidate"]
-        if not c:
-            continue
-        n += 1
-        if c["side"] == "BUY":
-            assert c["stop_loss"] < c["entry"] < c["take_profit"]
-        else:
-            assert c["take_profit"] < c["entry"] < c["stop_loss"]
-    assert n >= 0

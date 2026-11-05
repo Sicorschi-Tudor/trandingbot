@@ -6,14 +6,14 @@
 //+------------------------------------------------------------------+
 #property copyright "AI Trading Bot v1"
 #property link      "http://127.0.0.1:8787"
-#property version   "1.15"
+#property version   "1.16"
 #property description "Punte MT5 <-> server AI Trading Bot (v1)."
 #property description "Trimite cotatii, bare, cont, pozitii si deal-uri catre server"
 #property description "si executa DOAR comenzile primite de la server (OPEN/MODIFY/CLOSE)."
 
 #include <Trade\Trade.mqh>
 
-#define EA_VERSION        "1.15"
+#define EA_VERSION        "1.16"
 #define MAX_DONE_IDS      500
 #define MAX_RESULTS       200
 #define MAX_HIST          64
@@ -35,6 +35,7 @@ input long   InpMagic            = 552211;                  // Magic number al b
 input int    InpTimerMs          = 500;                     // Interval sincronizare (ms)
 input int    InpDeviationPoints  = 20;                      // Deviatie maxima implicita (puncte)
 input int    InpHistoryBars      = 300;                     // Bare trimise la cererea HIST
+input bool   InpCalendar         = true;                    // Trimite calendarul economic (false pe brokerii unde CalendarValueHistory blocheaza)
 
 //--- globals
 CTrade   g_trade;
@@ -563,6 +564,10 @@ void RefreshCalendar()
 
 void MaybeRefreshCalendar()
   {
+   if(!InpCalendar)
+      return;   // 03.11, Exness: CalendarValueHistory never returned and the whole sync stood still behind it
+   if(TerminalInfoInteger(TERMINAL_CONNECTED) == 0)
+      return;   // the calendar needs the trade server; the sync itself goes on without it
    if(g_cal_last == 0 || (TimeLocal() - g_cal_last) >= CAL_REFRESH_S)
       RefreshCalendar();
   }
@@ -1779,7 +1784,8 @@ int OnInit()
    g_ch_ready        = false;
    g_ch_in_req       = false;
    g_ch_json         = "";
-   RefreshCalendar();
+   // the calendar is fetched from OnTimer (MaybeRefreshCalendar), not here: on a freshly logged-in broker server
+   // CalendarValueHistory blocks until the calendar is downloaded and the terminal cancels OnInit (03.11, Exness)
 
    g_trade.SetExpertMagicNumber((ulong)InpMagic);
    g_trade.SetDeviationInPoints((ulong)InpDeviationPoints);

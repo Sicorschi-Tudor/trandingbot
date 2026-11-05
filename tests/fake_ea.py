@@ -8,9 +8,7 @@ with a FastAPI TestClient instead of a live server.
 from __future__ import annotations
 
 import random
-import sys
 import time
-from pathlib import Path
 
 MAGIC = 552211
 TF_SEC = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}
@@ -96,8 +94,9 @@ class FakeEA:
         return lines
 
 
-def run_scenario(ea: FakeEA, admin, log=print) -> dict:
-    """admin(method, path, body) -> (status_code, json). Returns collected facts; raises AssertionError on failure."""
+def run_scenario(ea: FakeEA, admin, submit, log=print) -> dict:
+    """admin(method, path, body) -> (status_code, json); submit(symbol, side) -> the OPEN intent the bot creates (DEMO,
+    execution armed). Returns collected facts; raises AssertionError on failure."""
     # 1) handshake: OK / SYMBOLS / TF / HIST
     lines = ea.sync()
     kinds = [p[0] for p in lines]
@@ -106,25 +105,17 @@ def run_scenario(ea: FakeEA, admin, log=print) -> dict:
     assert ("EURUSD", "M5") in ea.hist, f"expected HIST|EURUSD|M5, got {ea.hist}"
     log(f"handshake OK: SYMBOLS={ea.symbols} TF={ea.tfs} HIST={len(ea.hist)} perechi")
     ea.sync(history=True)  # send full history for every HIST pair
-    code, cd = admin("GET", "/api/v1/candles?symbol=EURUSD&tf=M5&limit=300", None)
-    assert code == 200 and len(cd["bars"]) >= 100, f"candles after HIST: {code} {len(cd.get('bars', []))}"
-    log(f"istoric primit: {len(cd['bars'])} bare M5")
 
     code, st = admin("GET", "/api/v1/status", None)
     assert st["bridge"]["connected"] and st["account"]["is_demo"] and st["account"]["login_masked"] == "****3456", st
     assert st["feed_label"] == "MT5_FEED"
 
-    # 2) DEMO + arm + test order
-    code, r = admin("POST", "/api/v1/control/mode", {"mode": "DEMO"})
-    assert code == 200 and r["mode"] == "DEMO", (code, r)
-    code, r = admin("POST", "/api/v1/control/execution", {"enabled": True})
-    assert code == 200 and r["execution_enabled"], (code, r)
-    code, intent = admin("POST", "/api/v1/control/test-order", {"symbol": "EURUSD", "side": "BUY"})
-    assert code == 200, (code, intent)
+    # 2) an OPEN from the bot (DEMO, armed)
+    intent = submit("EURUSD", "BUY")
     assert intent["risk_check"]["passed"], [c for c in intent["risk_check"]["checks"] if not c["ok"]]
     assert intent["state"] == "QUEUED" and intent["mode"] == "DEMO", intent
     cmd_id = intent["id"]
-    log(f"test-order: intent {cmd_id[:8]} QUEUED vol={intent['volume']} SL={intent['sl']} TP={intent['tp']}")
+    log(f"OPEN: intent {cmd_id[:8]} QUEUED vol={intent['volume']} SL={intent['sl']} TP={intent['tp']}")
 
     # 3) OPEN delivered exactly once
     lines = ea.sync()
@@ -183,37 +174,5 @@ def run_scenario(ea: FakeEA, admin, log=print) -> dict:
     assert not [p for p in pos["open"] if p["ticket"] == ticket]
     log(f"deal OUT → trade #{ticket} TP profit={t['profit']} (fără duplicate)")
 
-    admin("POST", "/api/v1/control/execution", {"enabled": False})
+    admin("POST", "/api/v1/control/pause-entries", None)
     return {"intent_id": cmd_id, "ticket": ticket, "trade": t}
-
-
-def _read_env(path: Path) -> dict:
-    out = {}
-    for ln in path.read_text(encoding="utf-8").splitlines():
-        if "=" in ln and not ln.lstrip().startswith("#"):
-            k, v = ln.split("=", 1)
-            out[k.strip()] = v.strip()
-    return out
-
-
-def main(base: str) -> int:
-    import httpx
-    env = _read_env(Path(__file__).resolve().parent.parent / ".env")
-    admin_hdr = {"X-Admin-Token": env.get("ADMIN_TOKEN", "")}
-    cli = httpx.Client(base_url=base, timeout=10)
-
-    def post(path, body, headers):
-        r = cli.post(path, json=body, headers=headers)
-        return r.status_code, r.text
-
-    def admin(method, path, body):
-        r = cli.request(method, path, json=body, headers=admin_hdr if method != "GET" else None)
-        return r.status_code, r.json()
-
-    run_scenario(FakeEA(post, env.get("MT5_BRIDGE_KEY", "")), admin)
-    print("FAKE EA: toate verificările au trecut")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8013"))

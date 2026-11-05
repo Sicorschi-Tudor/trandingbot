@@ -5,9 +5,7 @@ import random
 
 import pytest
 
-from app import strategy
 from app.patterns import p0
-from app.strategies import get
 
 X = 2.2  # mirror axis (price -> X - price)
 
@@ -233,54 +231,3 @@ def _htf(sig):
     return out
 
 
-@pytest.mark.parametrize("pid", ["C1_ENGULF", "L2_ROUND", "I4_ADX"])
-def test_filter_plugin_is_trend_v1_plus_blocker(pid):
-    mod = get("filt-" + pid)
-    sig = walk(1400, seed=3)
-    htf = _htf(sig)
-    n_cand = n_blocked = 0
-    for i in range(500, 1400, 9):
-        s = sig[i - 399:i + 1]
-        h = [b for b in htf if b["t"] + 3600 <= s[-1]["t"] + 300][-200:]
-        ctx = strategy.AnalysisContext(now_ts=s[-1]["t"] + 300)
-        cfg = {**mod.PARAMS, **CFG}
-        base = strategy.analyze("EURUSD", s, h, _quote(s[-1]["c"]), cfg, RISK, ctx)
-        got = mod.analyze("EURUSD", s, h, _quote(s[-1]["c"]), cfg, RISK, ctx)
-        if not base["candidate"]:
-            assert got == base
-            continue
-        n_cand += 1
-        keep = p0.filter_keep(pid, s, len(s) - 1, base["candidate"]["side"], base["candidate"]["entry"],
-                              {k[4:]: v for k, v in cfg.items() if k.startswith("pat_")})
-        if keep:
-            assert got == base
-        else:
-            n_blocked += 1
-            assert got["direction"] == "HOLD"
-            assert got["candidate"]["blockers"][:-1] == base["candidate"]["blockers"]
-            assert got["candidate"]["blockers"][-1].startswith(f"Filtru {pid}")
-            assert {k: got["candidate"][k] for k in ("side", "entry", "stop_loss", "take_profit")} == \
-                   {k: base["candidate"][k] for k in ("side", "entry", "stop_loss", "take_profit")}
-    assert n_cand > 0
-
-
-@pytest.mark.parametrize("pid", p0.PATTERN_IDS)
-def test_standalone_plugin_levels(pid):
-    mod = get("pat-" + pid)
-    sig = walk(1600, seed=5)
-    htf = _htf(sig)
-    for i in range(400, 1600, 2):
-        s = sig[i - 399:i + 1]
-        h = [b for b in htf if b["t"] + 3600 <= s[-1]["t"] + 300][-200:]
-        q = _quote(s[-1]["c"])
-        a = mod.analyze("EURUSD", s, h, q, {**CFG, **mod.PARAMS}, RISK,
-                        strategy.AnalysisContext(now_ts=s[-1]["t"] + 300))
-        c = a["candidate"]
-        if not c:
-            continue
-        sign = 1 if c["side"] == "BUY" else -1
-        assert sign * (c["entry"] - c["stop_loss"]) > 0 and sign * (c["take_profit"] - c["entry"]) > 0
-        if pid != "L2_ROUND":
-            assert p0.DETECTORS[pid](s, len(s) - 1, {k[4:]: v for k, v in mod.PARAMS.items()}) == sign
-    if hasattr(mod, "bias"):
-        assert mod.bias("EURUSD", sig[:400], [], mod.PARAMS) in (-1, 0, 1)

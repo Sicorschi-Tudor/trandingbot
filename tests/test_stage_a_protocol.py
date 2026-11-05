@@ -48,14 +48,13 @@ def test_login_change_fails_pending_and_blocks_delivery(engine):
     ex.take_commands(now)  # both delivered to the old account
     q2 = ex.submit_modify("MT5", 77, "EURUSD", "BUY", 1.0795, 1.082)
     engine.known_mt5_positions[999] = {"ticket": 999}
-    engine.pm.last_action[999] = now
     txt = process_sync(engine, with_login(now + 1, 87654321), now + 1)
     assert "OPEN|" not in txt and "MODIFY|" not in txt
     for x in (q, d, q2):
         got = ex.get(x["id"])
         assert got["state"] == "FAILED" and got["result"]["retcode_desc"] == "ACCOUNT_CHANGED"
     assert engine.rt.bridge.get("account_changed_ts") == now + 1
-    assert 999 not in engine.known_mt5_positions and not engine.pm.last_action
+    assert 999 not in engine.known_mt5_positions
     # new intents for the new login are delivered normally
     n = ex.submit_open("DEMO", "EURUSD", "BUY", 0.01, 1.079, 1.082, engine.rt.quotes["EURUSD"], RC_OK)
     assert n["account_login"] == 87654321
@@ -181,8 +180,6 @@ def test_consecutive_failures_only_last_hour(engine):
     engine.db.execute(f"UPDATE intents SET updated_at_utc=? WHERE id IN ({','.join('?' * 4)})", (old, *ids[:4]))
     n, last = ex.consecutive_failures(77, "MODIFY")
     assert n == 2 and last is not None and now - last < 60
-    a = {"type": "MODIFY", "reason": "BREAK_EVEN"}
-    assert engine.pm._backing_off(77, a, now + 61) is False  # 2 recent failures -> 60 s backoff only
     # everything older than an hour -> retries resume
     assert ex.consecutive_failures(77, "MODIFY", now=now + 3700)[0] == 0
 

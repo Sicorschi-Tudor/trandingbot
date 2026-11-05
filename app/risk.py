@@ -216,7 +216,6 @@ def evaluate(ctx: RiskContext) -> dict:
     acc = ctx.account or {}
     mode = (ctx.mode or "").upper()
     point = float(info.get("point") or 0.00001)
-    digits = int(info.get("digits") or 5)
     equity = float(acc.get("equity") or 0)
 
     add("mode_allows_execution", mode in ("PAPER", "DEMO", "LIVE") and ctx.execution_enabled,
@@ -370,3 +369,29 @@ def evaluate(ctx: RiskContext) -> dict:
 def failed_summary(rc: dict) -> str:
     bad = [f"{c['name']}: {c['detail']}" for c in rc.get("checks", []) if not c["ok"]]
     return "; ".join(bad) if bad else "OK"
+
+
+def pyramid_blocker(side: str, positions: list | None, max_per: int, min_r: float, min_dist_atr: float = 0.0,
+                    allow_opposite: bool = False) -> str | None:
+    """Reason a further position on the symbol is NOT allowed under the pyramiding rule, else None.
+    positions: [{"side", "open_r", "distance_atr"}] of the bot's open positions on the symbol (open_r None = order in
+    flight; distance_atr = |current price - that entry| / ATR, None = unknown)."""
+    if not positions:
+        return None
+    n = len(positions)
+    if n >= max_per:
+        return f"Limita de poziții pe simbol atinsă ({n}/{max_per})."
+    for p in positions:
+        r = p.get("open_r")
+        if p.get("side") is None or r is None:
+            return "Un ordin pe acest simbol este încă în curs — nu se adaugă peste el."
+        if p.get("side") != side:
+            if allow_opposite:  # recovery hedge (basket experiment): opposite positions are the point
+                continue
+            return f"Poziția existentă este {p.get('side')} — nu se adaugă în direcția opusă."
+        if r < min_r:
+            return f"Piramidare doar peste poziții pe profit: {r:+.2f}R < {min_r:g}R."
+        d = p.get("distance_atr")
+        if min_dist_atr > 0 and d is not None and d < min_dist_atr:
+            return f"Intrare prea aproape de poziția existentă: {d:.2f} ATR < {min_dist_atr:g} ATR."
+    return None

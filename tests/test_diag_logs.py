@@ -1,7 +1,7 @@
 """Diagnostic logs: a Risk Engine rejection names the failed checks; a bridge outage logs its duration."""
 import time
 
-from tests.conftest import ADMIN, make_bars, quote, zigzag
+from tests.conftest import make_bars, quote, zigzag
 
 
 def _logs(engine, n=5):
@@ -13,8 +13,10 @@ def test_risk_rejection_log_names_failed_checks(client, engine):
     for b in make_bars(zigzag(120, 0.0003, 0.0002), 300, end_t=int(now // 300 * 300) - 300):
         engine.rt.ingest_bar("EURUSD", "M5", b)
     engine.rt.ingest_quote("EURUSD", quote(bid=1.08))
-    r = client.post("/api/v1/control/test-order", json={"symbol": "EURUSD", "side": "BUY"}, headers=ADMIN)
-    assert r.json()["state"] == "REJECTED_RISK"
+    q = engine.rt.quotes["EURUSD"]
+    rc = engine.risk_check("EURUSD", "BUY", float(q["ask"]), 1.078, 1.083)
+    it = engine.executor.submit_open(engine.mode(), "EURUSD", "BUY", 0.01, 1.078, 1.083, q, rc)
+    assert it["state"] == "REJECTED_RISK"
     msg = next(m for m in _logs(engine) if "respins de Risk Engine" in m)
     assert "mode_allows_execution" in msg and "(" in msg  # name + detail of the failed check
 

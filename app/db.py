@@ -8,26 +8,6 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS signals (
-    id TEXT PRIMARY KEY,
-    created_at_utc TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    timeframe TEXT NOT NULL,
-    bar_time INTEGER NOT NULL,
-    direction TEXT NOT NULL,
-    status TEXT NOT NULL,
-    dedup_key TEXT NOT NULL UNIQUE,
-    data_json TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS ix_signals_created ON signals(created_at_utc);
-CREATE TABLE IF NOT EXISTS signal_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    signal_id TEXT NOT NULL,
-    time_utc TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    detail TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_sigev ON signal_events(signal_id);
 CREATE TABLE IF NOT EXISTS intents (
     id TEXT PRIMARY KEY,
     created_at_utc TEXT NOT NULL,
@@ -63,21 +43,6 @@ CREATE TABLE IF NOT EXISTS trades (
     signal_id TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_trades_closed ON trades(closed_at_utc);
-CREATE TABLE IF NOT EXISTS notifications (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    idempotency_key TEXT NOT NULL UNIQUE,
-    event_type TEXT NOT NULL,
-    ref_id TEXT,
-    text TEXT NOT NULL,
-    button_url TEXT,
-    status TEXT NOT NULL DEFAULT 'PENDING',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    next_retry_at REAL NOT NULL DEFAULT 0,
-    last_error TEXT,
-    created_at_utc TEXT NOT NULL,
-    sent_at_utc TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_notif_status ON notifications(status, next_retry_at);
 CREATE TABLE IF NOT EXISTS system_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     time_utc TEXT NOT NULL,
@@ -103,54 +68,6 @@ CREATE TABLE IF NOT EXISTS equity_marks (
     peak_equity REAL NOT NULL,
     updated_at_utc TEXT
 );
-CREATE TABLE IF NOT EXISTS bars_archive (
-    symbol TEXT NOT NULL,
-    tf TEXT NOT NULL,
-    t INTEGER NOT NULL,
-    o REAL, h REAL, l REAL, c REAL, tv REAL, sp REAL,
-    PRIMARY KEY (symbol, tf, t)
-);
-CREATE TABLE IF NOT EXISTS spread_stats (
-    symbol TEXT NOT NULL,
-    hour_utc INTEGER NOT NULL,
-    n INTEGER NOT NULL DEFAULT 0,
-    sum_pts REAL NOT NULL DEFAULT 0,
-    sum_sq REAL NOT NULL DEFAULT 0,
-    max_pts REAL,
-    PRIMARY KEY (symbol, hour_utc)
-);
-CREATE TABLE IF NOT EXISTS analyses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT NOT NULL,
-    tf TEXT NOT NULL,
-    bar_time INTEGER NOT NULL,
-    created_ts REAL,
-    account_key TEXT,
-    direction TEXT,
-    candidate_side TEXT,
-    entry REAL,
-    sl REAL,
-    tp REAL,
-    score REAL,
-    blockers_json TEXT,
-    signal_id TEXT,
-    ai_verdict TEXT,
-    outcome TEXT,
-    outcome_r REAL,
-    mfe_r REAL,
-    mae_r REAL,
-    labeled_ts REAL,
-    UNIQUE (symbol, tf, bar_time)
-);
-CREATE INDEX IF NOT EXISTS ix_analyses_bar ON analyses(bar_time);
-CREATE INDEX IF NOT EXISTS ix_analyses_signal ON analyses(signal_id);
-CREATE TABLE IF NOT EXISTS equity_snapshots (
-    account_key TEXT NOT NULL,
-    ts INTEGER NOT NULL,
-    balance REAL,
-    equity REAL,
-    PRIMARY KEY (account_key, ts)
-);
 CREATE TABLE IF NOT EXISTS claude_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -162,151 +79,6 @@ CREATE TABLE IF NOT EXISTS claude_usage (
     cost_usd REAL
 );
 CREATE INDEX IF NOT EXISTS ix_claude_usage_ts ON claude_usage(ts);
-CREATE TABLE IF NOT EXISTS backtest_runs (
-    id TEXT PRIMARY KEY,
-    created_ts REAL NOT NULL,
-    status TEXT NOT NULL,
-    params_json TEXT,
-    metrics_json TEXT,
-    error TEXT
-);
-CREATE TABLE IF NOT EXISTS trade_paths (
-    source TEXT NOT NULL,
-    trade_id TEXT NOT NULL,
-    symbol TEXT,
-    side TEXT,
-    ts INTEGER NOT NULL,
-    minutes REAL,
-    r_now REAL,
-    mfe_r REAL,
-    mae_r REAL,
-    price REAL,
-    atr REAL,
-    ema_dist_atr REAL,
-    spread_pts REAL,
-    PRIMARY KEY (source, trade_id, ts)
-);
-CREATE INDEX IF NOT EXISTS ix_trade_paths_ts ON trade_paths(ts);
-CREATE TABLE IF NOT EXISTS trade_reviews (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL,
-    ref_id TEXT NOT NULL,
-    created_ts REAL NOT NULL,
-    account_key TEXT,
-    symbol TEXT,
-    status TEXT NOT NULL,
-    model TEXT,
-    review_json TEXT,
-    payload_json TEXT,
-    UNIQUE (kind, ref_id)
-);
-CREATE INDEX IF NOT EXISTS ix_trade_reviews_ts ON trade_reviews(created_ts);
-CREATE TABLE IF NOT EXISTS ai_trader_decisions (
-    id TEXT PRIMARY KEY,
-    ts REAL NOT NULL,
-    kind TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    tf TEXT,
-    bar_time INTEGER,
-    ticket INTEGER,
-    mode TEXT NOT NULL,
-    action TEXT NOT NULL,
-    side TEXT,
-    entry REAL,
-    sl REAL,
-    tp REAL,
-    hold_minutes INTEGER,
-    confidence REAL,
-    setup TEXT,
-    reasoning TEXT,
-    status TEXT NOT NULL,
-    note TEXT,
-    signal_id TEXT,
-    payload_json TEXT,
-    model TEXT,
-    outcome TEXT,
-    outcome_r REAL,
-    mfe_r REAL,
-    mae_r REAL,
-    labeled_ts REAL,
-    UNIQUE (kind, symbol, tf, bar_time, ticket)
-);
-CREATE INDEX IF NOT EXISTS ix_ai_trader_ts ON ai_trader_decisions(ts);
-CREATE TABLE IF NOT EXISTS forward_meta (
-    name TEXT PRIMARY KEY,
-    started_ts REAL NOT NULL,
-    config_json TEXT,
-    decided_json TEXT
-);
-CREATE TABLE IF NOT EXISTS forward_positions (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    side TEXT NOT NULL,
-    entry REAL NOT NULL,
-    sl REAL NOT NULL,
-    tp REAL NOT NULL,
-    opened_ts REAL NOT NULL,
-    bar_time INTEGER,
-    point REAL,
-    digits INTEGER,
-    spread_pts REAL,
-    std_spread_pts REAL,
-    data_json TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_forward_positions_name ON forward_positions(name);
-CREATE TABLE IF NOT EXISTS forward_trades (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    side TEXT NOT NULL,
-    entry REAL NOT NULL,
-    sl REAL NOT NULL,
-    tp REAL NOT NULL,
-    opened_ts REAL NOT NULL,
-    closed_ts REAL NOT NULL,
-    exit_price REAL,
-    reason TEXT,
-    r REAL,
-    r_adj REAL,
-    usd_adj REAL,
-    bar_time INTEGER,
-    data_json TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_forward_trades_name ON forward_trades(name, closed_ts);
-CREATE TABLE IF NOT EXISTS ml_models (
-    id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    name TEXT NOT NULL,
-    version TEXT,
-    feature_schema TEXT NOT NULL,
-    dataset_version TEXT,
-    params_json TEXT,
-    metrics_json TEXT,
-    trained_until_utc TEXT,
-    artifact_path TEXT NOT NULL,
-    sha256 TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'candidate',
-    created_at TEXT NOT NULL,
-    approved_by TEXT,
-    approved_at TEXT,
-    notes TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_ml_models_status ON ml_models(kind, status);
-CREATE TABLE IF NOT EXISTS ml_decisions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_id TEXT NOT NULL,
-    ts REAL NOT NULL,
-    kind TEXT NOT NULL,
-    symbol TEXT,
-    ref_id TEXT,
-    features_hash TEXT,
-    score REAL,
-    would_action TEXT,
-    actual_action TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_ml_decisions_model ON ml_decisions(model_id, ts);
-CREATE INDEX IF NOT EXISTS ix_ml_decisions_ref ON ml_decisions(kind, ref_id);
 """
 
 # additive columns on tables that already exist in older databases: (table, column, type)
@@ -316,9 +88,7 @@ ADDED_COLUMNS = [
     ("trades", "initial_sl", "REAL"),
     ("trades", "risk_money", "REAL"),
     ("trades", "r_multiple", "REAL"),
-    ("signals", "account_key", "TEXT"),
     ("intents", "account_key", "TEXT"),
-    ("forward_meta", "decided_json", "TEXT"),
 ]
 
 
@@ -347,7 +117,6 @@ class DB:
             self.conn.execute("PRAGMA synchronous=NORMAL")
             self.conn.executescript(SCHEMA)
             self.migrated = migrate(self.conn)
-            from .calendar_hist import migrate as calhist_migrate; calhist_migrate(self.conn)  # noqa: E702
 
     def execute(self, sql: str, params: tuple | list = ()) -> sqlite3.Cursor:
         with self.lock:

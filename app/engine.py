@@ -1,56 +1,31 @@
-"""Orchestrator: analysis on bar close, AI review, risk, intents, position management, notifications."""
+"""Orchestrator: MT5 bridge state, the Claude basket manager (app.basket), risk checks, intents, trade history."""
 from __future__ import annotations
 
 import asyncio
-import importlib
 import json
-import math
-import re
 import sqlite3
-import threading
 import time
-import logging
-import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from . import indicators as ind
 from . import risk as risk_mod
-from . import scheduler, smc, strategy
+from . import scheduler
 from .ai_claude import ClaudeReviewer
-from .config import STRATEGY_VERSION, TF_SECONDS, VERSION, Settings, iso, parse_iso, spread_cap, utcnow
+from .news_feed import NewsFeed
+from .config import VERSION, Settings, iso, parse_iso, spread_cap, utcnow
 from .db import DB
 from .executor import Executor
-from .forward import ForwardRunner
-from .ml_live import MLLive
 from .paper import PaperBroker
-from .position_manager import PositionManager
-from .simfeed import SimFeed
+from .risk import pyramid_blocker
 from .state import Runtime
-from . import trade_review as trade_review_mod
-from .ai_trader import AITrader
 from .basket import BasketTrader
-from .trade_review import TradeReviewer
-from .telegram import (TelegramNotifier, fmt_daily_start, fmt_intent, fmt_modify, fmt_risk_alert, fmt_signal,
-                       fmt_trade)
 
-HORIZON_MINUTES = 60
-SIGNAL_FRESH_S = 90
 WARMUP_S = 30.0  # no new signals right after process start
 CALENDAR_STALE_S = 1800.0
-NEWS_BE_WINDOW_S = 300.0  # high-impact event this close -> move profitable positions to break-even
-NEWS_BE_MIN_R = 0.3
+
 NEUTRAL_R = 0.1  # |net| below this many R counts as break-even (neither loss nor win)
 NEUTRAL_EQUITY_FRAC = 0.0005  # fallback when the initial risk is unknown: 0.05% of equity
 DEAL_REASON = {4: "SL", 5: "TP", 3: "BOT", 0: "MANUAL", 1: "MANUAL", 2: "MANUAL", 6: "SO"}
-EQUITY_SNAPSHOT_S = 60.0
-LABEL_EVERY_S = 60.0
-DEFAULT_STRATEGY = "trend-v1"
-_hb = logging.getLogger("bot")  # per-bar heartbeat (data/bot.log only, not the DB)
-PATH_EVERY_S = 60  # live trade path rows: one per position per minute
-PATH_SOURCE = "live"
-# pre-AI arbitration: risk checks that may clear while Claude reviews (not a reason to skip the review)
-PRE_AI_TRANSIENT_CHECKS = ("quote_fresh", "account_settled")
-PRE_AI_PREFIX = "Respins înainte de AI: "
 
 
 class EngineError(Exception):
@@ -75,13 +50,8 @@ class Engine:
         self.executor = Executor(self.rt, self.paper, deviation_points=settings.MAX_SLIPPAGE_POINTS)
         self.executor.on_update = self._on_intent_update
         self.ai = ClaudeReviewer(settings)
-        self.telegram = TelegramNotifier(settings, db, log_fn=self.rt.log)
-        self.pm = PositionManager(self)
         self.basket = BasketTrader(self)
-        self.sim: SimFeed | None = SimFeed(self.rt) if settings.data_source == "sim" else None
         self.tasks: list[asyncio.Task] = []
-        self.signal_tasks: set[asyncio.Task] = set()
-        self.last_analyzed_bar: dict[str, int] = {}
         self.known_mt5_positions: dict[int, dict] = {}
         self._paper_dirty = False
         self._prev_session_open: bool | None = None
@@ -91,93 +61,39 @@ class Engine:
         self._warmup_done = False
         self._bridge_down_ts: float | None = None
         self._cal_warn_ts = 0.0
+        self.news_feed = NewsFeed(str(getattr(self.settings, "NEWS_FEED_URL", "") or ""), self.rt.log)
         self._no_quote_warn_ts = 0.0
-        # performance tracking (analyses / equity snapshots / labeler / backtests)
-        self._last_equity_snap = 0.0
-        self._last_label_ts = 0.0
-        self._labeler_busy = False
         self._perf_warned: set[str] = set()
-        # live trade paths: (source, ticket) -> {"entry","risk","side","symbol","opened_ts","mfe","mae"}
-        self._paths: dict[tuple[str, str], dict] = {}
-        # pre-AI arbitration: signals admitted and still waiting for Claude / execution -> reserved exposure
-        self._pending_ai: dict[str, dict] = {}
-        self._bar_batch: list[tuple[dict, dict]] | None = None
-        self._last_path_ts = 0
-        self.backtests: dict[str, dict] = {}  # run id -> {"progress": 0..1}
-        self._bt_lock = threading.Lock()
         self.ai.on_usage = self.record_claude_usage
         self.rt.quote_hooks.append(self._on_quote)
-        # forward tests (PAPER, simulated only): own book, never intents/bridge commands
-        self.forward = ForwardRunner(self)
-        # ML (spec §6.4): shadow logging always harmless; only an explicitly approved model may gate/close
-        self.ml = MLLive(self)
-        # Claude as trade analyst: post-trade + daily reviews (text only, never touches trading)
-        self.trade_reviews = TradeReviewer(self)
-        # AI trader: Claude decides on the chart; off by default, shadow-first, live only through the normal pipeline
-        self.ai_trader = AITrader(self)
 
     # ---- lifecycle -------------------------------------------------------
     def startup(self) -> None:
         self.rt.load_runtime_config()
-        self._load_strategy_name()
         self.paper.load(self.db.get_setting("paper_state"))
         self.rt.load_bars_from_db()
         s = self.settings
         self.rt.log("INFO", "engine",
                     f"Pornire v{VERSION}: sursă={s.data_source} ({s.feed_label}), mod={self.rt.trading['mode']}, "
                     f"execuție={'armată' if self.rt.trading['execution_enabled'] else 'dezarmată'}, "
-                    f"simboluri={','.join(self.rt.active_symbols())}, Claude={'da' if self.ai.key_set else 'fără cheie'}, "
-                    f"Telegram={'activ' if self.telegram.active else 'inactiv'}")
+                    f"simboluri={','.join(self.rt.active_symbols())}, Claude={'da' if self.ai.key_set else 'fără cheie'}")
         if not s.ADMIN_TOKEN:
             self.rt.log("WARN", "engine", "ADMIN_TOKEN nu este setat — acțiunile de administrare sunt blocate")
-        if s.profile_name:
-            self.rt.log("INFO", "engine", f"Profil {s.profile_name.upper()}: simboluri {','.join(self.rt.active_symbols())}, "
-                                          f"tranzacții doar pe {','.join(self.trade_symbols())}, max {s.MAX_POSITIONS_PER_SYMBOL} "
-                                          f"poziții/simbol, AI trader {s.AI_TRADER_ENTRY_MODE}; cadru strategie "
-                                          f"{self.rt.strategy['signal_timeframe']}/{self.rt.strategy['htf_timeframe']}, "
-                                          f"SL {self.rt.strategy['atr_sl_mult']:g}×ATR, TP {self.rt.strategy['atr_tp_mult']:g}×ATR, "
-                                          f"hold {self.rt.strategy['max_hold_minutes']} min, sesiune "
-                                          f"{self.rt.schedule['start']}–{self.rt.schedule['end']} {self.rt.schedule['tz']} "
-                                          "(cheile fixate de profil ignoră valorile salvate din dashboard)")
-        elif not any("XAU" in x.upper() or "GOLD" in x.upper() for x in self.rt.active_symbols()):
-            self.rt.log("INFO", "engine", "Pentru configurația „doar aur” pune PROFILE=gold în .env (docs/PROFIL_AUR.md)")
-        self._perf_startup()
-        try:
-            self.forward.startup()
-        except Exception as e:
-            self.rt.log("ERROR", "forward", f"teste forward neîncărcate: {e!r}")
-        try:
-            self.ml.startup()
-        except Exception as e:
-            self.rt.log("ERROR", "ml", f"ML neinițializat: {e!r}")
-        try:
-            self.ai_trader.startup()
-        except Exception as e:
-            self.rt.log("ERROR", "ai", f"AI trader neinițializat: {e!r}")
 
     async def start(self) -> None:
-        if self.sim:
-            self.sim.ensure_symbols()
-            self.tasks.append(asyncio.create_task(self.sim.run(), name="simfeed"))
         self.tasks.append(asyncio.create_task(self._loop(), name="engine"))
-        self.tasks.append(asyncio.create_task(self.telegram.worker(), name="telegram"))
         self.tasks.append(asyncio.create_task(self._broadcaster(), name="status"))
 
     async def stop(self) -> None:
-        for t in self.tasks + list(self.signal_tasks):
+        for t in self.tasks:
             t.cancel()
-        for t in self.tasks + list(self.signal_tasks):
+        for t in self.tasks:
             try:
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
         self.rt.flush_bars()
         self._save_paper()
-        try:
-            self.ml.stop()
-        except Exception:
-            pass
-        await self.telegram.aclose()
 
     # ---- helpers ---------------------------------------------------------
     def _mark_paper_dirty(self) -> None:
@@ -288,8 +204,7 @@ class Engine:
             if p["symbol"] != symbol:
                 continue
             src = "PAPER" if p.get("source") == "PAPER" else "MT5"
-            st = self._paths.get((src, str(p["ticket"])))
-            risk = float(st["risk"]) if st and st.get("risk") else None
+            risk = None
             if risk is None:
                 sl0 = None
                 if src == "PAPER":
@@ -353,7 +268,7 @@ class Engine:
         if max_per <= 1:
             return False, "o singură poziție pe simbol"
         positions = self.symbol_positions(symbol, mode)
-        reason = strategy.pyramid_blocker(side, positions, max_per, float(rk.get("pyramid_min_r", 0.5) or 0),
+        reason = pyramid_blocker(side, positions, max_per, float(rk.get("pyramid_min_r", 0.5) or 0),
                                           float(rk.get("pyramid_min_distance_atr", 0) or 0),
                                           allow_opposite=bool(rk.get("allow_hedge")))
         if reason:
@@ -405,8 +320,7 @@ class Engine:
             if oi is None and tr.get("ticket") is not None:
                 oi = self._open_intent(int(tr["ticket"]), mode)
             sl0 = initial_sl if initial_sl is not None else (oi or {}).get("sl")
-            sig = self.get_signal(tr["signal_id"]) if tr.get("signal_id") else None
-            sig_entry = (sig or {}).get("entry")
+            sig_entry = None
             rm = None
             if sl0 and tr.get("price_open") and tr.get("volume"):
                 rm = risk_mod.position_risk_money(tr.get("side") or "BUY", float(tr["price_open"]), float(sl0),
@@ -437,11 +351,6 @@ class Engine:
         self.rt.log("INFO", "trades", f"Poziție închisă {trade['mode']} {trade['symbol']} {trade['side']} {trade['volume']} "
                                       f"motiv={trade['close_reason']} net={net:+.2f}")
         self.rt.bus.publish("trade", trade)
-        if trade.get("signal_id"):
-            self.add_signal_event(trade["signal_id"], "POSITION_CLOSED", f"{trade['close_reason']} net {net:+.2f}")
-        if notify:
-            self.telegram.enqueue(f"{trade.get('mode')}:{trade.get('ticket')}", "POSITION_CLOSED", fmt_trade(trade, self.tz()))
-            self.trade_reviews.on_trade_closed(trade)
 
     def history_reset_ts(self) -> float:
         """Owner's 'start from zero' point (settings key history_reset): MT5 deals closed before it are never recorded
@@ -479,9 +388,6 @@ class Engine:
         path.write_text(json.dumps(rows, ensure_ascii=False, default=str))
         self.db.execute(f"DELETE FROM {table} WHERE {where}", params)
         if what == "trades":
-            ph_t = ",".join("?" * len(open_tickets))
-            self.db.execute("DELETE FROM trade_paths" + (f" WHERE trade_id NOT IN ({ph_t})" if open_tickets else ""),
-                            tuple(str(t) for t in open_tickets))
             self.db.set_setting("history_reset", {"ts": now, "note": "dashboard: Tranzacții închise → Șterge istoricul"})
         label = "intențiile de execuție" if what == "intents" else "tranzacțiile închise"
         self.rt.log("WARN", "control", f"Istoric șters din dashboard: {len(rows)} {label} (copie {path.name})")
@@ -578,9 +484,6 @@ class Engine:
                                  "ORDER BY closed_at_utc", (self.day_start_iso(), mode))
         return self.db.query("SELECT profit, commission, swap FROM trades WHERE closed_at_utc >= ?", (self.day_start_iso(),))
 
-    def consecutive_losses(self, mode: str) -> int:
-        return self.loss_streak(mode)[0]
-
     def _trade_outcome(self, r: dict, equity: float) -> int:
         """-1 loss, +1 win, 0 neutral (|net| < 0.1R; 0.05% of equity when the initial risk is unknown)."""
         net = (r["profit"] or 0) + (r["commission"] or 0) + (r["swap"] or 0)
@@ -637,28 +540,6 @@ class Engine:
                 return 0, None
             return streak, until
         return streak, None
-
-    def last_loss_ts(self, symbol: str, now: float | None = None) -> float | None:
-        """Close time of the latest bot trade on `symbol` (any mode) closed at a loss within the
-        cooldown_after_loss_minutes window; wins and break-evens (|net| < 0.1R) do not count. None = no cooldown."""
-        minutes = int(self.rt.risk.get("cooldown_after_loss_minutes", 0) or 0)
-        if minutes <= 0:
-            return None
-        now = now or time.time()
-        try:
-            rows = self.db.query("SELECT ticket, symbol, side, volume, price_open, profit, commission, swap, mode, "
-                                 "closed_at_utc FROM trades WHERE symbol=? AND closed_at_utc >= ? "
-                                 "ORDER BY closed_at_utc DESC, id DESC LIMIT 50", (symbol, iso(now - minutes * 60)))
-        except sqlite3.Error:
-            return None
-        equity = {}
-        for r in rows:
-            m = "DEMO" if r["mode"] == "DEMO" else "PAPER"
-            if m not in equity:
-                equity[m] = float((self.risk_account(m)[1] or {}).get("equity") or 0)
-            if self._trade_outcome(r, equity[m]) < 0:
-                return _ts(r["closed_at_utc"])
-        return None
 
     def update_equity_marks(self) -> None:
         for mode in ("PAPER", "DEMO"):
@@ -731,95 +612,9 @@ class Engine:
             peak_equity=marks.get("peak_equity"), consecutive_losses=streak, loss_pause_until=pause_until,
             open_risk_money=self.open_risk_money(mode) + res_risk, news_block=news_block, news_note=news_note, test_order=test_order,
             account_settling=mode == "DEMO" and self.account_settling(),
-            size_factor=size_factor, size_cap_pct=float(self.settings.ML_MAX_RISK_PCT),
+            size_factor=size_factor,
         )
         return risk_mod.evaluate(ctx)
-
-    # ---- signals ---------------------------------------------------------
-    def save_signal(self, sig: dict) -> None:
-        self.db.execute("UPDATE signals SET status=?, data_json=? WHERE id=?", (sig["status"], json.dumps(sig), sig["id"]))
-        self.rt.bus.publish("signal", sig)
-
-    def get_signal(self, sid: str) -> dict | None:
-        r = self.db.query_one("SELECT data_json FROM signals WHERE id=?", (sid,))
-        return json.loads(r["data_json"]) if r else None
-
-    def list_signals(self, limit: int = 100, symbol: str | None = None, direction: str | None = None) -> list[dict]:
-        sql = "SELECT data_json FROM signals WHERE 1=1"
-        params: list = []
-        if symbol:
-            sql += " AND symbol=?"
-            params.append(self.resolve_symbol(symbol))
-        if direction:
-            sql += " AND direction=?"
-            params.append(direction.upper())
-        sql += " ORDER BY created_at_utc DESC, rowid DESC LIMIT ?"
-        params.append(limit)
-        return [json.loads(r["data_json"]) for r in self.db.query(sql, params)]
-
-    def signal_events(self, sid: str) -> list[dict]:
-        return self.db.query("SELECT time_utc, event_type, detail FROM signal_events WHERE signal_id=? ORDER BY id", (sid,))
-
-    def add_signal_event(self, sid: str, event_type: str, detail: str = "") -> None:
-        self.db.execute("INSERT INTO signal_events(signal_id, time_utc, event_type, detail) VALUES(?,?,?,?)",
-                        (sid, iso(utcnow()), event_type, detail))
-
-    def signals_this_session(self, symbol: str) -> int:
-        start = scheduler.session_start_utc(self.rt.schedule, self.now_utc(), self.settings.DEFAULT_TIMEZONE)
-        r = self.db.query_one("SELECT COUNT(*) AS n FROM signals WHERE symbol=? AND created_at_utc >= ?", (symbol, iso(start)))
-        return int(r["n"]) if r else 0
-
-    def create_signal(self, a: dict) -> dict | None:
-        now = utcnow()
-        expiry_min = int(self.rt.strategy.get("signal_expiry_minutes", 15))
-        expires = now + timedelta(minutes=expiry_min)
-        expires_local = expires.astimezone(scheduler._tz(self.tz())).strftime("%H:%M")
-        ai_on = self.ai.enabled and self.ai.key_set
-        sig = {
-            "id": str(uuid.uuid4()), "created_at_utc": iso(now), "symbol": a["symbol"], "timeframe": a["timeframe"],
-            "bar_time": a["bar_time"], "direction": a["direction"], "horizon_minutes": HORIZON_MINUTES,
-            "probabilities": a["probabilities"], "entry": a["entry"], "stop_loss": a["stop_loss"],
-            "take_profit": a["take_profit"], "rr": a["rr"], "spread_points": a["spread_points"],
-            "expires_at_utc": iso(expires), "invalidation": strategy.invalidation_text(a, expires_local),
-            "reasons": a["reasons"], "indicators": a["indicators"],
-            "ai": {"status": "PENDING" if ai_on else "DISABLED", "verdict": None,
-                   "explanation": "" if ai_on else "Analiza Claude este dezactivată (lipsește ANTHROPIC_API_KEY sau CLAUDE_ENABLED=false).",
-                   "risks": [], "model": self.settings.CLAUDE_MODEL},
-            "status": "NEW", "status_reason": "", "mode": self.mode(), "feed_label": self.settings.feed_label,
-            "strategy_version": a.get("strategy_version") or STRATEGY_VERSION, "intent_id": None,
-            # execution context at creation: a signal never executes after a later arm/mode change
-            "created_ts": time.time(), "created_mode": self.mode(),
-            "created_armed": bool(self.rt.trading["execution_enabled"]),
-            "account_key": self.account_key(),
-        }
-        key = strategy.dedup_key(a["symbol"], a["timeframe"], a["bar_time"], a["direction"])
-        try:
-            self.db.execute(
-                "INSERT INTO signals(id, created_at_utc, symbol, timeframe, bar_time, direction, status, dedup_key, data_json) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
-                (sig["id"], sig["created_at_utc"], sig["symbol"], sig["timeframe"], sig["bar_time"], sig["direction"],
-                 sig["status"], key, json.dumps(sig)))
-        except sqlite3.IntegrityError:
-            return None
-        self._perf_exec("UPDATE signals SET account_key=? WHERE id=?", (sig["account_key"], sig["id"]), "signal_account")
-        self.add_signal_event(sig["id"], "CREATED", f"{sig['direction']} {sig['symbol']} @ {sig['entry']} SL {sig['stop_loss']} TP {sig['take_profit']}")
-        self.rt.log("INFO", "strategy", f"Semnal nou {sig['direction']} {sig['symbol']} {sig['timeframe']} "
-                                        f"entry {sig['entry']} SL {sig['stop_loss']} TP {sig['take_profit']} ({sig['feed_label']})")
-        self.rt.bus.publish("signal", sig)
-        return sig
-
-    def expire_signals(self) -> None:
-        now = iso(utcnow())
-        rows = self.db.query("SELECT data_json FROM signals WHERE status='NEW'")
-        for r in rows:
-            sig = json.loads(r["data_json"])
-            if sig.get("ai", {}).get("status") == "PENDING":
-                continue
-            if sig["expires_at_utc"] and sig["expires_at_utc"] <= now:
-                sig["status"] = "EXPIRED"
-                sig["status_reason"] = (sig.get("status_reason") + " | " if sig.get("status_reason") else "") + "Semnal expirat"
-                self.save_signal(sig)
-                self.add_signal_event(sig["id"], "EXPIRED", "")
 
     # ---- warm-up / news ---------------------------------------------------
     def warmup_reason(self, symbol: str, now: float | None = None) -> str | None:
@@ -854,20 +649,6 @@ class Engine:
         min_imp = int(self.rt.risk.get("news_min_importance", 3))
         block = risk_mod.news_blocker(symbol, getattr(self.rt, "calendar", None) or [], now, minutes, min_imp)
         return block, f"fără știri (impact ≥{min_imp}) în ±{minutes} min"
-
-    def news_event_near(self, symbol: str, now: float | None = None, window_s: float = NEWS_BE_WINDOW_S) -> dict | None:
-        """Nearest high-impact (3) event for one of the symbol's currencies within ±window_s."""
-        now = now or time.time()
-        ccys = set(risk_mod.symbol_currencies(symbol))
-        best = None
-        for ev in getattr(self.rt, "calendar", None) or []:
-            try:
-                t, imp, ccy = float(ev["t"]), int(ev.get("imp") or 0), str(ev.get("ccy") or "").upper()
-            except (KeyError, TypeError, ValueError):
-                continue
-            if imp >= 3 and ccy in ccys and abs(t - now) <= window_s and (best is None or abs(t - now) < abs(best["t"] - now)):
-                best = {**ev, "t": t, "ccy": ccy}
-        return best
 
     def news_status(self) -> dict:
         now = time.time()
@@ -923,463 +704,25 @@ class Engine:
 
     def _check_calendar(self, now: float) -> None:
         if (self.settings.data_source != "mt5_bridge" or not self._warmup_done
-                or int(self.rt.risk.get("news_blackout_minutes", 30) or 0) <= 0 or self.calendar_fresh(now)):
+                or int(self.rt.risk.get("news_blackout_minutes", 30) or 0) <= 0):
+            return
+        if not self.calendar_fresh(now) or self.rt.bridge.get("calendar_source") == "forexfactory":
+            # no (fresh) EA calendar: the ForexFactory fallback feed takes its place (fetched in a background thread)
+            self.news_feed.poll(now)
+            items, fetched = self.news_feed.snapshot()
+            if fetched is not None and now - fetched < 24 * 3600:
+                if self.rt.bridge.get("calendar_source") != "forexfactory":
+                    self.rt.log("INFO", "news", "Calendarul EA lipsește — blocarea pe știri folosește calendarul de rezervă "
+                                                "(ForexFactory)")
+                self.rt.calendar, self.rt.calendar_ts = items, now
+                self.rt.bridge["calendar_source"] = "forexfactory"
+                return
+        if self.calendar_fresh(now):
             return
         if now - self._cal_warn_ts >= CALENDAR_STALE_S:
             self._cal_warn_ts = now
             self.rt.log("WARN", "news", "Calendar economic indisponibil — blocarea intrărilor pe știri nu se aplică "
                                         "(EA fără calendar sau date mai vechi de 30 min)")
-
-    # ---- strategy registry -----------------------------------------------
-    @staticmethod
-    def strategy_registry():
-        """app.strategies (plugins) when present; None -> only the built-in trend-v1."""
-        try:
-            return importlib.import_module("app.strategies")
-        except ImportError:
-            return None
-
-    def strategy_names(self) -> list[str]:
-        reg = self.strategy_registry()
-        names = []
-        if reg is not None:
-            try:
-                names = [str(n) for n in reg.names()]
-            except Exception:
-                names = []
-        return names if DEFAULT_STRATEGY in names else [DEFAULT_STRATEGY] + names
-
-    def strategy_catalog(self) -> list[dict]:
-        out = []
-        reg = self.strategy_registry()
-        for n in self.strategy_names():
-            mod = None
-            if reg is not None:
-                try:
-                    mod = reg.get(n)
-                except Exception:
-                    mod = None
-            if mod is None:
-                out.append({"name": n, "version": STRATEGY_VERSION if n == DEFAULT_STRATEGY else "?",
-                            "description": "Trend EMA20/EMA50 + MACD + RSI, confirmat de trendul EMA50 pe HTF."
-                            if n == DEFAULT_STRATEGY else "", "params": {}})
-                continue
-            out.append({"name": str(getattr(mod, "NAME", n)), "version": str(getattr(mod, "VERSION", "")),
-                        "description": str(getattr(mod, "DESCRIPTION_RO", "")),
-                        "params": dict(getattr(mod, "PARAMS", {}) or {})})
-        return out
-
-    def _load_strategy_name(self) -> None:
-        saved = self.db.get_setting("strategy")
-        # a profile's STRATEGY_NAME wins over the name saved from the dashboard
-        name = self.settings.STRATEGY_NAME.strip() or (saved.get("name") if isinstance(saved, dict) else None)
-        if not name:
-            return
-        if name in self.strategy_names():
-            self.rt.strategy["name"] = name
-            if name != DEFAULT_STRATEGY:
-                self.rt.log("WARN", "strategy", f"Strategie live activă: {name} (nu {DEFAULT_STRATEGY})")
-        else:
-            self.rt.log("WARN", "strategy", f"Strategia salvată {name} nu există — folosesc {DEFAULT_STRATEGY}")
-
-    def active_strategy_name(self) -> str:
-        return str(self.rt.strategy.get("name", DEFAULT_STRATEGY) or DEFAULT_STRATEGY)
-
-    def active_strategy(self):
-        """(name, analyze fn, cfg). trend-v1 always runs app.strategy.analyze on the live settings, unchanged."""
-        name = self.active_strategy_name()
-        if name != DEFAULT_STRATEGY:
-            reg = self.strategy_registry()
-            try:
-                mod = reg.get(name) if reg is not None else None
-            except Exception:
-                mod = None
-            if mod is not None and callable(getattr(mod, "analyze", None)):
-                # plugin defaults < live settings (same precedence as the backtest)
-                merge = getattr(reg, "merged_cfg", None)
-                cfg = (merge(name, self.rt.strategy) if callable(merge)
-                       else {**dict(getattr(mod, "PARAMS", {}) or {}), **self.rt.strategy})
-                return name, mod.analyze, cfg
-            self._perf_warn_once(f"strategy_missing:{name}", f"strategia {name} indisponibilă — folosesc {DEFAULT_STRATEGY}")
-        return DEFAULT_STRATEGY, strategy.analyze, self.rt.strategy
-
-    # ---- live trade paths -------------------------------------------------
-    def _path_positions(self) -> list[tuple[str, dict]]:
-        """Open bot-owned positions (PAPER always, MT5 when the bridge is connected)."""
-        rt = self.rt
-        items = [("PAPER", p) for p in list(self.paper.positions.values())]
-        if rt.bridge_connected():
-            for p in rt.mt5_positions:
-                if int(p.get("magic") or 0) != self.settings.MT5_MAGIC:
-                    continue
-                items.append(("MT5", {"ticket": int(p["ticket"]), "symbol": p["symbol"],
-                                      "side": "BUY" if int(p.get("type", 0)) == 0 else "SELL",
-                                      "price_open": p.get("price_open"), "sl": p.get("sl"), "opened_ts": p.get("time"),
-                                      "comment": p.get("comment")}))
-        return items
-
-    def _path_state(self, source: str, pos: dict) -> dict | None:
-        """Initial risk = |fill price - SL of the OPEN intent|; MFE/MAE resumed from rows already written."""
-        ticket = int(pos["ticket"])
-        if source == "PAPER":
-            init_sl = pos.get("initial_sl")
-            oi = self.executor.get(pos["intent_id"]) if pos.get("intent_id") else None
-            if oi and oi.get("sl"):
-                init_sl = oi["sl"]
-        else:
-            oi = self.executor.open_intent_for_ticket(ticket) or self.executor.open_intent_by_comment(pos.get("comment") or "")
-            init_sl = (oi or {}).get("sl")
-        entry = pos.get("price_open")
-        if not init_sl or not entry:
-            return None
-        risk = abs(float(entry) - float(init_sl))
-        if risk <= 0:
-            return None
-        # n / neg: 1-min samples written and those with r < 0 (rescue exit); last_ts: latest sample minute
-        st = {"entry": float(entry), "risk": risk, "side": pos["side"], "symbol": pos["symbol"],
-              "opened_ts": pos.get("opened_ts"), "mfe": 0.0, "mae": 0.0, "n": 0, "neg": 0, "last_ts": 0}
-        try:
-            r = self.db.query_one("SELECT MAX(mfe_r) AS mfe, MAX(mae_r) AS mae, COUNT(*) AS n, "
-                                  "SUM(CASE WHEN r_now < 0 THEN 1 ELSE 0 END) AS neg, MAX(ts) AS last_ts FROM trade_paths "
-                                  "WHERE source=? AND trade_id=? AND symbol=?", (PATH_SOURCE, str(ticket), pos["symbol"]))
-            if r and r["mfe"] is not None:
-                st["mfe"], st["mae"] = float(r["mfe"]), float(r["mae"] or 0)
-                st["n"], st["neg"], st["last_ts"] = int(r["n"] or 0), int(r["neg"] or 0), int(r["last_ts"] or 0)
-        except sqlite3.Error:
-            pass
-        return st
-
-    def _path_indicators(self, symbol: str) -> tuple[float | None, float | None]:
-        bars = self.rt.closed_bars(symbol, self.rt.strategy["signal_timeframe"])[-200:]
-        if len(bars) < 21:
-            return None, None
-        closes = [b["c"] for b in bars]
-        return (ind.last(ind.atr([b["h"] for b in bars], [b["l"] for b in bars], closes, 14)),
-                ind.last(ind.ema(closes, 20)))
-
-    def track_trade_paths(self, now: float) -> int:
-        """Every loop: MFE/MAE from the closing price (bid for BUY, ask for SELL); once per minute: one trade_paths row
-        per open bot position. R is relative to the initial risk. Never influences trading."""
-        rt = self.rt
-        ts = int(now // PATH_EVERY_S * PATH_EVERY_S)
-        write = ts != self._last_path_ts
-        max_age = float(rt.risk.get("max_tick_age_seconds", 10)) * 3
-        seen: set[tuple[str, str]] = set()
-        rows = []
-        ind_cache: dict[str, tuple] = {}
-        for source, pos in self._path_positions():
-            key = (source, str(pos["ticket"]))
-            seen.add(key)
-            q = rt.quotes.get(pos["symbol"]) or {}
-            if not q.get("bid") or not q.get("ask"):
-                continue
-            age = rt.tick_age(pos["symbol"], now)
-            if age is None or age > max_age:
-                continue
-            st = self._paths.get(key)
-            if st is None:
-                st = self._path_state(source, pos)
-                if st is None:
-                    continue
-                self._paths[key] = st
-            sign = 1 if st["side"] == "BUY" else -1
-            price = float(q["bid"] if sign > 0 else q["ask"])
-            r_now = (price - st["entry"]) * sign / st["risk"]
-            st["mfe"] = max(st["mfe"], r_now)
-            st["mae"] = max(st["mae"], -r_now)
-            if not write:
-                continue
-            if ts > int(st.get("last_ts") or 0):
-                st["last_ts"] = ts
-                st["n"] = int(st.get("n") or 0) + 1
-                st["neg"] = int(st.get("neg") or 0) + (1 if r_now < 0 else 0)
-            if st["symbol"] not in ind_cache:
-                ind_cache[st["symbol"]] = self._path_indicators(st["symbol"])
-            atr, ema = ind_cache[st["symbol"]]
-            ema_dist = round((price - ema) * sign / atr, 4) if atr and ema is not None else None
-            minutes = round((now - float(st["opened_ts"])) / 60.0, 2) if st.get("opened_ts") else None
-            rows.append((PATH_SOURCE, key[1], st["symbol"], st["side"], ts, minutes, round(r_now, 4), round(st["mfe"], 4),
-                         round(st["mae"], 4), price, atr, ema_dist, q.get("spread_points")))
-        for k in list(self._paths):
-            if k not in seen:
-                self._paths.pop(k, None)
-        if not write:
-            return 0
-        self._last_path_ts = ts
-        if rows:
-            try:
-                self.db.executemany("INSERT OR IGNORE INTO trade_paths(source, trade_id, symbol, side, ts, minutes, r_now, "
-                                    "mfe_r, mae_r, price, atr, ema_dist_atr, spread_pts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                                    rows)
-            except sqlite3.Error as e:
-                self._perf_warn_once("trade_paths_db", f"traiectorii tranzacții nesalvate: {e!r}")
-                return 0
-        return len(rows)
-
-    # ---- analysis --------------------------------------------------------
-    def analyze_symbol(self, symbol: str, allow_signal: bool = True) -> dict:
-        rt = self.rt
-        tf, htf = rt.strategy["signal_timeframe"], rt.strategy["htf_timeframe"]
-        now = time.time()
-        sig_bars = rt.closed_bars(symbol, tf, now)[-400:]
-        htf_bars = rt.closed_bars(symbol, htf, now)[-200:]
-        news_block, _ = self.news_check(symbol, now)
-        # positions of every mode count (after a restart/mode switch the other side's positions still exist)
-        ctx = strategy.AnalysisContext(
-            session_open=self.session()["open_now"], has_bot_position=self.has_bot_position(symbol, "ALL"),
-            signals_this_session=self.signals_this_session(symbol), tick_age=rt.tick_age(symbol, now), now_ts=now,
-            open_exposures=self.open_exposures("ALL"), corr_limit=int(rt.risk.get("max_same_currency_direction", 1)),
-            news_block=news_block, last_loss_ts=self.last_loss_ts(symbol, now),
-            symbol_positions=self.symbol_positions(symbol, "ALL")
-            if int(rt.risk.get("max_positions_per_symbol", 1) or 1) > 1 else None,
-        )
-        name, fn, cfg = self.active_strategy()
-        if name == "smc-v1":
-            ctx.htf_extra = {k: rt.closed_bars(symbol, k, now)[-150:] for k in smc.HTF_OF.get(tf, ("H1", "H4"))}
-            ctx.sl_bars = rt.closed_bars(symbol, "M1", now)[-120:]
-        a = fn(symbol, sig_bars, htf_bars, rt.quotes.get(symbol), cfg, rt.risk, ctx)
-        if name != DEFAULT_STRATEGY:
-            a["strategy_version"] = name
-        if name == "scalp-v1":
-            self._attach_smc(symbol, a, sig_bars, now)
-        self.record_analysis(a)
-        try:
-            self.ml.on_analysis(a)  # shadow logging in the ML thread; never changes `a` or the decision
-        except Exception as e:
-            self._perf_warn_once("ml_analysis", f"ML umbră (analiză): {e!r}")
-        rt.last_analysis[symbol] = a
-        rt.engine_info["last_analysis_utc"] = a["time_utc"]
-        _hb.info("[analiză] %s %s %s → %s · %s", symbol, a.get("timeframe"), iso(a.get("bar_time")) if a.get("bar_time") else "",
-                 a["direction"], "; ".join(a.get("reasons") or [])[:200])
-        rt.bus.publish("analysis", a)
-        if self.basket.enabled and a["direction"] in ("BUY", "SELL"):
-            a["reasons"].append("Mod coș activ: intrările le face managerul de coș, nu semnalele.")
-            allow_signal = False
-        if a["direction"] in ("BUY", "SELL"):
-            warm = self.warmup_reason(symbol, now) if allow_signal else None
-            if symbol not in self.trade_symbols():
-                a["reasons"].append("Simbol doar pentru context (TRADE_SYMBOLS): analiză și etichete în umbră, fără semnal.")
-                allow_signal = False
-            if warm:
-                a["reasons"].append(f"Încălzire după pornire ({warm}) — doar analiză, fără semnal nou.")
-            elif allow_signal:
-                sig = self.create_signal(a)
-                if sig:
-                    self._perf_exec("UPDATE analyses SET signal_id=? WHERE symbol=? AND tf=? AND bar_time=? AND signal_id IS NULL",
-                                    (sig["id"], a["symbol"], a["timeframe"], a["bar_time"]), "analysis_signal")
-                    if self._bar_batch is not None:
-                        self._bar_batch.append((sig, a))  # loop_once arbitrates every signal of this pass together
-                    else:
-                        self.dispatch_signals([(sig, a)])
-            else:
-                a["reasons"].append("Bara este prea veche pentru a emite un semnal nou (doar analiză).")
-        return a
-
-    def _attach_smc(self, symbol: str, a: dict, sig_bars: list[dict], now: float) -> None:
-        """SMC 5-step check (app.smc, CLUB 81 model) on M15 with H1/H4: shown live (dashboard, Claude context) and turned
-        into the displayed direction lean, replacing the flat 40/40/20 of a HOLD. Display only: never opens a trade."""
-        tf = "M15"
-        try:
-            sig_bars = self.rt.closed_bars(symbol, tf, now)
-            htf = {k: self.rt.closed_bars(symbol, k, now)[-150:] for k in smc.HTF_OF[tf]}
-            q = self.rt.quotes.get(symbol) or {}
-            spread = float(q["ask"]) - float(q["bid"]) if q.get("ask") and q.get("bid") else 0.0
-            s = smc.analyze(sig_bars[-260:], htf, tf, spread, now)
-        except Exception as e:
-            self._perf_warn_once("smc", f"analiza SMC eșuată: {e!r}")
-            return
-        a["smc"] = s
-        if a["direction"] == "HOLD" and s.get("direction"):
-            # still a heuristic: the lean of the SMC picture (direction x completeness), not a calibrated probability
-            a["score"] = round(s["direction"] * s["score"] / 95.0, 3)
-            a["probabilities"] = strategy.probabilities(a["score"])
-            a["probability_method"] = f"SMC: {s.get('title')} (scor {s['score']}/95, euristic, NEcalibrat)"
-
-    def _spawn_pipeline(self, sig: dict) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop is None:
-            asyncio.run(self.signal_pipeline(sig))
-        else:
-            task = loop.create_task(self.signal_pipeline(sig))
-            self.signal_tasks.add(task)
-            task.add_done_callback(self.signal_tasks.discard)
-
-    # ---- pre-AI arbitration ------------------------------------------------
-    @staticmethod
-    def _arb_key(item: tuple[dict, dict], quotes: dict) -> tuple:
-        """HTF-aligned first, then the lowest spread / SL-distance cost ratio, then the symbol (deterministic)."""
-        sig, a = item
-        side = sig["direction"]
-        htf = (a.get("indicators") or {}).get("htf_trend")
-        aligned = htf == ("UP" if side == "BUY" else "DOWN")
-        q = quotes.get(sig["symbol"]) or {}
-        sl_dist = abs(float(sig.get("entry") or 0) - float(sig.get("stop_loss") or 0))
-        spread = None
-        if q.get("bid") and q.get("ask"):
-            spread = float(q["ask"]) - float(q["bid"])
-        elif sig.get("spread_points") is not None and q.get("point"):
-            spread = float(sig["spread_points"]) * float(q["point"])
-        cost = spread / sl_dist if spread is not None and sl_dist > 0 else float("inf")
-        return (0 if aligned else 1, cost, sig["symbol"])
-
-    def reserved_exposures(self) -> list[dict]:
-        return [dict(r) for r in self._pending_ai.values()]
-
-    def pre_ai_check(self, sig: dict, mode: str, reserved: list[dict]) -> tuple[bool, dict, dict | None]:
-        """Deterministic dry run of the Risk Engine (+ correlation) for a candidate, counting `reserved` candidates
-        as already open. Returns (admitted, risk check, reservation). Checks that may clear during the review
-        (PRE_AI_TRANSIENT_CHECKS) never reject."""
-        sym, side = sig["symbol"], sig["direction"]
-        q = self.rt.quotes.get(sym) or {}
-        entry = (q.get("ask") if side == "BUY" else q.get("bid")) or sig.get("entry")
-        rc = self.risk_check(sym, side, float(entry), sig["stop_loss"], sig["take_profit"], mode=mode, reserved=reserved)
-        bad = [c for c in rc["checks"] if not c["ok"] and c["name"] not in PRE_AI_TRANSIENT_CHECKS]
-        if bad:
-            return False, {**rc, "checks": bad, "passed": False}, None
-        rm = None
-        if rc.get("volume"):
-            rm = risk_mod.position_risk_money(side, float(entry), sig["stop_loss"], float(rc["volume"]), q)
-        return True, rc, {"signal_id": sig["id"], "symbol": sym, "side": side, "risk_money": rm}
-
-    def arbitrate(self, items: list[tuple[dict, dict]]) -> list[dict]:
-        """Order this bar's new signals and admit them one by one with a risk dry run that reserves the exposure of
-        candidates admitted before them and of signals still waiting for Claude. Only admitted signals go on to
-        Claude; the others become NO_TRADE with ai.status SKIPPED. Applies only when an entry could actually be
-        taken (PAPER/DEMO armed) and the signals are waiting for Claude; otherwise only the order changes."""
-        quotes = self.rt.quotes
-        items = sorted(items, key=lambda it: self._arb_key(it, quotes))
-        mode = self.mode()
-        if (mode not in ("PAPER", "DEMO") or not self.rt.trading["execution_enabled"]
-                or not any(sig["ai"].get("status") == "PENDING" for sig, _ in items)):
-            return [sig for sig, _ in items]
-        reserved = self.reserved_exposures()
-        out = []
-        for sig, _ in items:
-            if sig["ai"].get("status") != "PENDING":
-                out.append(sig)
-                continue
-            try:
-                ok, rc, res = self.pre_ai_check(sig, mode, reserved)
-            except Exception as e:  # a dry-run failure never blocks the normal path (final risk check stays)
-                self._perf_warn_once("pre_ai", f"arbitraj pre-AI eșuat — semnalul continuă normal: {e!r}")
-                out.append(sig)
-                continue
-            if ok:
-                reserved.append(res)
-                self._pending_ai[sig["id"]] = res
-                out.append(sig)
-            else:
-                self._reject_pre_ai(sig, rc)
-        return out
-
-    def _reject_pre_ai(self, sig: dict, rc: dict) -> None:
-        reason = PRE_AI_PREFIX + risk_mod.failed_summary(rc)
-        sig["status"], sig["status_reason"] = "NO_TRADE", reason[:600]
-        sig["ai"] = {**sig["ai"], "status": "SKIPPED", "verdict": None,
-                     "explanation": "Claude nu a fost apelat: semnalul a fost respins de verificarea de risc dinaintea AI."}
-        self.save_signal(sig)
-        self.add_signal_event(sig["id"], "PRE_AI_REJECTED", sig["status_reason"])
-        self._perf_exec("UPDATE analyses SET ai_verdict=? WHERE signal_id=?", ("SKIPPED", sig["id"]), "analysis_verdict")
-        self.rt.log("INFO", "strategy", f"Semnal {sig['direction']} {sig['symbol']} respins înainte de AI: "
-                                        f"{risk_mod.failed_summary(rc)[:200]}")
-
-    def dispatch_signals(self, items: list[tuple[dict, dict]]) -> None:
-        try:
-            admitted = self.arbitrate(items)
-        except Exception as e:  # never strand a PENDING signal: fall back to the old path (final risk check)
-            self.rt.log("ERROR", "engine", f"arbitraj pre-AI eșuat: {e!r}")
-            admitted = [sig for sig, _ in items if sig.get("status") == "NEW"]
-        for sig in admitted:
-            self._spawn_pipeline(sig)
-
-    async def signal_pipeline(self, sig: dict) -> None:
-        try:
-            await self._signal_pipeline(sig)
-        finally:
-            self._pending_ai.pop(sig.get("id"), None)  # reservation ends: executed (now in the book) or dropped
-
-    async def _signal_pipeline(self, sig: dict) -> None:
-        try:
-            if sig["ai"]["status"] == "PENDING":
-                ai = await self.ai.review(sig, self._ai_context(sig["symbol"]))
-                sig = self.get_signal(sig["id"]) or sig
-                sig["ai"] = ai
-                self._perf_exec("UPDATE analyses SET ai_verdict=? WHERE signal_id=?",
-                                (ai.get("verdict") or ai.get("status"), sig["id"]), "analysis_verdict")
-                self.add_signal_event(sig["id"], "AI_" + ai["status"], f"{ai.get('verdict')}: {ai.get('explanation', '')[:300]}")
-                if ai["status"] == "ERROR":
-                    self.rt.log("WARN", "ai", f"Claude indisponibil pentru semnalul {sig['id'][:8]}: {self.ai.last_error}")
-                if ai.get("verdict") == "VETO" and self.settings.CLAUDE_VETO_ENABLED:
-                    sig["status"] = "NO_TRADE"
-                    sig["status_reason"] = "VETO Claude: " + (ai.get("explanation") or "")[:300]
-                elif (ai["status"] == "DONE" and ai.get("verdict") != "AGREE"
-                      and str(self.settings.CLAUDE_EXECUTE_ON).upper() == "AGREE"):
-                    sig["status"] = "NO_TRADE"
-                    sig["status_reason"] = (f"Claude nu a confirmat intrarea (verdict {ai.get('verdict')}): "
-                                            + (ai.get("explanation") or "")[:300])
-                elif ai["status"] == "ERROR" and self.settings.CLAUDE_REQUIRED:
-                    sig["status"] = "NO_TRADE"
-                    sig["status_reason"] = "Claude este obligatoriu (CLAUDE_REQUIRED=true) și a eșuat"
-                self.save_signal(sig)
-            if sig["status"] == "NEW" and self.settings.CLAUDE_REQUIRED and sig["ai"]["status"] != "DONE":
-                sig["status"] = "NO_TRADE"
-                sig["status_reason"] = "Claude este obligatoriu (CLAUDE_REQUIRED=true) dar nu este disponibil/activat"
-                self.save_signal(sig)
-                self.add_signal_event(sig["id"], "NO_TRADE", sig["status_reason"])
-            if sig["status"] == "NEW":
-                self.try_execute(sig)
-            sig = self.get_signal(sig["id"]) or sig
-            self.telegram.enqueue(sig["id"], "NEW_SIGNAL", fmt_signal(sig, self.tz()), signal_id=sig["id"])
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            self.rt.log("ERROR", "engine", f"pipeline semnal {sig.get('id', '')[:8]} eșuat: {e!r}")
-
-    def _ai_context(self, symbol: str) -> dict:
-        rt = self.rt
-        q = rt.quotes.get(symbol) or {}
-        bars = rt.closed_bars(symbol, rt.strategy["signal_timeframe"])[-12:]
-        htf = rt.closed_bars(symbol, rt.strategy["htf_timeframe"])[-6:]
-        a = rt.last_analysis.get(symbol) or {}
-        ctx = {
-            "bid": q.get("bid"), "ask": q.get("ask"), "digits": q.get("digits"), "regime": a.get("regime"),
-            "score": a.get("score"), "session_open": self.session()["open_now"],
-            "recent_bars_signal_tf": [{"t": iso(b["t"]), "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"]} for b in bars],
-            "recent_bars_htf": [{"t": iso(b["t"]), "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"]} for b in htf],
-        }
-        # bot history the reviewer can learn from: recent trades on the symbol, how its own verdicts fared (shadow
-        # labels), the next relevant news event. Best effort — a failure here never blocks the review.
-        try:
-            now = time.time()
-            key = self.account_key()
-            same = self.trade_reviews._recent_trades(key, None, symbol=symbol, limit=6)
-            ctx["recent_trades_same_symbol"] = [
-                {k: t.get(k) for k in ("side", "r_multiple", "net_usd", "close_reason", "minutes_open", "closed_at_utc")}
-                for t in same] or None
-            recent = self.trade_reviews._recent_trades(key, None, limit=20)
-            if recent:
-                s = trade_review_mod.trades_summary(recent)
-                ctx["recent_trades_summary"] = {k: s.get(k) for k in ("trades", "wins", "losses", "avg_r", "profit_factor")}
-            ctx["ai_verdicts_shadow_30d"] = {
-                v: {k: g.get(k) for k in ("n", "win_rate", "avg_r")}
-                for v, g in (self.shadow_stats(days=30, now=now).get("by_verdict") or {}).items()} or None
-            ev = self.news_event_near(symbol, now, window_s=4 * 3600)
-            if ev:
-                ctx["next_news_event"] = {"name": ev.get("name"), "ccy": ev.get("ccy"), "imp": ev.get("imp"),
-                                          "minutes_away": round((float(ev["t"]) - now) / 60) if ev.get("t") else None}
-            ctx["local_time"] = datetime.fromtimestamp(now, scheduler._tz(self.tz())).strftime("%A %H:%M")
-        except Exception as e:
-            self._perf_warn_once("ai_context", f"context extins pentru Claude indisponibil: {e!r}")
-        if self.active_strategy_name() in ("scalp-v1", "smc-v1"):
-            try:
-                ctx["scalp"] = self._scalp_context(symbol)
-                ctx["smc_check"] = (self.rt.last_analysis.get(symbol) or {}).get("smc")
-            except Exception as e:
-                self._perf_warn_once("scalp_context", f"context scalp pentru Claude indisponibil: {e!r}")
-        return ctx
 
     def _scalp_context(self, symbol: str) -> dict:
         """Multi-timeframe picture for the scalp entry analyst: compact bars + indicators on M1/M5/M15/H1 and the votes of
@@ -1409,98 +752,11 @@ class Engine:
                 "high20": r(max(h[-20:])), "low20": r(min(lo[-20:])), "high100": r(max(h[-100:])), "low100": r(min(lo[-100:])),
                 "bars": [[iso(b["t"])[11:16], r(b["o"]), r(b["h"]), r(b["l"]), r(b["c"])] for b in bars[-n_show:]],
             }
-        votes = {}
-        reg = self.strategy_registry()
-        sig5, htf1 = rt.closed_bars(symbol, "M5", now)[-400:], rt.closed_bars(symbol, "H1", now)[-200:]
-        vctx = strategy.AnalysisContext(session_open=True, tick_age=0.0, now_ts=now, corr_limit=99)
-        for name in ("trend-v1", "meanrev-v1", "breakout-v1", "pullback-v1"):
-            try:
-                mod = reg.get(name)
-                cfg = {**reg.merged_cfg(name, self.rt.strategy), "signal_timeframe": "M5", "htf_timeframe": "H1",
-                       "min_sl_points": 60}
-                res = mod.analyze(symbol, sig5, htf1, q, cfg, {**self.rt.risk, "max_spread_points": 1e9}, vctx)
-                side = res["direction"] if res["direction"] in ("BUY", "SELL") else (res.get("candidate") or {}).get("side")
-                votes[name] = {"vote": side or "NONE", "why": "; ".join(res.get("reasons") or [])[:220]}
-            except Exception as e:
-                votes[name] = {"vote": "ERROR", "why": repr(e)[:120]}
         return {"bars_format": "[ora UTC, open, high, low, close]", "timeframes": tfs,
-                "strategy_votes_m5_h1": votes, "spread_usd": r((q.get("ask") or 0) - (q.get("bid") or 0)),
+                "spread_usd": r((q.get("ask") or 0) - (q.get("bid") or 0)),
                 "point": q.get("point")}
 
-    def try_execute(self, sig: dict) -> None:
-        mode = self.mode()
-        if mode not in ("PAPER", "DEMO") or not self.rt.trading["execution_enabled"]:
-            sig["status_reason"] = (f"Doar semnal: mod {mode}, execuție "
-                                    f"{'armată' if self.rt.trading['execution_enabled'] else 'dezarmată'}")
-            self.save_signal(sig)
-            self.add_signal_event(sig["id"], "NOT_EXECUTED", sig["status_reason"])
-            return
-        created = sig.get("created_ts") or _ts(sig.get("created_at_utc")) or 0
-        # armed_ts: last disarmed->armed or mode change; process start counts as one
-        armed_ts = float(self.rt.trading.get("armed_ts") or self.rt.started_ts)
-        if (created < armed_ts or sig.get("created_mode") != mode
-                or not sig.get("created_armed")):
-            sig["status"], sig["status_reason"] = "NO_TRADE", "Semnal creat înainte de armare/schimbare de mod"
-            self.save_signal(sig)
-            self.add_signal_event(sig["id"], "NO_TRADE", sig["status_reason"])
-            return
-        if sig["expires_at_utc"] <= iso(utcnow()):
-            sig["status"], sig["status_reason"] = "EXPIRED", "Semnal expirat înainte de execuție"
-            self.save_signal(sig)
-            return
-        sym, side = sig["symbol"], sig["direction"]
-        q = self.rt.quotes.get(sym) or {}
-        if not q.get("bid"):
-            sig["status"], sig["status_reason"] = "NO_TRADE", "Fără cotație la momentul execuției"
-            self.save_signal(sig)
-            return
-        entry = q["ask"] if side == "BUY" else q["bid"]
-        sl, tp = sig["stop_loss"], sig["take_profit"]
-        sl_dist0 = abs(sig["entry"] - sl)
-        sign = 1 if side == "BUY" else -1
-        if (entry - sl) * sign <= 0 or (tp - entry) * sign <= 0 or abs(entry - sig["entry"]) > 0.5 * sl_dist0:
-            sig["status"] = "NO_TRADE"
-            sig["status_reason"] = f"Prețul s-a mutat prea mult față de intrarea semnalului ({sig['entry']} → {entry})"
-            self.save_signal(sig)
-            self.add_signal_event(sig["id"], "NO_TRADE", sig["status_reason"])
-            return
-        # approved ML entry model only (none by default -> no change): veto below its threshold or scale the risk
-        gate = None
-        try:
-            gate = self.ml.entry_gate(sig)
-        except Exception as e:
-            self._perf_warn_once("ml_gate", f"ML gate eșuat — intrarea continuă fără ML: {e!r}")
-        if gate and gate["veto"]:
-            sig["status"] = "NO_TRADE"
-            sig["status_reason"] = (f"ML: P(câștig)={gate['p']:.2f} sub pragul aprobat {gate['threshold']:.2f} "
-                                    f"(model {gate['model_id']})")
-            sig["ml"] = gate
-            self.save_signal(sig)
-            self.add_signal_event(sig["id"], "ML_VETO", sig["status_reason"])
-            return
-        size_factor = float(gate["size_factor"]) if gate else 1.0
-        rc = self.risk_check(sym, side, entry, sl, tp, size_factor=size_factor)
-        it = self.executor.submit_open(mode, sym, side, rc["volume"], sl, tp, q, rc, signal_id=sig["id"])
-        sig = self.get_signal(sig["id"]) or sig
-        sig["intent_id"] = it["id"]
-        sig["mode"] = mode
-        if gate:
-            sig["ml"] = gate
-            self.add_signal_event(sig["id"], "ML_SIZE", f"P(câștig)={gate['p']:.2f}, factor risc {gate['size_factor']:g} "
-                                                        f"(model {gate['model_id']})")
-        if it["state"] == "REJECTED_RISK":
-            sig["status"] = "NO_TRADE"
-            sig["status_reason"] = "Risk Engine: " + risk_mod.failed_summary(rc)
-        elif it["state"] == "PAPER_FILLED":
-            sig["status"] = "EXECUTED"
-            sig["status_reason"] = f"PAPER executat @ {it['result']['price']} volum {it['volume']}"
-        else:
-            sig["status"] = "INTENT_CREATED"
-            sig["status_reason"] = f"Ordin DEMO trimis către EA (volum {it['volume']})"
-        self.save_signal(sig)
-        self.add_signal_event(sig["id"], "INTENT_" + it["state"], sig["status_reason"])
-
-    # ---- intents → signals / notifications -------------------------------
+    # ---- intents ---------------------------------------------------------
     def _on_intent_update(self, it: dict, prev: str | None) -> None:
         st = it["state"]
         if it.get("kind") == "OPEN" and st in ("FAILED", "REJECTED"):
@@ -1509,36 +765,12 @@ class Engine:
             key = "PAPER" if it.get("mode") == "PAPER" else (
                 f"DEMO:{it['account_login']}" if it.get("account_login") is not None else self.account_key("DEMO"))
             self._perf_exec("UPDATE intents SET account_key=? WHERE id=? AND account_key IS NULL", (key, it["id"]), "intent_account")
-        if it["kind"] == "OPEN":
-            if it.get("signal_id") and prev is not None:
-                sig = self.get_signal(it["signal_id"])
-                if sig:
-                    if st == "FILLED":
-                        sig["status"] = "EXECUTED"
-                        sig["status_reason"] = f"Executat de broker @ {(it.get('result') or {}).get('price')}"
-                    elif st == "FAILED":
-                        sig["status"] = "REJECTED"
-                        res = it.get("result") or {}
-                        sig["status_reason"] = f"Respins: {res.get('retcode')} {res.get('retcode_desc')} {res.get('comment') or ''}".strip()
-                    if st in ("FILLED", "FAILED"):
-                        self.save_signal(sig)
-                        self.add_signal_event(sig["id"], "INTENT_" + st, sig["status_reason"])
-            if st in ("QUEUED", "FILLED", "PAPER_FILLED", "FAILED", "REJECTED_RISK", "UNKNOWN"):
-                self.telegram.enqueue(it["id"], "INTENT_" + st, fmt_intent(it, self.tz()), signal_id=it.get("signal_id"))
-        elif st in ("FAILED", "UNKNOWN"):
-            self.telegram.enqueue(it["id"], "INTENT_" + st, fmt_intent(it, self.tz()))
-        elif it["kind"] == "MODIFY" and st == "FILLED" and prev is not None:
-            self.notify_modify(it, {"sl": it.get("sl"), "tp": it.get("tp"), "reason": it.get("reason") or "MODIFY"})
         if st == "UNKNOWN":
             self.risk_alert(f"Comanda {it['kind']} {it.get('symbol')} ({it['id'][:8]}) fără confirmare după 30 s. "
                             f"Starea se reconciliază prin poziții; nu se retrimite.", key=f"unknown:{it['id']}")
 
     def risk_alert(self, text: str, key: str) -> None:
         self.rt.log("WARN", "risk", text)
-        self.telegram.enqueue(key, "RISK_ALERT", fmt_risk_alert(text))
-
-    def notify_modify(self, pos: dict, action: dict) -> None:
-        self.telegram.enqueue(f"{pos['ticket']}:{action['sl']}", "MODIFY", fmt_modify(pos, action))
 
     def fail_queued_commands(self, reason: str) -> None:
         self.executor.fail_queued(reason)
@@ -1623,55 +855,18 @@ class Engine:
         self.rt.trading["entries_paused"] = bool(paused)
         self.rt.save_trading()
         self.rt.log("WARN", "control", "Intrări noi OPRITE (kill switch)" if paused else "Intrări noi reluate")
-        if paused:
-            self.telegram.enqueue(f"pause:{int(time.time())}", "RISK_ALERT", fmt_risk_alert("Intrările noi au fost oprite manual (kill switch). Pozițiile existente rămân gestionate."))
-
-    def test_order(self, symbol: str, side: str) -> dict:
-        mode = self.mode()
-        if mode not in ("PAPER", "DEMO"):
-            raise EngineError(409, "Ordinul de test este permis doar în PAPER sau DEMO")
-        side = (side or "").upper()
-        if side not in ("BUY", "SELL"):
-            raise EngineError(400, "side trebuie să fie BUY sau SELL")
-        symbol = self.resolve_symbol(symbol)
-        q = self.rt.quotes.get(symbol)
-        if not q or not q.get("bid"):
-            raise EngineError(409, f"Fără cotație pentru {symbol}")
-        bars = self.rt.closed_bars(symbol, self.rt.strategy["signal_timeframe"])[-200:]
-        atr = ind.last(ind.atr([b["h"] for b in bars], [b["l"] for b in bars], [b["c"] for b in bars], 14)) if len(bars) >= 15 else None
-        if not atr:
-            raise EngineError(409, "ATR indisponibil (bare insuficiente)")
-        digits = int(q.get("digits") or 5)
-        entry = q["ask"] if side == "BUY" else q["bid"]
-        sign = 1 if side == "BUY" else -1
-        sl = round(entry - sign * float(self.rt.strategy["atr_sl_mult"]) * atr, digits)
-        tp = round(entry + sign * float(self.rt.strategy["atr_tp_mult"]) * atr, digits)
-        rc = self.risk_check(symbol, side, entry, sl, tp, test_order=True)
-        self.rt.log("INFO", "control", f"Ordin de test {side} {symbol} ({mode})")
-        return self.executor.submit_open(mode, symbol, side, rc["volume"], sl, tp, q, rc)
 
     # ---- live pipeline status (what the bot is doing right now, step by step) ---------------------------------------
     def live_status(self) -> dict:
-        """One snapshot per trade symbol: data feed -> analysis -> signal -> Claude -> order -> position (ladder), each
-        step with state ok | wait | bad | idle and a Romanian line, plus a headline saying what the bot does now."""
+        """One snapshot per trade symbol for the Overview: MT5 data -> Claude's last decision -> armed entries ->
+        position, each step with state ok | wait | bad | idle and a Romanian line, plus a headline."""
         rt, now = self.rt, time.time()
         mode = self.mode()
-        tf = rt.strategy["signal_timeframe"]
-        sec = TF_SECONDS.get(tf, 60)
-        bridge_ok = self.settings.data_source == "sim" or rt.bridge_connected()
+        bridge_ok = rt.bridge_connected()
         armed = mode in ("PAPER", "DEMO") and rt.trading["execution_enabled"] and not rt.trading["entries_paused"]
-        rows = self.db.query("SELECT data_json FROM signals WHERE created_at_utc >= ? ORDER BY created_at_utc DESC LIMIT 300",
-                             (self.day_start_iso(),))
-        today = [json.loads(r["data_json"]) for r in rows]
-        verdicts: dict[str, int] = {}
-        for sg in today:
-            v = (sg.get("ai") or {}).get("verdict") or (sg.get("ai") or {}).get("status")
-            if v:
-                verdicts[v] = verdicts.get(v, 0) + 1
         out = []
         for sym in self.trade_symbols() or rt.active_symbols():
             q = rt.quotes.get(sym) or {}
-            a = rt.last_analysis.get(sym) or {}
             age = rt.tick_age(sym, now)
             spread, max_sp = q.get("spread_points"), spread_cap(rt.risk.get("max_spread_points", 30), sym, q.get("point"))
             steps = []
@@ -1689,137 +884,48 @@ class Engine:
                 step("Date MT5", "ok" if spread is None or spread <= max_sp else "bad",
                      f"Cotații live, tick acum {age:.1f} s, {sp_txt}.")
             warm = self.warmup_reason(sym, now)
-            a_ts = _ts(a.get("time_utc"))
-            next_bar = (math.floor(now / sec) + 1) * sec
             if warm:
-                step("Analiză", "wait", f"Încălzire după pornire: {warm}.")
-            elif not a:
-                step("Analiză", "wait", "Aștept prima bară închisă.")
-            else:
-                stale = a_ts is not None and now - a_ts > 3 * sec
-                ind_ = a.get("indicators") or {}
-                rsi_txt = f"RSI {ind_['rsi']:.1f}" if isinstance(ind_.get("rsi"), (int, float)) else "RSI —"
-                step("Analiză", "bad" if stale else "ok",
-                     f"Ultima analiză {tf} acum {round(now - a_ts) if a_ts else '?'} s ({rsi_txt}); următoarea în "
-                     f"{max(0, round(next_bar - now))} s. " + ("; ".join(a.get("reasons") or [])[:300]))
-            cand = a.get("candidate") or {}
-            if a.get("direction") in ("BUY", "SELL"):
-                step("Semnal", "ok", f"Propunere {a['direction']} la {a.get('entry')} (SL {a.get('stop_loss')}, TP {a.get('take_profit')}).")
-            elif cand.get("blockers"):
-                step("Semnal", "bad", f"Setup {cand.get('side')} blocat: " + "; ".join(cand["blockers"])[:300])
-            else:
-                rsi_now = (a.get("indicators") or {}).get("rsi")
-                cond = ("Condiția de intrare: RSI(14) pe M1 sub 30 → BUY sau peste 70 → SELL"
-                        + (f"; acum RSI {rsi_now:.1f}" if isinstance(rsi_now, (int, float)) else "")
-                        if self.active_strategy_name() == "scalp-v1" else
-                        "Condiția de intrare: verdict SMC «Intră» (scor ≥ 50, trend H1/H4 nu e contra, lichiditate ridicată "
-                        "sau BOS) cu prețul deja în order block" if self.active_strategy_name() == "smc-v1"
-                        else "Condiția de intrare a strategiei")
-                step("Semnal", "idle", f"Nicio propunere pe ultima bară. {cond} — nu e îndeplinită.")
-            sm = a.get("smc")
-            if sm:
-                sm_state = {"ENTER": "ok", "WAIT": "wait", "STOP": "bad"}.get(sm.get("verdict"), "idle")
-                done = " · ".join(f"{x['name']}: {'✓' if x['status'] == 'pass' else '½' if x['status'] == 'partial' else '✗'}"
-                                  for x in sm.get("steps") or [])
-                step("SMC", sm_state, f"{sm.get('title')} · {done}")
-            last = next((sg for sg in today if sg.get("symbol") == sym), None)
-            pending = [sg for sg in today if sg.get("symbol") == sym and sg.get("status") == "NEW"
-                       and (sg.get("ai") or {}).get("status") == "PENDING"]
+                step("Pornire", "wait", f"Încălzire după pornire: {warm}.")
+            bs = self.basket.status(sym) or {}
+            cl = self.basket.claude_last
             if not self.ai.enabled:
-                step("Claude", "idle", "Analiza Claude este dezactivată.")
-            elif pending:
-                waited = now - (pending[0].get("created_ts") or now)
-                step("Claude", "wait", f"Claude analizează propunerea {pending[0]['direction']} de {waited:.0f} s "
-                                       f"(model {self.settings.CLAUDE_MODEL}, efort {self.ai.effort}).")
-            elif last and (last.get("ai") or {}).get("status") in ("DONE", "ERROR"):
-                ai = last["ai"]
-                pf = ai.get("p_first_step")
-                step("Claude", "bad" if ai.get("status") == "ERROR" else "ok",
-                     f"Ultimul verdict: {ai.get('verdict') or ai.get('status')}"
-                     + (f" (p={pf:.2f})" if isinstance(pf, (int, float)) else "")
-                     + f" — {(ai.get('explanation') or '')[:240]}")
+                step("Claude", "bad", "Claude nu este disponibil (CLAUDE_ENABLED / ANTHROPIC_API_KEY).")
+            elif bs.get("analysis") and not cl:
+                step("Claude", "wait", bs["analysis"])
             else:
-                step("Claude", "idle", "Aștept o propunere de analizat.")
+                step("Claude", "ok" if (cl or {}).get("status") == "DONE" else "wait",
+                     (f"{cl.get('time_utc')}: " + ("; ".join(cl.get("done") or []) or "aștept")
+                      + f" · {str(cl.get('market_view') or '')[:200]} · plan: {str(cl.get('plan') or '')[:200]}")
+                     if cl else "Claude decide la fiecare bară M1 închisă — prima decizie vine imediat.")
+            arm = self.basket.armed.get(sym) or []
+            if arm:
+                step("Intrare armată", "wait", "; ".join(f"{x['side']} {'spargere' if x['trigger'] == 'BREAKOUT' else 'revenire'} "
+                                                        f"la {x['price']:g} (până la {x['expires_utc']})" for x in arm))
             if not armed:
-                step("Ordin", "bad", f"Execuția nu e armată (mod {mode}, "
-                                     f"{'pauză intrări' if rt.trading['entries_paused'] else 'dezarmat'}).")
-            elif last:
-                st_ = last.get("status")
-                step("Ordin", "ok" if st_ in ("EXECUTED", "INTENT_CREATED") else "idle",
-                     f"Ultimul semnal {last.get('direction')} {fmt_hm(last.get('created_at_utc'))}: {st_} — "
-                     f"{(last.get('status_reason') or '')[:240]}")
-            else:
-                step("Ordin", "idle", "Niciun semnal azi.")
-            bs = self.basket.status(sym)
-            if bs is not None:
-                if bs.get("analysis") and not bs.get("n"):
-                    step("Analiză" + (" termen scurt" if bs.get("vote") == "short" else " 4 grafice"), "wait",
-                         f"Ultima analiză: {bs['analysis']}")
-                cl = self.basket.claude_last if self.basket.claude_on() else None
-                if self.basket.claude_on():
-                    step("Claude decide", "ok" if (cl or {}).get("status") == "DONE" else "wait",
-                         (f"{cl.get('time_utc')}: " + ("; ".join(cl.get("done") or []) or "aștept")
-                          + f" · {str(cl.get('market_view') or '')[:160]} · plan: {str(cl.get('plan') or '')[:160]}")
-                         if cl else "Claude decide la fiecare bară M1 închisă — prima decizie vine imediat.")
-                if bs.get("n") and bs.get("zr"):
-                    step("Coș", "wait" if bs["n"] > 1 else "ok",
-                         f"Strategia 2 (lot dublu): {bs.get('side')}, total {bs.get('total', 0):+.2f} USD · "
-                         f"închid tot la +{bs['target']:g} sau −{bs['stop_usd']:g} · zona {bs.get('levels_line')}")
-                elif bs.get("n") and bs.get("recovery"):
-                    step("Coș", "wait", f"ACOPERIRE continuă (runda {bs.get('rounds') or 0}): {bs.get('side')}, total "
-                                        f"{bs.get('total', 0):+.2f} USD — închid tot grupul la +{bs['target']:g} "
-                                        f"(scos pe zero) sau la −{bs['stop_usd']:g}"
-                                        + (f" · {bs['analysis']}" if bs.get("analysis") else ""))
-                elif bs.get("n"):
-                    step("Coș", "ok", f"{bs.get('side')} {bs['n']}/{bs['max']} poziții, total {bs.get('total', 0):+.2f} USD · "
-                                      + (f"analiză: {bs['analysis']} · " if bs.get("analysis") else "")
-                                      + f"închid toate la +{bs.get('target', bs['tp']):g} sau "
-                                        f"−{bs.get('stop_usd', bs['stop']):g}"
-                                      + ("" if bs.get("entry") == "mtf" else
-                                         f" · următoarea poziție la {bs['next_add']}" if bs.get("next_add") else " · coș plin"))
-                elif bs.get("strategy") == "s2":
-                    step("Coș", "wait", "Strategia 2 (lot dublu): fără poziții — deschid prima poziție când M1 și M5 "
-                                        "arată aceeași direcție.")
-                elif bs.get("entry") == "mtf":
-                    step("Coș", "wait", ("Fără poziții — analizez termenul scurt (M1 + M5) la fiecare bară M1 închisă și "
-                                         "deschid o poziție doar când amândouă arată aceeași direcție; M15/H1 doar ca "
-                                         "context." if bs.get("vote") == "short" else
-                                         f"Fără poziții — analizez M1/M5/M15/H1 la fiecare bară M1 închisă și deschid o "
-                                         f"poziție doar când minim {bs.get('min_votes')} din 4 sunt de acord."))
-                else:
-                    step("Coș", "wait", f"Coș gol — deschid {bs['start']} poziții în direcția impulsului ({bs['mom']} bare "
-                                        f"M1); +1 la fiecare {bs['step']:g} USD contra, max {bs['max']}; închid toate la "
-                                        + (f"+{bs['tp_pos']:g} USD/poziție." if bs.get("tp_pos") else f"+{bs['tp']:g} USD."))
+                step("Execuție", "bad", f"Botul e oprit (mod {mode}, "
+                                        f"{'pauză intrări' if rt.trading['entries_paused'] else 'execuție dezarmată'}).")
             pos = [p for p in self.bot_positions(mode) if p.get("symbol") == sym]
             pos_txt = None
             if pos:
-                p0 = pos[0]
-                pos_txt = (f"{p0.get('side')} {p0.get('volume')} @ {p0.get('price_open')}: profit {p0.get('profit')} · "
-                           f"SL {p0.get('sl')} · TP {p0.get('tp')}")
-                step("Poziție", "ok", pos_txt + " — managerul urcă TP/SL pe scară la fiecare secundă.")
+                pos_txt = "; ".join(f"{p.get('side')} {p.get('volume')} @ {p.get('price_open')}: profit {p.get('profit')} · "
+                                    f"SL {p.get('sl')} · TP {p.get('tp')}" for p in pos)
+                step("Poziție", "ok", pos_txt)
             else:
                 step("Poziție", "idle", "Nicio poziție deschisă.")
-
-            # headline: the first problem, else what the bot is waiting for
-            bad = next((s_ for s_ in steps if s_["state"] == "bad" and s_["step"] in ("Date MT5", "Analiză", "Ordin")), None)
+            bad = next((s_ for s_ in steps if s_["state"] == "bad"), None)
             if bad:
                 headline, level = f"Oprit: {bad['text']}", "bad"
             elif pos:
                 headline, level = f"Poziție deschisă — {pos_txt}", "ok"
             elif warm:
-                headline, level = f"Pornire: {warm} — apoi analizează fiecare bară {tf}.", "wait"
-            elif pending:
-                headline, level = "Claude analizează o propunere de intrare…", "wait"
-            elif cand.get("blockers"):
-                headline, level = "Setup găsit, dar blocat de filtre (vezi pasul Semnal).", "wait"
+                headline, level = f"Pornire: {warm}", "wait"
+            elif arm:
+                headline, level = "Intrare armată — se execută singură când prețul ajunge la nivel.", "wait"
             else:
-                headline, level = (f"Lucrează normal — analizează fiecare bară {tf} și așteaptă condiția de intrare. "
-                                   f"Următoarea analiză în {max(0, round(next_bar - now))} s."), "ok"
+                headline, level = "Lucrează normal — Claude analizează fiecare bară M1.", "ok"
             out.append({"symbol": sym, "level": level, "headline": headline, "steps": steps, "time_utc": iso(now)})
-        return {"symbols": out, "strategy": self.active_strategy_name(), "mode": mode, "armed": armed,
-                "today": {"signals": len(today), "verdicts": verdicts,
-                          "executed": sum(1 for sg in today if sg.get("status") == "EXECUTED"),
-                          "trades_closed": len(self.closed_today(mode if mode in ("PAPER", "DEMO") else None))}}
+        return {"symbols": out, "mode": mode, "armed": armed,
+                "today": {"trades_closed": len(self.closed_today(mode if mode in ("PAPER", "DEMO") else None))}}
 
     # ---- status ----------------------------------------------------------
     def status(self) -> dict:
@@ -1833,7 +939,6 @@ class Engine:
         # account = real MT5 account only; paper account is reported separately
         account = mt5_acc
         closed = self.closed_today(mode if mode in ("PAPER", "DEMO") else None)
-        sig_today = self.db.query_one("SELECT COUNT(*) AS n FROM signals WHERE created_at_utc >= ?", (self.day_start_iso(),))
         return {
             "app_env": s.APP_ENV, "version": VERSION, "data_source": s.data_source, "feed_label": s.feed_label,
             "bridge": {
@@ -1854,9 +959,8 @@ class Engine:
                         "trade_symbols": self.trade_symbols(), "profile": s.profile_name or None,
                         "entries_paused": rt.trading["entries_paused"], "live_allowed": bool(s.LIVE_TRADING_ALLOWED)},
             "ai": self.ai.status(),
-            "telegram": self.telegram.status(),
+            "claude_cost": self.claude_cost(),
             "counts": {
-                "signals_today": int(sig_today["n"]) if sig_today else 0,
                 "trades_today": self.trades_today(mode) if mode in ("PAPER", "DEMO") else 0,
                 "open_positions": len(self.bot_positions()),
                 "closed_today": len(closed),
@@ -1885,7 +989,7 @@ class Engine:
             })
         return out
 
-    # ---- performance: analyses / equity / Claude usage / labeler ----------
+    # ---- accounts / Claude usage --------------------------------------------
     def account_key(self, mode: str | None = None) -> str | None:
         mode = mode or self.mode()
         if mode == "DEMO":
@@ -1906,21 +1010,6 @@ class Engine:
             self._perf_warn_once(key, f"scriere analitică eșuată ({key}): {e!r}")
             return 0
 
-    def record_analysis(self, a: dict) -> None:
-        if a.get("bar_time") is None or not a.get("indicators"):
-            return  # no data / incomplete indicators: nothing to evaluate
-        cand = a.get("candidate")
-        if cand is None and a.get("direction") in ("BUY", "SELL") and a.get("entry") is not None:
-            cand = {"side": a["direction"], "entry": a["entry"], "stop_loss": a["stop_loss"],
-                    "take_profit": a["take_profit"], "score": a.get("score"), "blockers": []}
-        cand = cand or {}
-        self._perf_exec(
-            "INSERT OR IGNORE INTO analyses(symbol, tf, bar_time, created_ts, account_key, direction, candidate_side, "
-            "entry, sl, tp, score, blockers_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (a["symbol"], a.get("timeframe"), int(a["bar_time"]), time.time(), self.account_key(), a.get("direction"),
-             cand.get("side"), cand.get("entry"), cand.get("stop_loss"), cand.get("take_profit"),
-             cand.get("score", a.get("score")), json.dumps(cand.get("blockers") or [], ensure_ascii=False)),
-            "analysis_insert")
 
     def record_claude_usage(self, rec: dict) -> None:
         self._perf_exec(
@@ -1928,125 +1017,6 @@ class Engine:
             "VALUES(?,?,?,?,?,?,?)",
             (rec["ts"], rec.get("signal_id"), rec.get("model"), rec.get("input_tokens"), rec.get("output_tokens"),
              rec.get("cache_read_tokens"), rec.get("cost_usd")), "claude_usage")
-
-    def snapshot_accounts(self) -> list[tuple[str, dict]]:
-        out = []
-        if self.mode() == "PAPER" or self.paper.positions:
-            out.append(("PAPER", self.paper.account()))
-        a = self.rt.mt5_account
-        if a and a.get("login") is not None and self.rt.bridge_connected() and not self.account_settling():
-            out.append((f"DEMO:{a['login']}", a))
-        return out
-
-    def snapshot_equity(self, now: float) -> int:
-        ts = int(now // 60 * 60)
-        n = 0
-        for key, acc in self.snapshot_accounts():
-            if not acc or acc.get("equity") is None:
-                continue
-            n += self._perf_exec("INSERT OR IGNORE INTO equity_snapshots(account_key, ts, balance, equity) VALUES(?,?,?,?)",
-                                 (key, ts, acc.get("balance"), acc.get("equity")), "equity_snapshot")
-        return n
-
-    def labeler_cfg(self) -> dict:
-        st = self.rt.strategy
-        cfg = {"break_even_at_r": float(st.get("break_even_at_r", 1.0) or 0),
-               # 0 = no time stop (as live); the labeler then uses its own 24 h HORIZON cap
-               "max_hold_minutes": int(st.get("max_hold_minutes", 240) or 0),
-               "label_tf": "M1" if "M1" in self.rt.needed_tfs() else st["signal_timeframe"]}
-        points = self.symbol_points()
-        if points:
-            cfg["points"] = points  # broker point size instead of the labeler's guess from the symbol name
-        return cfg
-
-    def symbol_points(self) -> dict:
-        return {s: float(q["point"]) for s, q in list(self.rt.quotes.items()) if q and q.get("point")}
-
-    def symbol_specs(self) -> dict:
-        """Broker symbol specs from the live quotes (backtest sizing); missing ones are estimated there."""
-        keys = ("point", "digits", "tick_size", "tick_value", "contract_size", "volume_min", "volume_step",
-                "volume_max", "stops_level")
-        return {s: {k: q[k] for k in keys if q.get(k) is not None}
-                for s, q in list(self.rt.quotes.items()) if q and q.get("point")}
-
-    def get_closed_bars(self, symbol: str, tf: str, from_ts: float, to_ts: float) -> list[dict]:
-        """Closed bars from bars_archive + bars (live rows win), ascending. Safe to call from a worker thread."""
-        sec = TF_SECONDS.get(tf, 60)
-        now = time.time()
-        rows: dict[int, dict] = {}
-        for table in ("bars_archive", "bars"):
-            try:
-                for r in self.db.query(f"SELECT t,o,h,l,c,sp FROM {table} WHERE symbol=? AND tf=? AND t>=? AND t<=? ORDER BY t",
-                                       (symbol, tf, int(from_ts), int(to_ts))):
-                    rows[int(r["t"])] = r
-            except sqlite3.Error:
-                continue
-        return [rows[t] for t in sorted(rows) if t + sec <= now]
-
-    def run_labeler(self, now: float) -> int:
-        try:
-            labeler = importlib.import_module("app.labeler")
-        except ImportError:
-            self._perf_warn_once("labeler_missing", "modulul labeler lipsește — analizele nu sunt etichetate")
-            return 0
-        return int(labeler.label_pending(self.db, self.get_closed_bars, self.labeler_cfg(), now) or 0)
-
-    def _labeler_job(self, now: float) -> None:
-        try:
-            self.run_labeler(now)
-        except Exception as e:
-            self._perf_warn_once("labeler_error", f"etichetare analize eșuată: {e!r}")
-        finally:
-            self._labeler_busy = False
-
-    def perf_tick(self, now: float) -> None:
-        """Called every loop second from the async loop: 60 s equity snapshots + labeler in a worker thread."""
-        if now - self._last_equity_snap >= EQUITY_SNAPSHOT_S:
-            self._last_equity_snap = now
-            self.snapshot_equity(now)
-        if now - self._last_label_ts >= LABEL_EVERY_S and not self._labeler_busy:
-            self._last_label_ts = now
-            self._labeler_busy = True
-            try:
-                asyncio.get_running_loop().run_in_executor(None, self._labeler_job, now)
-            except RuntimeError:
-                self._labeler_busy = False
-
-    def _perf_startup(self) -> None:
-        # backtests interrupted by a restart
-        self._perf_exec("UPDATE backtest_runs SET status='ERROR', error=? WHERE status IN ('RUNNING','QUEUED')",
-                        ("Întrerupt de repornirea serverului",), "backtest_cleanup")
-        # trades recorded before the account columns existed
-        try:
-            rows = self.db.query("SELECT id, ticket, mode FROM trades WHERE account_key IS NULL ORDER BY id DESC LIMIT 5000")
-        except sqlite3.Error:
-            return
-        for r in rows:
-            key = None
-            if r["mode"] == "PAPER":
-                key = "PAPER"
-            elif r["ticket"] is not None:
-                oi = self._open_intent(int(r["ticket"]), "DEMO") or {}
-                if oi.get("account_login") is not None:
-                    key = f"DEMO:{oi['account_login']}"
-                if oi.get("sl") is not None:
-                    self._perf_exec("UPDATE trades SET initial_sl=? WHERE id=? AND initial_sl IS NULL",
-                                    (oi["sl"], r["id"]), "trade_backfill")
-            if key:
-                self._perf_exec("UPDATE trades SET account_key=? WHERE id=? AND account_key IS NULL", (key, r["id"]),
-                                "trade_backfill")
-
-    # ---- performance: read side (API) -----------------------------------
-    def perf_accounts(self) -> list[str]:
-        keys: set[str] = set()
-        for sql in ("SELECT DISTINCT account_key AS k FROM trades WHERE account_key IS NOT NULL",
-                    "SELECT DISTINCT account_key AS k FROM equity_snapshots"):
-            try:
-                keys.update(r["k"] for r in self.db.query(sql) if r["k"])
-            except sqlite3.Error:
-                pass
-        cur = self.account_key()
-        return sorted(keys, key=lambda k: (k != cur, k))
 
     def claude_cost(self) -> dict:
         day0 = scheduler.local_day_start_utc(self.now_utc(), self.settings.DEFAULT_TIMEZONE).timestamp()
@@ -2066,248 +1036,6 @@ class Engine:
                         "input_tokens": int(r["i"] or 0), "output_tokens": int(r["o"] or 0)})
         return out
 
-    def perf_stats(self, account_key: str | None = None, days: int = 30, now: float | None = None) -> dict:
-        now = now or time.time()
-        since = now - days * 86400 if days and days > 0 else None
-        sql = ("SELECT t.id, t.ticket, t.symbol, t.side, t.volume, t.profit, t.commission, t.swap, t.opened_at_utc, "
-               "t.closed_at_utc, t.close_reason, t.mode, t.signal_id, t.account_key, t.r_multiple, t.risk_money, "
-               "t.signal_entry, t.price_open, s.data_json AS sig_json FROM trades t LEFT JOIN signals s ON s.id = t.signal_id WHERE 1=1")
-        params: list = []
-        if account_key:
-            sql += " AND t.account_key=?"
-            params.append(account_key)
-        if since is not None:
-            sql += " AND t.closed_at_utc >= ?"
-            params.append(iso(since))
-        sql += " ORDER BY t.closed_at_utc, t.id"
-        try:
-            rows = self.db.query(sql, params)
-        except sqlite3.Error as e:
-            raise EngineError(503, f"Statistici indisponibile (schema bazei de date): {e}")
-        tz = scheduler._tz(self.settings.DEFAULT_TIMEZONE)
-        trades = []
-        for r in rows:
-            verdict = None
-            if r["sig_json"]:
-                try:
-                    ai = (json.loads(r["sig_json"]) or {}).get("ai") or {}
-                    verdict = ai.get("verdict") or ai.get("status")
-                except (TypeError, ValueError):
-                    pass
-            opened, closed = _ts(r["opened_at_utc"]), _ts(r["closed_at_utc"])
-            ref = opened if opened is not None else closed
-            net = (r["profit"] or 0) + (r["commission"] or 0) + (r["swap"] or 0)
-            slip = None
-            if r["signal_entry"] and r["price_open"]:
-                q = self.rt.quotes.get(r["symbol"]) or {}
-                pt = q.get("point")
-                if pt:
-                    sign = 1 if r["side"] == "BUY" else -1
-                    slip = round((float(r["price_open"]) - float(r["signal_entry"])) * sign / float(pt), 1)
-            trades.append({
-                "t": int(closed) if closed is not None else None, "symbol": r["symbol"], "side": r["side"],
-                "net": round(net, 2), "r": r["r_multiple"], "reason": r["close_reason"], "mode": r["mode"],
-                "account_key": r["account_key"], "ai_verdict": verdict or "FĂRĂ SEMNAL",
-                "hour": datetime.fromtimestamp(ref, tz).hour if ref is not None else None, "slippage_pts": slip,
-                "opened_at_utc": r["opened_at_utc"], "closed_at_utc": r["closed_at_utc"], "signal_id": r["signal_id"],
-            })
-        out = {
-            "account_key": account_key, "days": days, "accounts": self.perf_accounts(),
-            "summary": trade_summary(trades), "by_symbol": group_summary(trades, "symbol"),
-            "by_hour": group_summary(trades, "hour"), "by_ai_verdict": group_summary(trades, "ai_verdict"),
-            "equity": [], "pnl_curve": [], "claude": self.claude_cost(), "warnings": [],
-            "trades": [{k: v for k, v in t.items() if k != "hour"} for t in trades[-100:]][::-1],
-            "hour_tz": self.settings.DEFAULT_TIMEZONE,
-        }
-        cum = 0.0
-        for t in trades:
-            if t["t"] is not None:
-                cum += t["net"]
-                out["pnl_curve"].append([t["t"], round(cum, 2)])
-        slips = [t["slippage_pts"] for t in trades if t["slippage_pts"] is not None]
-        out["summary"]["avg_slippage_pts"] = round(sum(slips) / len(slips), 2) if slips else None
-        if account_key:
-            esql = "SELECT ts, balance, equity FROM equity_snapshots WHERE account_key=?"
-            eparams: list = [account_key]
-            if since is not None:
-                esql += " AND ts >= ?"
-                eparams.append(int(since))
-            try:
-                snaps = self.db.query(esql + " ORDER BY ts", eparams)
-            except sqlite3.Error:
-                snaps = []
-            step = max(1, math.ceil(len(snaps) / 1000))
-            pts = snaps[::step]
-            if snaps and pts[-1] is not snaps[-1]:
-                pts.append(snaps[-1])
-            out["equity"] = [[int(s["ts"]), s["equity"]] for s in pts if s["equity"] is not None]
-            eq = [s["equity"] for s in snaps if s["equity"] is not None]
-            if eq:
-                peak, dd, dd_pct = eq[0], 0.0, 0.0
-                for v in eq:
-                    peak = max(peak, v)
-                    if peak - v > dd:
-                        dd, dd_pct = peak - v, (peak - v) / peak * 100 if peak > 0 else 0.0
-                out["summary"]["max_dd_usd"] = round(dd, 2)
-                out["summary"]["max_dd_pct"] = round(dd_pct, 2)
-        else:
-            out["warnings"].append("Toate conturile combinate — alege un cont pentru curba de equity.")
-        n_r = sum(1 for t in trades if t["r"] is not None)
-        if trades and n_r < len(trades):
-            out["warnings"].append(f"{len(trades) - n_r} tranzacții fără R (risc inițial necunoscut) — excluse din mediile R.")
-        if 0 < len(trades) < 30:
-            out["warnings"].append(f"Eșantion mic: {len(trades)} tranzacții (< 30) — rezultatele nu sunt concludente.")
-        return out
-
-    def shadow_stats(self, days: int = 30, now: float | None = None) -> dict:
-        now = now or time.time()
-        sql = ("SELECT a.symbol, a.direction, a.candidate_side, a.blockers_json, a.signal_id, a.ai_verdict, a.outcome, "
-               "a.outcome_r, a.mfe_r, a.mae_r, s.status AS sig_status FROM analyses a LEFT JOIN signals s ON s.id = a.signal_id "
-               "WHERE a.candidate_side IN ('BUY','SELL')")
-        params: list = []
-        if days and days > 0:
-            sql += " AND a.bar_time >= ?"
-            params.append(int(now - days * 86400))
-        try:
-            rows = self.db.query(sql, params)
-        except sqlite3.Error as e:
-            raise EngineError(503, f"Analiza în umbră indisponibilă (schema bazei de date): {e}")
-        total = len(rows)
-        labeled = [r for r in rows if r["outcome"]]
-        by_cat: dict[str, list] = {}
-        by_blocker: dict[str, list] = {}
-        by_verdict: dict[str, list] = {}
-        by_symbol: dict[str, list] = {}
-        for r in labeled:
-            try:
-                blockers = json.loads(r["blockers_json"] or "[]") or []
-            except (TypeError, ValueError):
-                blockers = []
-            by_cat.setdefault(shadow_category(r, blockers), []).append(r)
-            for b in {blocker_type(x) for x in blockers}:
-                by_blocker.setdefault(b, []).append(r)
-            if r["signal_id"]:
-                by_verdict.setdefault(r["ai_verdict"] or "PENDING", []).append(r)
-            by_symbol.setdefault(r["symbol"], []).append(r)
-        agg = lambda d: {k: shadow_group(v) for k, v in sorted(d.items(), key=lambda kv: -len(kv[1]))}  # noqa: E731
-        out = {
-            "days": days, "candidates": total, "labeled": len(labeled), "pending": total - len(labeled),
-            "all": shadow_group(labeled), "by_category": agg(by_cat), "by_blocker": agg(by_blocker),
-            "by_ai_verdict": agg(by_verdict), "by_symbol": agg(by_symbol), "min_sample": SHADOW_MIN_N, "warnings": [],
-        }
-        if len(labeled) < SHADOW_MIN_N:
-            out["warnings"].append(f"Eșantion mic: {len(labeled)} candidați etichetați (< {SHADOW_MIN_N}) — nu trage concluzii.")
-        return out
-
-    def archive_status(self) -> dict:
-        from . import archive  # per-TF days_target (ARCHIVE_EXTRA), phase, exhausted / history_start_ts
-        return archive.status_view(self.rt)
-
-    # ---- backtests --------------------------------------------------------
-    def backtest_running(self) -> bool:
-        with self._bt_lock:
-            return any(not b.get("done") for b in self.backtests.values())
-
-    def start_backtest(self, params: dict) -> dict:
-        with self._bt_lock:
-            if any(not b.get("done") for b in self.backtests.values()):
-                raise EngineError(409, "Un backtest rulează deja — așteaptă să se termine")
-            run_id = str(uuid.uuid4())
-            self.backtests[run_id] = {"progress": 0.0, "done": False}
-        created = time.time()
-        try:
-            self.db.execute("INSERT INTO backtest_runs(id, created_ts, status, params_json) VALUES(?,?,?,?)",
-                            (run_id, created, "RUNNING", json.dumps(params)))
-        except sqlite3.Error as e:
-            with self._bt_lock:
-                self.backtests.pop(run_id, None)
-            raise EngineError(503, f"Backtest indisponibil (schema bazei de date): {e}")
-        th = threading.Thread(target=self._backtest_job, args=(run_id, params), name=f"backtest-{run_id[:8]}", daemon=True)
-        th.start()
-        self.rt.log("INFO", "backtest", f"Backtest {run_id[:8]} pornit: {','.join(params.get('symbols') or [])} "
-                                        f"{params.get('days')} zile")
-        return {"id": run_id, "status": "RUNNING", "created_ts": created}
-
-    def _backtest_job(self, run_id: str, params: dict) -> None:
-        def progress(p) -> None:
-            try:
-                self.backtests[run_id]["progress"] = max(0.0, min(1.0, float(p)))
-            except (KeyError, TypeError, ValueError):
-                pass
-        status, metrics, err = "ERROR", None, None
-        try:
-            bt = importlib.import_module("app.backtest")
-            run_params = dict(params)
-            if not run_params.get("specs"):
-                run_params["specs"] = self.symbol_specs()
-            if run_params.get("workers") is None and self.settings.data_source == "mt5_bridge":
-                # a live bridge shares the process: many analysis threads starve the event loop (GIL) and the
-                # EA sync is reported as "disconnected" for a few seconds -> one worker while the bot trades
-                run_params["workers"] = 1
-            # own read-only connection: the bar loads never hold the shared DB.lock the event loop uses
-            ro = None
-            ro_cls = getattr(bt, "ReadOnlyDB", None)
-            if ro_cls is not None and str(self.settings.DATABASE_PATH) != ":memory:":
-                try:
-                    ro = ro_cls(str(self.settings.db_path))
-                except sqlite3.Error:
-                    ro = None
-            try:
-                res = bt.run(ro or self.db, run_params, progress=progress)
-            finally:
-                if ro is not None:
-                    ro.close()
-            metrics, status = json.dumps(res, default=str), "DONE"
-        except Exception as e:
-            err = repr(e)[:500]
-        try:
-            self.db.execute("UPDATE backtest_runs SET status=?, metrics_json=?, error=? WHERE id=?", (status, metrics, err, run_id))
-        except sqlite3.Error as e:
-            err = f"{err or ''} | salvare eșuată: {e!r}"
-        with self._bt_lock:
-            b = self.backtests.get(run_id)
-            if b is not None:
-                b["done"] = True
-                if status == "DONE":
-                    b["progress"] = 1.0
-        if status == "DONE":
-            self.rt.log("INFO", "backtest", f"Backtest {run_id[:8]} terminat")
-        else:
-            self.rt.log("WARN", "backtest", f"Backtest {run_id[:8]} eșuat: {err}")
-
-    def _backtest_row(self, r: dict, full: bool) -> dict:
-        try:
-            params = json.loads(r["params_json"]) if r.get("params_json") else None
-        except ValueError:
-            params = None
-        metrics = None
-        if r.get("metrics_json"):
-            try:
-                metrics = json.loads(r["metrics_json"])
-            except ValueError:
-                metrics = None
-        out = {"id": r["id"], "created_ts": r["created_ts"], "status": r["status"], "params": params, "error": r.get("error"),
-               "progress": (self.backtests.get(r["id"]) or {}).get("progress", 1.0 if r["status"] == "DONE" else None)}
-        if full:
-            out["metrics"] = metrics
-        else:
-            out["summary"] = (metrics or {}).get("summary") if isinstance(metrics, dict) else None
-        return out
-
-    def list_backtests(self, limit: int = 30) -> list[dict]:
-        try:
-            rows = self.db.query("SELECT * FROM backtest_runs ORDER BY created_ts DESC LIMIT ?", (limit,))
-        except sqlite3.Error:
-            return []
-        return [self._backtest_row(r, full=False) for r in rows]
-
-    def get_backtest(self, run_id: str) -> dict | None:
-        try:
-            r = self.db.query_one("SELECT * FROM backtest_runs WHERE id=?", (run_id,))
-        except sqlite3.Error:
-            return None
-        return self._backtest_row(r, full=True) if r else None
-
     # ---- loops -----------------------------------------------------------
     def _on_quote(self, symbol: str) -> None:
         if self.paper.positions:
@@ -2323,22 +1051,15 @@ class Engine:
         self.update_equity_marks()
         sess = self.session()
         if self._prev_session_open is not None and sess["open_now"] and not self._prev_session_open:
-            day = scheduler.local_day(self.now_utc(), self.tz())
             self.rt.log("INFO", "scheduler", "Sesiunea de tranzacționare a început")
-            self.telegram.enqueue(f"daily:{day}:{sess['start']}", "SESSION_START", fmt_daily_start({
-                **sess, "mode": self.mode(), "execution_enabled": rt.trading["execution_enabled"],
-                "symbols": rt.active_symbols(), "feed_label": self.settings.feed_label}))
         elif self._prev_session_open and not sess["open_now"]:
             self.rt.log("INFO", "scheduler", "Sesiunea s-a închis — fără intrări noi; pozițiile rămân gestionate")
-            self.trade_reviews.on_session_closed(now)
         self._prev_session_open = sess["open_now"]
         if self.settings.data_source == "mt5_bridge":
             connected = rt.bridge_connected()
             if self._prev_bridge_connected and not connected:
                 self._bridge_down_ts = now
-                busy = [r for r in self.backtests.values() if not r.get("done")]
-                msg = ("Bridge-ul MT5 s-a deconectat — intrările noi sunt blocate."
-                       + (" (un backtest din dashboard rulează acum și încarcă procesorul)" if busy else ""))
+                msg = "Bridge-ul MT5 s-a deconectat — intrările noi sunt blocate."
                 if self.mode() == "DEMO":
                     self.risk_alert(msg, key=f"bridge_down:{int(now // 60)}")
                 else:
@@ -2353,60 +1074,12 @@ class Engine:
         self.warmup_reason("", now)
         self._check_calendar(now)
         self._check_symbol_feed(now)
-        tf = rt.strategy["signal_timeframe"]
-        htf = rt.strategy["htf_timeframe"]
-        sec = TF_SECONDS.get(tf, 300)
-        # new signals of this pass (same bar close) are collected, then arbitrated together before Claude
-        self._bar_batch = []
-        try:
-            for sym in rt.active_symbols():
-                if (sym, tf) in rt.hist_force or (sym, htf) in rt.hist_force:
-                    continue  # waiting for a history refill after a gap
-                closed = rt.closed_bars(sym, tf, now)
-                if not closed:
-                    continue
-                t = closed[-1]["t"]
-                if self.last_analyzed_bar.get(sym) != t:
-                    self.last_analyzed_bar[sym] = t
-                    fresh = now - (t + sec) < SIGNAL_FRESH_S
-                    try:
-                        self.analyze_symbol(sym, allow_signal=fresh)
-                    except Exception as e:
-                        rt.log("ERROR", "strategy", f"analiză {sym} eșuată: {e!r}")
-        finally:
-            batch, self._bar_batch = self._bar_batch, None
-        if batch:
-            try:
-                self.dispatch_signals(batch)
-            except Exception as e:
-                rt.log("ERROR", "engine", f"arbitraj semnale eșuat: {e!r}")
-        try:
-            self.pm.run(now)
-        except Exception as e:
-            rt.log("ERROR", "positions", f"position manager: {e!r}")
         if not self.warmup_reason("", now):
             try:
                 self.basket.tick(now)
             except Exception as e:
                 rt.log("ERROR", "basket", f"coș: {e!r}")
-        try:
-            self.track_trade_paths(now)
-        except Exception as e:
-            self._perf_warn_once("trade_paths", f"traiectorii tranzacții: {e!r}")
         self.executor.check_timeouts(now)
-        self.expire_signals()
-        try:
-            self.forward.tick(now)
-        except Exception as e:
-            self._perf_warn_once("forward", f"teste forward: {e!r}")
-        try:
-            self.ml.tick(now)
-        except Exception as e:
-            self._perf_warn_once("ml_tick", f"ML tick: {e!r}")
-        try:
-            self.ai_trader.tick(now)
-        except Exception as e:
-            self._perf_warn_once("ai_trader_tick", f"AI trader tick: {e!r}")
 
     async def _loop(self) -> None:
         while True:
@@ -2416,10 +1089,6 @@ class Engine:
                 raise
             except Exception as e:
                 self.rt.log("ERROR", "engine", f"loop error: {e!r}")
-            try:
-                self.perf_tick(time.time())
-            except Exception as e:
-                self._perf_warn_once("perf_tick", f"perf tick: {e!r}")
             await asyncio.sleep(1.0)
 
     async def _broadcaster(self) -> None:
@@ -2459,110 +1128,6 @@ def risk_money_from_fill(tr: dict, sl0: float) -> float | None:
     if (float(sl0) - po) * sign >= 0:
         return 0.0
     return abs(profit) * abs(po - float(sl0)) / move
-
-
-def mean_ci90(xs: list[float]) -> tuple[float | None, list[float] | None]:
-    n = len(xs)
-    if not n:
-        return None, None
-    m = sum(xs) / n
-    if n < 2:
-        return m, None
-    sd = math.sqrt(sum((x - m) ** 2 for x in xs) / (n - 1))
-    h = Z90 * sd / math.sqrt(n)
-    return m, [round(m - h, 3), round(m + h, 3)]
-
-
-def trade_summary(trades: list[dict]) -> dict:
-    """trades: dicts with net (USD), r (R multiple | None), t (close ts)."""
-    n = len(trades)
-    nets = [t["net"] for t in trades]
-    rs = [t["r"] for t in trades if t.get("r") is not None]
-    wins = sum(1 for x in nets if x > 0)
-    gross_win = sum(x for x in nets if x > 0)
-    gross_loss = -sum(x for x in nets if x < 0)
-    avg_r, ci = mean_ci90(rs)
-    cum = peak = dd = 0.0
-    for r in rs:
-        cum += r
-        peak = max(peak, cum)
-        dd = max(dd, peak - cum)
-    streak = best = 0
-    for x in nets:
-        streak = streak + 1 if x < 0 else 0
-        best = max(best, streak)
-    ts = [t["t"] for t in trades if t.get("t") is not None]
-    return {
-        "trades": n, "wins": wins, "losses": sum(1 for x in nets if x < 0),
-        "win_rate": round(wins / n, 4) if n else None,
-        "avg_r": round(avg_r, 3) if avg_r is not None else None,
-        "expectancy_r": round(avg_r, 3) if avg_r is not None else None,
-        "trades_with_r": len(rs),
-        "profit_factor": round(gross_win / gross_loss, 3) if gross_loss > 0 else None,  # None = no losing trade
-        "max_dd_r": round(dd, 3), "max_consec_losses": best, "net_usd": round(sum(nets), 2),
-        "gross_win_usd": round(gross_win, 2), "gross_loss_usd": round(gross_loss, 2),
-        "sample_days": round((max(ts) - min(ts)) / 86400, 1) if len(ts) >= 2 else 0.0,
-        "ci90_avg_r": ci,
-    }
-
-
-def group_summary(trades: list[dict], key: str) -> dict:
-    groups: dict = {}
-    for t in trades:
-        k = t.get(key)
-        groups.setdefault("—" if k is None else k, []).append(t)
-    out = {}
-    for k in sorted(groups, key=lambda x: (isinstance(x, str), x)):
-        s = trade_summary(groups[k])
-        out[str(k)] = {f: s[f] for f in ("trades", "wins", "win_rate", "avg_r", "net_usd", "profit_factor", "ci90_avg_r")}
-    return out
-
-
-def blocker_type(text: str) -> str:
-    """Stable group name of a free-text blocker: text up to the first ':', '(' or digit."""
-    m = re.match(r"[^:(0-9]*", str(text or ""))
-    head = (m.group(0) if m else "").strip(" .,;-—>")
-    return (head or str(text or "?").strip())[:60]
-
-
-def shadow_category(r: dict, blockers: list) -> str:
-    if r.get("signal_id"):
-        if r.get("ai_verdict") == "VETO":
-            return "Semnal → VETO Claude"
-        st = r.get("sig_status")
-        if st in ("EXECUTED", "INTENT_CREATED"):
-            return "Semnal → executat"
-        if st in ("NO_TRADE", "REJECTED"):
-            return "Semnal → respins (risc/execuție)"
-        return "Semnal → neexecutat (doar semnal/expirat)"
-    if blockers:
-        return "Candidat blocat de filtre"
-    if r.get("direction") in ("BUY", "SELL"):
-        return "Fără semnal (încălzire/bară veche)"
-    return "HOLD fără blocaj explicit"
-
-
-def shadow_group(rows: list[dict]) -> dict:
-    rs = [float(r["outcome_r"]) for r in rows if r.get("outcome_r") is not None]
-    avg, ci = mean_ci90(rs)
-    outcomes: dict[str, int] = {}
-    for r in rows:
-        outcomes[r.get("outcome") or "?"] = outcomes.get(r.get("outcome") or "?", 0) + 1
-    mfe = [float(r["mfe_r"]) for r in rows if r.get("mfe_r") is not None]
-    mae = [float(r["mae_r"]) for r in rows if r.get("mae_r") is not None]
-    n = len(rows)
-    return {
-        "n": n, "win_rate": round(sum(1 for x in rs if x > 0) / len(rs), 4) if rs else None,
-        "avg_r": round(avg, 3) if avg is not None else None, "sum_r": round(sum(rs), 2), "ci90_avg_r": ci,
-        "avg_mfe_r": round(sum(mfe) / len(mfe), 3) if mfe else None, "avg_mae_r": round(sum(mae) / len(mae), 3) if mae else None,
-        "outcomes": outcomes, "small_sample": n < SHADOW_MIN_N,
-    }
-
-
-def fmt_hm(s: str | None) -> str:
-    """'HH:MM UTC' of an ISO time, '' when missing."""
-    dt = parse_iso(s) if s else None
-    return dt.strftime("%H:%M UTC") if dt else ""
 
 
 def _ts(s: str | None) -> float | None:

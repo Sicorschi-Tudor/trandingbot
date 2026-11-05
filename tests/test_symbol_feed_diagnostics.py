@@ -38,3 +38,15 @@ def test_no_quote_heuristic_for_old_ea(engine):
     logs = [r["message"] for r in engine.db.query("SELECT message FROM system_events ORDER BY id DESC LIMIT 3")]
     assert any("Fără cotații pentru XAUUSD" in m and "Market Watch" in m for m in logs)
     assert engine.status()["bridge"]["no_quote_symbols"] == ["XAUUSD"]
+
+
+def test_unknown_symbol_switches_to_broker_spelling(engine):
+    now = time.time()
+    rt = engine.rt
+    rt.strategy["symbols"], rt.strategy["trade_symbols"] = ["XAUUSDm"], ["XAUUSDm"]
+    _sync(engine, now, unknown_symbols="XAUUSDM")  # other account: no "m" suffix there
+    assert rt.active_symbols() == ["XAUUSD"] and rt.strategy["trade_symbols"] == ["XAUUSD"]
+    _sync(engine, now + 1, unknown_symbols="XAUUSDM")  # stale report for the old name: no further change
+    assert rt.active_symbols() == ["XAUUSD"]
+    _sync(engine, now + 2, unknown_symbols="XAUUSD")  # still unknown: next spelling
+    assert rt.active_symbols() == ["XAUUSD.a"]

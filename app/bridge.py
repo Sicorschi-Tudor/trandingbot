@@ -8,9 +8,8 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from . import archive, calendar_hist
 from .config import TF_SECONDS
-from .executor import EA_EXT_OPEN_VERSION, PENDING_STATES, ea_version_tuple
+from .executor import EA_EXT_OPEN_VERSION, ea_version_tuple
 
 router = APIRouter()
 
@@ -211,26 +210,41 @@ def normalize_clock(rt, payload: dict, now: float) -> int:
         # calendar times go through the same ToUtc() in the EA
         if isinstance(ev, dict) and isinstance(ev.get("t"), (int, float)):
             ev["t"] = int(ev["t"]) - skew
-    for item in payload.get("archive") or []:
-        # archive bars (v1.11) too; end_utc stays in the EA frame (archive.ingest_payload removes the skew)
-        if isinstance(item, dict) and isinstance(item.get("bars"), list):
-            for b in item["bars"]:
-                if isinstance(b, dict) and isinstance(b.get("t"), (int, float)):
-                    b["t"] = int(b["t"]) - skew
     return skew
 
 
-def archive_commands_pending(engine, commands: list[str]) -> bool:
-    """OPEN/MODIFY/CLOSE in this response or still waiting for the EA's result -> no HISTX this sync."""
-    if any(c.split("|", 1)[0] in ("OPEN", "MODIFY", "CLOSE") for c in commands):
-        return True
-    try:
-        # UNKNOWN too: delivered, no result after 30 s -> the EA may still be busy with it, reconcile in progress
-        row = engine.db.query_one("SELECT 1 AS x FROM intents WHERE mode='DEMO' AND state IN (%s) LIMIT 1"
-                                  % ",".join("'%s'" % st for st in PENDING_STATES))
-    except Exception:
-        return True
-    return row is not None
+# broker spellings tried, in order, when the EA reports an active symbol as unknown (another account / broker)
+SYMBOL_SUFFIXES = ("", "m", ".a", ".cash", "c", "+", ".r", ".pro", ".ecn", ".raw", "-ecn", ".std", "#")
+GOLD_NAMES = ("GOLD", "GOLDm", "GOLD.a")
+
+
+def symbol_candidates(sym: str) -> list[str]:
+    """Other names the same instrument may have at another broker: base (6 letters) + usual suffixes; gold also GOLD."""
+    up = sym.upper()
+    gold = "XAU" in up or up.startswith("GOLD")
+    base = "XAUUSD" if gold else (sym[:6] if len(sym) >= 6 and sym[:6].isalpha() else sym)
+    out = [base.upper() + s for s in SYMBOL_SUFFIXES] + (list(GOLD_NAMES) if gold else [])
+    return [c for c in dict.fromkeys(out) if c != sym]
+
+
+def resolve_unknown_symbols(rt, engine, unknown: list[str]) -> None:
+    """Swap every active symbol the broker does not know for its next untried spelling (runtime only: the .env value
+    is tried again at restart, then resolved the same way within a few syncs)."""
+    unk = {u.upper() for u in unknown}
+    tried = rt.bridge.setdefault("symbol_tried", {})
+    for sym in list(rt.active_symbols()):
+        if sym.upper() not in unk:
+            continue
+        root = next((r for r, names in tried.items() if sym in names), sym)
+        names = tried.setdefault(root, [root])
+        nxt = next((c for c in [root] + symbol_candidates(root) if c not in names), None)
+        if nxt is None:
+            continue
+        names.append(nxt)
+        for key in ("symbols", "trade_symbols"):
+            lst = rt.strategy.get(key) or []
+            rt.strategy[key] = [nxt if x == sym else x for x in lst]
+        rt.log("WARN", "bridge", f"Simbolul {sym} nu există la acest broker — încerc {nxt}")
 
 
 def process_sync(engine, payload: dict, now: float | None = None) -> str:
@@ -255,8 +269,10 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
         if unknown != (rt.bridge.get("unknown_symbols") or []):
             rt.bridge["unknown_symbols"] = unknown
             if unknown:
-                rt.log("ERROR", "bridge", f"Brokerul nu cunoaște simbolurile: {', '.join(unknown)} — pune în ACTIVE_SYMBOLS "
-                                          f"numele exact din Market Watch (ex. XAUUSD.a, GOLD, XAUUSDm) și repornește")
+                rt.log("ERROR", "bridge", f"Brokerul nu cunoaște simbolurile: {', '.join(unknown)} — încerc automat "
+                                          f"celelalte nume uzuale (XAUUSD, XAUUSDm, XAUUSD.a, GOLD ...)")
+        if unknown:
+            resolve_unknown_symbols(rt, engine, unknown)
     try:
         ea_magic = int(payload.get("magic") or 0)
     except (TypeError, ValueError):
@@ -283,19 +299,12 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
         rt.log("INFO", "bridge", f"EA conectat (v{rt.bridge['ea_version']}), server {acc.get('server')}, "
                                  f"trade_mode={acc.get('trade_mode')} ({'DEMO' if acc.get('trade_mode') == 0 else 'REAL'})")
 
-    # research-only symbols (RESEARCH_SYMBOLS) are archive-only: never quoted / analysed even if an EA sends them
-    research_only = archive.research_only_names(rt)
-    if research_only:
-        payload["symbols"] = [s for s in payload.get("symbols") or [] if s.get("symbol") not in research_only]
-        payload["bars"] = [b for b in payload.get("bars") or [] if b.get("symbol") not in research_only]
     for s in payload.get("symbols") or []:
         sym = s.get("symbol")
         if not sym:
             continue
         info = {k: v for k, v in s.items() if k != "symbol"}
         rt.ingest_quote(sym, info)
-    archive.sample_spreads(rt, [s.get("symbol") for s in payload.get("symbols") or [] if s.get("symbol")], now)
-    archive.flush_spreads(rt, now)
 
     groups: dict[tuple[str, str], list[dict]] = {}
     for b in payload.get("bars") or []:
@@ -339,8 +348,6 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
                 rt.ingest_bar(sym, tf, b)
 
     ingest_calendar(rt, payload, now)
-    if "archive" in payload:
-        archive.ingest_payload(rt, payload.get("archive"), now)
 
     if "positions" in payload:
         engine.set_mt5_positions(payload.get("positions") or [])
@@ -374,14 +381,6 @@ def process_sync(engine, payload: dict, now: float | None = None) -> str:
         commands = engine.executor.take_commands(now)
     if calendar_request_needed(rt, now):
         commands = ["CALENDAR"] + commands
-    if archive.ARCHIVE_EA_VERSION <= ea_version_tuple(rt.bridge.get("ea_version")) and engine.settings.ARCHIVE_ENABLED:
-        histx = archive.next_request(rt, now, commands_pending=archive_commands_pending(engine, commands),
-                                     hist_pending=bool(hist) or bool(rt.hist_force))
-        if histx:
-            commands = commands + [histx]
-    # EA >= 1.14: economic-calendar history (ingests "calendar_hist", at most one CALHIST in flight; never raises)
-    commands = commands + calendar_hist.on_sync(engine, payload, commands, now,
-                                                hist_pending=bool(hist) or bool(rt.hist_force))
     # keep quoting symbols of open bot positions that are no longer active, so they stay managed (BE/rescue/time stop)
     magic = int(engine.settings.MT5_MAGIC)
     quote_symbols = list(symbols)
