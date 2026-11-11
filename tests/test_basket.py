@@ -20,7 +20,10 @@ def test_gold_basket_profile():
     assert s.BASKET_MAX_LOSS_USD == 15.0 and s.BASKET_SL_DISTANCE == 40.0
     # 04.11: hedging off (live -21.98 vs -16 with the plain SL), TP 2 with a 20-minute time stop
     assert s.BASKET_HEDGE_AT_PRICE == 0.0 and not s.BASKET_CLAUDE_HEDGE and s.BASKET_REOPEN_BLACKOUT_MINUTES == 15.0
-    assert s.BASKET_SCALP_TP_PRICE == 2.0 and s.BASKET_SCALP_SL_PRICE == 4.0 and s.BASKET_SCALP_TIME_STOP_MINUTES == 20
+    assert s.BASKET_SCALP_TP_PRICE == 2.0 and s.BASKET_SCALP_SL_PRICE == 4.0 and s.BASKET_SCALP_TIME_STOP_MINUTES == 180
+    assert s.BASKET_DECISION_TF == "M15" and s.BASKET_TREND_TF == "H1" and s.BASKET_NO_ENTRY_UTC_HOURS == ""
+    assert s.BASKET_SCALP_TP_ATR_MULT == 1.0 and s.BASKET_SCALP_SL_ATR_MULT == 1.5 and s.BASKET_MAX_ATR_M1 == 0.0
+    assert s.BASKET_MIN_M5_GAP_ATR == 0.2 and s.SESSION_BREAKOUT_ENABLED and s.SESSION_BREAKOUT_TP_R == 2.5
     assert s.BASKET_MAX_RUN_BARS == 3 and s.BASKET_MAX_STRETCH_EMA50_ATR == 2.0
     assert s.default_strategy()["signal_timeframe"] == "M1" and not s.default_schedule()["enabled"]
     assert profile_pins("gold_basket")["strategy"] == ("symbols", "trade_symbols", "signal_timeframe", "htf_timeframe")
@@ -139,6 +142,8 @@ def _claude_basket(engine, **upd):
                                                    "BASKET_MAX_RISK_PCT_PER_ENTRY": 0.0,
                                                    # the confidence gate on big lots is tested on its own
                                                    "BASKET_SURE_MIN_CONFIDENCE": 0.0,
+                                                   # the guard tests seed flat M5 bars: the M5-flat guard is tested on its own
+                                                   "BASKET_MIN_M5_GAP_ATR": 0.0,
                                                    # the guard tests arm a few ATR away from the price on purpose
                                                    "BASKET_PULLBACK_MAX_OVERSHOOT_ATR": 0.0,
                                                    # tests run at any wall-clock hour: no blocked window by default
@@ -589,6 +594,16 @@ def test_smart_route_sends_routine_bars_to_the_light_model_and_decisions_to_the_
     assert b._route_model("EURUSD", [], False, False, now)[0] == "claude-sonnet-5-5"
     monkeypatch.setattr(b, "fast_vote", lambda sym, now: ("SELL", {}))
     assert b._route_model("EURUSD", [], False, False, now)[0] is None  # direction decision
+    # 06.11: aligned but the M5 gap is under the entry minimum -> no entry can pass, the light model watches
+    eng.settings = eng.settings.model_copy(update={"BASKET_MIN_M5_GAP_ATR": 0.4})
+    monkeypatch.setattr(b, "m5_gap_atr", lambda sym, now: -0.2)
+    m, why = b._route_model("EURUSD", [], False, False, now)
+    assert m == "claude-sonnet-5-5" and "M5 fără trend" in why
+    monkeypatch.setattr(b, "m5_gap_atr", lambda sym, now: -0.9)
+    assert b._route_model("EURUSD", [], False, False, now)[0] is None
+    monkeypatch.setattr(b, "m5_gap_atr", lambda sym, now: None)  # unknown gap: unchanged behaviour
+    assert b._route_model("EURUSD", [], False, False, now)[0] is None
+    eng.settings = eng.settings.model_copy(update={"BASKET_MIN_M5_GAP_ATR": 0.0})
     eng.paper.open("EURUSD", "BUY", 0.01, 1.07, 1.09, eng.rt.quotes["EURUSD"])
     pos = b.positions("EURUSD")
     assert b._route_model("EURUSD", pos, False, False, now)[0] is None  # brand-new position
@@ -677,7 +692,7 @@ def test_entry_gets_fixed_scalp_tp_and_sl(engine, monkeypatch):
 def test_m5_gate_refuses_a_new_entry_against_the_m5_trend(engine, monkeypatch):
     """03.11: entries against M5 (EMA9 vs EMA21) won 5 of 12 and lost 14 USD per 0.01 lot."""
     eng = _claude_basket(engine)
-    monkeypatch.setattr(eng.basket, "fast_vote", lambda sym, now: (None, {"M1": 1, "M5": -1}))
+    monkeypatch.setattr(eng.basket, "m5_gap_atr", lambda sym, now: -1.0)  # trend timeframe (M5) points down
     done = eng.basket.apply_claude_actions("EURUSD", [{"type": "OPEN", "side": "BUY", "lot": 0.01, "why": "x"}],
                                            "PAPER", time.time())
     assert "refuzat" in done[0] and "M5" in done[0] and not eng.paper.positions
@@ -686,11 +701,59 @@ def test_m5_gate_refuses_a_new_entry_against_the_m5_trend(engine, monkeypatch):
     assert "deschid SELL" in done[0]
     # unknown M5 (not enough bars) does not block
     eng.paper.positions.clear()
-    monkeypatch.setattr(eng.basket, "fast_vote", lambda sym, now: (None, {"M1": 0, "M5": 0}))
+    monkeypatch.setattr(eng.basket, "m5_gap_atr", lambda sym, now: None)
     eng.basket.last_action["EURUSD"] = 0
     done = eng.basket.apply_claude_actions("EURUSD", [{"type": "OPEN", "side": "BUY", "lot": 0.01, "why": "x"}],
                                            "PAPER", time.time())
     assert "deschid BUY" in done[0]
+
+
+def test_m5_flat_refuses_open_and_holds_an_armed_entry(engine, monkeypatch):
+    """06.11: 140 entries, M5 EMA9-EMA21 gap under 0.4 x ATR M1 won 17 of 35 (-28.4 USD / 0.01 lot); 06:20 and 07:40
+    two SELLs at a 0.2-0.3 gap inside a 3-hour range, both stopped out by the breakout."""
+    eng = _claude_basket(engine, BASKET_MIN_M5_GAP_ATR=0.4)
+    b = eng.basket
+    now = time.time()
+    monkeypatch.setattr(b, "fast_vote", lambda sym, now: (None, {"M1": 0, "M5": 1}))  # M5 "up", but glued
+    monkeypatch.setattr(b, "m5_gap_atr", lambda sym, now: 0.2)
+    done = b.apply_claude_actions("EURUSD", [{"type": "OPEN", "side": "BUY", "lot": 0.01, "why": "x"}], "PAPER", now)
+    assert "refuzat" in done[0] and "M5 fără trend" in done[0] and not eng.paper.positions
+    # an armed pullback at the price waits (the arm stays) instead of filling
+    b.armed["EURUSD"] = [{"side": "BUY", "trigger": "PULLBACK", "price": 1.0805, "expires": now + 300, "lot": 0.01,
+                          "armed_at": now - 30, "expires_utc": "", "why": "x"}]
+    assert b._fire_armed("EURUSD", [], eng.rt.quotes["EURUSD"], "PAPER", now) is False
+    assert b.armed["EURUSD"] and not eng.paper.positions
+    # a real M5 trend (gap 0.6) lets the same entry through; a SELL against a +0.6 gap is still refused
+    monkeypatch.setattr(b, "m5_gap_atr", lambda sym, now: 0.6)
+    assert b._fire_armed("EURUSD", [], eng.rt.quotes["EURUSD"], "PAPER", now) is True
+    assert eng.paper.positions
+    eng.paper.positions.clear()
+    b.last_action["EURUSD"] = 0
+    monkeypatch.setattr(b, "fast_vote", lambda sym, now: (None, {"M1": 0, "M5": 0}))
+    done = b.apply_claude_actions("EURUSD", [{"type": "OPEN", "side": "SELL", "lot": 0.01, "why": "x"}], "PAPER", now)
+    assert "refuzat" in done[0] and "contra trendului" in done[0]
+    # not enough M5 bars (None) does not block; 0 switches the guard off
+    monkeypatch.setattr(b, "m5_gap_atr", lambda sym, now: None)
+    b.last_action["EURUSD"] = 0
+    done = b.apply_claude_actions("EURUSD", [{"type": "OPEN", "side": "SELL", "lot": 0.01, "why": "x"}], "PAPER", now)
+    assert "deschid SELL" in done[0]
+
+
+def test_m5_gap_atr_reads_the_closed_m5_bars(engine, monkeypatch):
+    eng = _claude_basket(engine, BASKET_MIN_M5_GAP_ATR=0.4)
+    b = eng.basket
+    now = time.time()
+    t0 = int(now // 300 * 300)
+    monkeypatch.setattr(b, "atr_m1", lambda sym, now: 0.0010)
+    # 40 rising M5 closes: EMA9 above EMA21 by a few ATR
+    eng.rt.closed_bars = lambda sym, tf, n=None: [_bar(t0 - 300 * (40 - i), 1.08 + i * 0.001, 1.08 + i * 0.001,
+                                                        1.08 + i * 0.001, 1.08 + i * 0.001) for i in range(40)]
+    gap = b.m5_gap_atr("EURUSD", now)
+    assert gap is not None and gap > 2
+    assert b._m5_flat("EURUSD", "BUY", now) is None and "M5 fără trend" in b._m5_flat("EURUSD", "SELL", now)
+    assert "m5_gap_atr" in b._trend_now("EURUSD", eng.rt.quotes["EURUSD"], now)
+    eng.rt.closed_bars = lambda sym, tf, n=None: []
+    assert b.m5_gap_atr("EURUSD", now) is None
 
 
 def test_pullback_fill_waits_while_the_m1_bar_is_an_impulse_against(engine, monkeypatch):
@@ -724,8 +787,9 @@ def test_margin_max_lot_keeps_half_of_the_free_margin(engine, monkeypatch):
 
 
 def test_armed_entry_skips_claude_calls_until_it_fires_or_the_price_leaves(engine, monkeypatch):
-    """API cost: a live armed entry is filled by the code; the bars in between do not call Claude."""
-    eng = _claude_basket(engine)
+    """API cost: a live armed entry is filled by the code; the bars in between do not call Claude. (Since 06.11 an arm the
+    price ran away from waits for the M5 close; this test keeps the flat-wait throttle off so the run-away bar calls.)"""
+    eng = _claude_basket(engine, BASKET_CLAUDE_FLAT_WAIT_EVERY_BARS=1)
     eng.ai.settings = eng.ai.settings.model_copy(update={"CLAUDE_ENABLED": True, "ANTHROPIC_API_KEY": "test-key"})
     monkeypatch.setattr(pattern_context, "build", lambda rt, sym, now: {})
     monkeypatch.setattr(eng.basket, "atr_m1", lambda sym, now: 0.0010)
@@ -1103,6 +1167,104 @@ def test_armed_pullback_is_dropped_once_the_price_runs_past_its_level(engine, mo
     assert b._fire_armed("EURUSD", [], q, "PAPER", now) is True and eng.paper.positions
 
 
+def test_an_arm_the_price_ran_away_from_waits_for_the_m5_close(engine, monkeypatch):
+    """06.11 18:45-19:00: 7 Opus calls in 15 minutes re-arming a BUY pullback under a rally, no fill."""
+    eng = _claude_basket(engine, BASKET_CLAUDE_FLAT_WAIT_EVERY_BARS=5, BASKET_CLAUDE_FLAT_WAIT_MOVE_ATR=1.0,
+                         BASKET_CLAUDE_ARMED_SKIP=True, BASKET_CLAUDE_ARMED_MOVE_ATR=1.5)
+    eng.ai.settings = eng.ai.settings.model_copy(update={"CLAUDE_ENABLED": True, "ANTHROPIC_API_KEY": "test-key"})
+    monkeypatch.setattr(pattern_context, "build", lambda rt, sym, now: {})
+    monkeypatch.setattr(eng.basket, "atr_m1", lambda sym, now: 0.0010)
+    monkeypatch.setattr(eng.basket, "fast_vote", lambda sym, now: ("BUY", {"M1": 1, "M5": 1}))
+    now = time.time()
+    m = int(now // 60) // 5 * 5
+    t0 = (m - 3) * 60
+    calls = []
+
+    async def fake(payload, model=None):
+        calls.append(model)
+        return {"status": "DONE", "market_view": "x", "plan": "armez", "confidence": 0.5,
+                "actions": [{"type": "ARM", "side": "BUY", "trigger": "PULLBACK", "price": 1.0780, "minutes": 10,
+                             "lot": 0.01, "why": "x"}]}
+    eng.ai.decide_basket = fake
+    eng.rt.closed_bars = lambda sym, tf, n=None: [_bar(t0 - 60, 1.08, 1.08, 1.08, 1.08)]
+    eng.basket.tick(t0 + 5)
+    assert len(calls) == 1 and eng.basket.armed["EURUSD"]
+    # the price runs 2 ATR away from where Claude decided (and 4 ATR from the arm): not an M5 close -> no call
+    eng.rt.ingest_quote("EURUSD", quote(bid=1.08200))
+    eng.rt.closed_bars = lambda sym, tf, n=None: [_bar(t0, 1.082, 1.082, 1.082, 1.082)]
+    eng.basket._claude_task = None
+    eng.basket.tick(t0 + 65)
+    assert len(calls) == 1 and "fugit" in eng.basket.state["EURUSD"]["analysis"]
+    eng.rt.closed_bars = lambda sym, tf, n=None: [_bar(t0 + 60, 1.082, 1.082, 1.082, 1.082)]
+    eng.basket._claude_task = None
+    eng.basket.tick(t0 + 125)
+    assert len(calls) == 1
+    # the M5 close -> call
+    eng.rt.closed_bars = lambda sym, tf, n=None: [_bar(t0 + 120, 1.082, 1.082, 1.082, 1.082)]
+    eng.basket._claude_task = None
+    eng.basket.tick(t0 + 185)
+    assert len(calls) == 2
+
+
+def test_m15_mode_calls_claude_only_on_a_decision_bar_close_with_a_mechanical_setup(engine, monkeypatch):
+    """09.11: on M15 the backtest edge is in the setup (PF 1.19); Claude is the gate, called once per M15 close that has it."""
+    eng = _claude_basket(engine, BASKET_DECISION_TF="M15", BASKET_TREND_TF="H1", BASKET_CLAUDE_FLAT_WAIT_EVERY_BARS=5)
+    b = eng.basket
+    now = time.time()
+    st = b.state.setdefault("EURUSD", {})
+    q = eng.rt.quotes["EURUSD"]
+    monkeypatch.setattr(b, "_setup_side", lambda sym, q, now: "BUY")
+    t_close = int(now // 900) * 900 - 60          # the M1 bar whose close completes an M15 bar
+    t_mid = t_close - 5 * 60                      # an M1 bar in the middle of the M15 bar
+    note = b._skip_bar("EURUSD", [], False, q, st, t_mid)
+    assert note and "M15" in note and "nu e chemat" in note
+    assert b._skip_bar("EURUSD", [], False, q, st, t_close) is None and st["setup_side"] == "BUY"
+    # the decision bar closed but there is no setup -> no call, any stale arm is dropped
+    monkeypatch.setattr(b, "_setup_side", lambda sym, q, now: None)
+    b.armed["EURUSD"] = [{"side": "BUY", "trigger": "PULLBACK", "price": 1.07, "expires": now + 900, "lot": 0.01,
+                          "armed_at": now, "expires_utc": "", "why": "x"}]
+    note = b._skip_bar("EURUSD", [], False, q, st, t_close)
+    assert note and "fără setup" in note and b.armed["EURUSD"] == []
+    # with an open position Claude is consulted only at the M15 close
+    eng.paper.open("EURUSD", "BUY", 0.01, 1.07, 1.09, q)
+    pos = b.positions("EURUSD")
+    assert "închiderea barei M15" in (b._skip_bar("EURUSD", pos, False, q, st, t_mid) or "")
+    assert b._skip_bar("EURUSD", pos, False, q, st, t_close) is None
+    # every call on a higher timeframe is a decision -> the main model
+    assert b._route_model("EURUSD", [], False, False, now)[0] is None
+    assert b._route_model("EURUSD", pos, False, False, now + 3600)[0] is None
+
+
+def test_m15_mode_reads_guards_atr_and_trend_from_the_configured_timeframes(engine, monkeypatch):
+    eng = _claude_basket(engine, BASKET_DECISION_TF="M15", BASKET_TREND_TF="H1", BASKET_PULLBACK_LOOKBACK_BARS=3,
+                         BASKET_MIN_M5_GAP_ATR=0.4)
+    b = eng.basket
+    now = time.time()
+    t0 = int(now // 900) * 900
+    seen = []
+
+    def closed(sym, tf, n=None):
+        seen.append(tf)
+        if tf == "M15":   # 80 flat bars then 3 rising ones: ATR from M15, last bars up
+            flat = [_bar(t0 - 900 * (83 - i), 1.0800, 1.0810, 1.0790, 1.0800) for i in range(80)]
+            return flat + [_bar(t0 - 900 * (3 - i), 1.0800 + i * 0.001, 1.0820 + i * 0.001, 1.0790 + i * 0.001, 1.0810 + i * 0.001) for i in range(3)]
+        if tf == "H1":    # rising H1 closes: EMA9 well above EMA21
+            return [_bar(t0 - 3600 * (40 - i), 1.0 + i * 0.002, 1.0 + i * 0.002, 1.0 + i * 0.002, 1.0 + i * 0.002) for i in range(40)]
+        return [_bar(t0 - 60 * (40 - i), 1.08, 1.08, 1.08, 1.08) for i in range(40)]  # M1/M5: irrelevant, flat
+    eng.rt.closed_bars = closed
+    atr = b.atr_m1("EURUSD", now)
+    assert atr and abs(atr - 0.0020) < 0.0005          # the M15 range (0.0020), not the flat M1 bars
+    gap = b.m5_gap_atr("EURUSD", now)
+    assert gap is not None and gap > 0.4 and "H1" in seen  # the trend comes from H1
+    assert b._against_m5("EURUSD", "BUY", now) is None and "contra trendului H1" in b._against_m5("EURUSD", "SELL", now)
+    # no pullback yet: the last 3 M15 bars rose -> a BUY waits; the message names the look-back on the decision bars
+    assert "nicio revenire" in b._no_pullback_yet("EURUSD", "BUY", now)
+    assert b._no_pullback_yet("EURUSD", "SELL", now) is None
+    # the trend_now payload carries the timeframes and the mechanical setup field
+    tn = b._trend_now("EURUSD", eng.rt.quotes["EURUSD"], now)
+    assert tn["decision_tf"] == "M15" and tn["trend_tf"] == "H1" and "mechanical_setup" in tn and "m15_ema20" in tn
+
+
 def test_flat_wait_calls_claude_only_on_m5_close_or_a_real_move(engine, monkeypatch):
     """API cost (04.11): after "wait" with nothing armed, the bars that changed nothing do not call Claude."""
     eng = _claude_basket(engine, BASKET_CLAUDE_FLAT_WAIT_EVERY_BARS=5, BASKET_CLAUDE_FLAT_WAIT_MOVE_ATR=1.0)
@@ -1310,3 +1472,58 @@ def test_scalp_exits_widen_with_the_m1_atr(engine, monkeypatch):
     assert abs(p["tp"] - (p["price_open"] + 0.0030)) < 2e-5 and abs(p["sl"] - (p["price_open"] - 0.0060)) < 2e-5
     b.engine.settings = b.engine.settings.model_copy(update={"BASKET_SCALP_TP_ATR_MULT": 0.0, "BASKET_SCALP_SL_ATR_MULT": 0.0})
     assert b.scalp_exits("EURUSD", now) == (0.0015, 0.0040)
+
+
+def test_owner_start_lot_is_honoured_above_the_risk_cap(engine, monkeypatch):
+    """05.11: the dashboard lot is the owner's decision; the 5 % risk cap trims only what Claude adds above it."""
+    eng = _claude_basket(engine, BASKET_MAX_RISK_PCT_PER_ENTRY=5.0, BASKET_SCALP_SL_PRICE=0.0040)
+    b = eng.basket
+    eng.db.set_setting("basket", {"claude": True, "max_loss_usd": 10, "start_lot": 0.03})
+    monkeypatch.setattr(b, "margin_max_lot", lambda q: 0.1)
+    monkeypatch.setattr(b, "balance", lambda: 200.0)
+    q = eng.rt.quotes["EURUSD"]
+    rx = b.risk_max_lot(q)                      # 0.004 price x 100000 x 0.01 = 4 "USD" per 0.01 -> 5 % of 200 = 0.02
+    assert rx == 0.02
+    assert b._entry_max_lot(b.cfg(), q) == 0.03  # the owner's 0.03 is allowed although the cap alone says 0.02
+    done = b.apply_claude_actions("EURUSD", [{"type": "OPEN", "side": "BUY", "lot": 0.01, "why": "x"}], "PAPER", time.time())
+    assert done[0] == "deschid BUY 0.03"
+    for p in list(eng.paper.positions.values()):
+        eng.paper.close(p["ticket"], q, "test")
+    done = b.apply_claude_actions("EURUSD", [{"type": "OPEN", "side": "BUY", "lot": 0.08, "confidence": 0.95, "why": "x"}],
+                                  "PAPER", time.time())
+    assert "deschid BUY 0.03" in done[0] and "lot redus de la 0.08 la 0.03" in done[0]
+
+
+def test_entry_waits_when_the_pullback_went_too_deep_or_the_price_sits_on_ema50(engine, monkeypatch):
+    """05.11: fills more than 0.7 ATR beyond the EMA20 against the trade, or within 0.5 ATR of the EMA50, won 27 of 47
+    (-21.4 USD); the rest 75 of 105 (+64.1)."""
+    eng = _claude_basket(engine, BASKET_PULLBACK_MAX_DEPTH_ATR=0.7, BASKET_MIN_DIST_EMA50_ATR=0.5,
+                         BASKET_ENTRY_NEEDS_PULLBACK=False, BASKET_MAX_STRETCH_EMA50_ATR=0.0, BASKET_MAX_RUN_BARS=0)
+    b = eng.basket
+    now = time.time()
+    monkeypatch.setattr(b, "atr_m1", lambda sym, now: 0.0010)
+    monkeypatch.setattr(b, "fast_vote", lambda sym, now: (None, {"M1": 0, "M5": 0}))
+    t0 = int(now // 60 * 60)
+    from tests.conftest import quote
+    # 80 flat bars at 1.0810: EMA20 = EMA50 = 1.0810
+    flat = [_bar(t0 - 60 * (80 - i), 1.0810, 1.0811, 1.0809, 1.0810) for i in range(80)]
+    eng.rt.closed_bars = lambda sym, tf, n=None: flat
+    eng.rt.bars[("EURUSD", "M1")] = flat
+    eng.rt.ingest_quote("EURUSD", quote(bid=1.07990))             # ask ~1.0800: 1 ATR below the EMA20 -> too deep
+    assert "prea adâncă" in b._pullback_exhausted("EURUSD", "BUY", eng.rt.quotes["EURUSD"], now)
+    eng.rt.ingest_quote("EURUSD", quote(bid=1.08090))             # ask ~1.0810: on the EMA50 -> consumed
+    assert "EMA50" in b._pullback_exhausted("EURUSD", "BUY", eng.rt.quotes["EURUSD"], now)
+    done = b.apply_claude_actions("EURUSD", [{"type": "OPEN", "side": "BUY", "lot": 0.01, "why": "x"}], "PAPER", now)
+    assert "refuzat" in done[0] and not eng.paper.positions
+    # EMA20 above EMA50 (rising bars), price between them + 0.6 ATR above the EMA50 -> allowed
+    rising = [_bar(t0 - 60 * (80 - i), 1.0790 + i * 0.00005, 1.0791 + i * 0.00005, 1.0789 + i * 0.00005, 1.0790 + i * 0.00005)
+              for i in range(80)]
+    eng.rt.closed_bars = lambda sym, tf, n=None: rising
+    import app.indicators as ind
+    e50 = ind.last(ind.ema([x["c"] for x in rising], 50))
+    eng.rt.ingest_quote("EURUSD", quote(bid=round(e50 + 0.0006 - 0.0001, 5)))   # ask = EMA50 + 0.6 ATR
+    assert b._pullback_exhausted("EURUSD", "BUY", eng.rt.quotes["EURUSD"], now) is None
+    b.engine.settings = b.engine.settings.model_copy(update={"BASKET_PULLBACK_MAX_DEPTH_ATR": 0.0, "BASKET_MIN_DIST_EMA50_ATR": 0.0})
+    eng.rt.closed_bars = lambda sym, tf, n=None: flat
+    eng.rt.ingest_quote("EURUSD", quote(bid=1.08090))
+    assert b._pullback_exhausted("EURUSD", "BUY", eng.rt.quotes["EURUSD"], now) is None

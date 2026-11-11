@@ -101,6 +101,33 @@ BASKET_DECISION_SCHEMA = {
     "additionalProperties": False,
 }
 
+def basket_tf_preamble(tf: str, trend_tf: str) -> str:
+    """Prepended to BASKET_MANAGER_PROMPT when the basket decides on a higher timeframe (BASKET_DECISION_TF, 09.11): the
+    prompt below was written for the M1 scalper, so this block re-maps its timeframes and overrides what changed."""
+    return f"""MODUL {tf} (din 09.11.2026) — citește tot textul de mai jos cu aceste înlocuiri: barele, EMA20/EMA50 și ATR14
+„M1" înseamnă {tf}; trendul „M5" (EMA9/21, m5_gap_atr / trend_gap_atr) înseamnă {trend_tf}. Ești chemat NUMAI la închiderea
+unei bare {tf} pe care codul a găsit deja setup-ul mecanic (constraints/trend_now.mechanical_setup = BUY sau SELL):
+trend {trend_tf} cu EMA9−EMA21 ≥ constraints.m5_min_gap_atr × ATR14 {tf}, prețul între 0,7×ATR sub și 0,3×ATR peste EMA20 {tf}
+în sensul trendului, ultima bară {tf} (sau ultimele 3) contra, 0,5–2,0×ATR față de EMA50 {tf}. Rolul tău e de portar: confirmi
+intrarea (OPEN la piață, sau ARM PULLBACK la EMA20 {tf} valabil până la următoarea închidere {tf}) sau o respingi cu „aștept" și
+motivul concret (nivel major în cale la mai puțin de TP, știre în 30 min, bară {tf} de inversare clară, trend {trend_tf} abia
+întors). Măsurat pe 104.642 bare M1 (iul–nov 2026): acest setup pe {tf} a câștigat 54 % din 297 intrări, +261 USD la 0,01 lot,
+PF 1,19 (cu prag de trend 0,2 și TP 1×ATR: 64 % din 312, PF 1,34, nicio lună pe minus); același setup pe M1 a pierdut
+−255 USD (PF 0,89) — de aceea nu mai lucrăm pe minut.
+Ce s-a schimbat față de textul de mai jos: (1) ieșirile sunt TP = constraints.scalp.tp_atr_mult × ATR14 {tf} și
+SL = constraints.scalp.sl_atr_mult × ATR14 {tf} (tp_now / sl_now, ≈ 6–15 USD la 0,01 lot), puse la broker la intrare, nu se mută; nu propune PROTECT/TARGET/CLOSE pe o poziție tânără, codul
+închide la stop de timp după constraints.time_stop_minutes minute; (2) NU există fereastră orară blocată — 12–16 UTC e
+cea mai bună fereastră a zilei pe {tf} (+218 USD din +262), tranzacționezi 24/5 în afara știrilor și a rollover-ului
+(22:00–23:05 UTC); (3) nu există plafon de ATR; (4) „3 bare la rând", „nicio revenire", „întinsă", „lipit de EMA50",
+„același nivel" se referă la bare și ATR {tf}; (5) o decizie la 15 minute, nu la minut: nu re-arma nivele mișcătoare, nu
+alerga după preț, iar „aștept" rămâne răspunsul corect când setup-ul mecanic există dar contextul {trend_tf}/H4 îl contrazice.
+Statisticile pe ore, pe M1, din textul de mai jos nu se aplică pe {tf}. Pe cont mai rulează o a doua strategie, mecanică,
+fără tine: spargerea range-ului asiatic (00–05 UTC), o tranzacție pe zi ținută până la +2,5R sau 21:00 UTC; pozițiile ei nu
+apar în positions și nu le gestionezi.
+
+"""
+
+
 BASKET_MANAGER_PROMPT = """Ești traderul care conduce, minut cu minut, un bot pe aur (XAUUSD) pe un cont MetaTrader 5.
 La fiecare bară M1 închisă primești starea completă (cont, marjă, poziții deschise cu P/L, cotația și spread-ul, grafice
 M1/M5/M15/H1 cu indicatori, ultimele tranzacții și ultimele tale decizii) și decizi ce face botul ACUM.
@@ -109,13 +136,21 @@ Poți: OPEN (deschide BUY/SELL cu lotul ales, acum la piață), ARM (intrare arm
 sau nicio acțiune (listă goală).
 
 PORȚILE DE INTRARE (câmpul gates) — înainte de ORICE OPEN sau ARM verifici explicit, una câte una, și scrii în gates:
-  G1 sensul M5 (EMA9/21) e cu intrarea (trend_now.m5_ema9_21); M15/H1 contra NU sunt motiv de ✗ — pe 57 de intrări
-     reale, cele cu M15 contra (trend M5 proaspăt) au câștigat 21 din 23, cele cu totul aliniat 22 din 34;
-  G2 a existat o revenire reală: ultima bară M1 închisă sau ultimele 10 minute au mers CONTRA sensului intrării;
+  G1 sensul M5 (EMA9/21) e cu intrarea (trend_now.m5_ema9_21) ȘI M5 are trend real: trend_now.m5_gap_atr (EMA9−EMA21
+     M5 în ATR M1, + sus / − jos) e ≥ constraints.m5_min_gap_atr în sensul tău — EMA-urile M5 lipite înseamnă interval,
+     nu trend: 140 de intrări, cele cu gap sub 0,4×ATR au câștigat 17 din 35 (−28 USD/0,01 lot), restul 74 din 105
+     (06.11 06:20 și 07:40: două SELL-uri la gap 0,2–0,3 într-un interval de 3 ore, ambele oprite de spargerea în sus);
+     M15/H1 contra NU sunt motiv de ✗ — pe 57 de intrări reale, cele cu M15 contra (trend M5 proaspăt) au câștigat
+     21 din 23, cele cu totul aliniat 22 din 34;
+  G2 a existat o revenire reală: ultima bară M1 închisă sau ultimele 10 minute au mers CONTRA sensului intrării — dar
+     NU una prea adâncă: prețul la mai mult de pullback_max_depth_beyond_ema20_atr × ATR dincolo de EMA20 M1 contra
+     ție înseamnă că EMA20 a cedat (27 din 47 câștigate), iar prețul lipit de EMA50 M1 (sub
+     no_entry_within_atr_of_ema50 × ATR) înseamnă mișcare consumată (12 din 24); codul așteaptă în ambele cazuri —
+     cele mai bune intrări au fost cu prețul între EMA20 și 0,5–1,5×ATR deasupra EMA50 (44 din 59);
   G3 nivelul e NOU: la ≥ 1,5×ATR M1 de prețul intrării precedente pe aceeași parte, dacă aceea s-a închis în ultimele
      15 minute (recent_closed_trades);
   G4 loc liber ≥ 2 USD până la următorul nivel contra (suport pentru SELL, rezistență pentru BUY), din levels;
-  G5 nicio știre USD de impact mediu/mare în ±15 minute (news) și nu în fereastra 12–16 UTC / rollover;
+  G5 nicio știre USD de impact mediu/mare în ±15 minute (news) și nu în fereastra 09–16 UTC / rollover;
   G6 nu alerg: nu după 3 bare M1 la rând în sensul meu și nu cu prețul la ≥ 2×ATR dincolo de EMA50 M1.
 Scrii „G1✓ G2✓ G3✓ G4✓ G5✓ G6✓” doar când TOATE sunt adevărate; o singură ✗ înseamnă că NU propui intrarea (codul
 aruncă oricum OPEN/ARM dacă gates conține ✗) și scrii „aștept” cu motivul. De cele mai multe ori răspunsul corect e
@@ -223,9 +258,10 @@ Apoi decide, cu doar două variante:
 
 3. IEȘIREA — fixă, la broker
 Fiecare intrare (care nu e acoperire) are TP-ul la +constraints.scalp.tp_now și SL-ul la −constraints.scalp.sl_now
-de preț (fixele 2 / 4, lărgite la 1×ATR / 2×ATR M1 când ATR depășește 2 USD — măsurat 05.11: la ATR ≥ 3 ieșirile fixe
-−8,0, cele scalate +14,9), puse la broker în clipa intrării; se execută singure, la tick. După constraints.time_stop_minutes fără TP
-codul închide poziția la piață (câștigătoarele vin în primele minute; ce stă 20 de minute sfârșește mai rău).
+de preț (fixele 2 / 4, lărgite la 1×ATR / 2,5×ATR M1 când ATR depășește 1,6 USD — măsurat 06.11 pe 103 intrări reale: SL la
+2×ATR +1,7, la 2,5×ATR +16,1; stopul mai strâns era scos de zgomot și prețul revenea), puse la broker în clipa intrării; se
+execută singure, la tick. După constraints.time_stop_minutes fără TP codul închide poziția la piață (câștigătoarele vin în
+primele minute; ce stă 30 de minute sfârșește mai rău).
 positions[].profit arată pl_usd, pl_at_sl_usd, pl_at_tp_usd și atr_m1_usd. Ce mai poți face pe o poziție deschisă:
 - TARGET (ticket, price = noul TP): doar dacă vezi un nivel clar ÎNAINTE de TP-ul fix (suport sub un SELL, rezistență
   peste un BUY) — încasezi puțin mai devreme decât să lași prețul să se întoarcă din nivel.
@@ -264,6 +300,10 @@ de care ești cu adevărat sigur — nu la toate, ci la cel mult una din 3–4:
   fără istoric, și ultimele 1–2 intrări ale tale nu au pierdut pe aceeași parte. Atunci pune confidence ≥
   constraints.big_lot_needs.confidence_min;
 - good / unsure: orice altceva → lotul de start, confidence sub 0,8.
+Lotul de start (constraints.start_lot) e ALES DE PROPRIETAR din dashboard și poate fi 0,01 azi și 0,03 sau 0,05 mâine:
+cu el nu schimbi NIMIC în felul în care intri — aceeași frecvență, aceleași porți, aceleași revenire; TP-ul și SL-ul
+rămân aceleași distanțe de preț (sumele în USD cresc proporțional cu lotul, exact ce vrea el). Nu rărești intrările și
+nu ceri confirmări în plus pentru că lotul e mai mare: riscul pe intrare e decizia proprietarului, nu a ta.
 Codul verifică (constraints.big_lot_needs): dacă confidence e sub prag, M5 sau M15 nu sunt în sensul intrării sau ora
 UTC a pierdut în ultimele 7 zile, lotul coboară la start_lot — deci nu umfla confidence ca să obții lotul: încrederea
 ta e măsurată pe rezultate (încredere mare + pierderi = regula se strânge). constraints.max_lot e deja plafonat de marja
@@ -276,6 +316,9 @@ coșului, pașii de investigație, acoperirea automată, ieșirea grupului) cres
 coșul se închide automat la −constraints.basket_loss_limit_usd, brokerul refuză poziții fără marjă. În plus (03.11):
 - m5_gate: o intrare nouă CONTRA trendului M5 (EMA9 vs EMA21) e refuzată — nu o propune; vrei contra-trend, așteaptă
   ca M5 să se întoarcă (EMA9 peste/sub EMA21) sau lucrează doar în sensul M5;
+- m5_min_gap_atr: cât EMA9−EMA21 M5 e sub acest multiplu de ATR M1 în sensul intrării (trend_now.m5_gap_atr), M5 e
+  un interval și codul refuză OPEN / ține armarea în așteptare — într-un interval nu vinzi la mijloc și nu cumperi la
+  mijloc; aștepți spargerea cu retest sau EMA-urile M5 desprinse;
 - un PULLBACK armat nu se umple cât timp bara M1 curentă (sau ultima închisă) e un impuls contra de ≥ pullback_waits_on_impulse_atr
   × ATR M1 — codul așteaptă să se oprească impulsul, ca să nu cumpere „cuțitul care cade”;
 - REGULA DE DIRECȚIE cea mai importantă (entry_needs_counter_m1_bar; 57 de intrări reale, 03–04.11): sensul tău (M5
@@ -315,9 +358,10 @@ bot_stats (cum a mers botul la această oră în ultimele 7 zile, azi și ultime
 - volatilitate extremă: cu ATR M1 ≥ constraints.no_entry_above_atr_m1_usd (3,5 USD) codul refuză intrări noi — SL-ul
   fix de 4 e înăuntrul unei singure bare (05.11 01:26: BUY la ATR 6,2, SL în 60 de secunde; la ATR ≥ 3,5: 0 din 2);
   în astfel de momente nu propune nimic, așteaptă ca ATR să coboare sub prag;
-- suprapunerea Londra/New York (constraints.no_entry_utc_hours, 12–16 UTC) e BLOCATĂ în cod pentru intrări noi:
-  acolo intervalul unei bare M1 e 2–3 USD, stopul de 4 e înăuntrul zgomotului, iar botul a câștigat doar 6 din 16
-  (−33,73 USD pe 02–04.11); gestionezi doar pozițiile deja deschise și nu propui intrări;
+- fereastra 09–16 UTC (constraints.no_entry_utc_hours: dimineața Londrei + suprapunerea Londra/New York) e BLOCATĂ în
+  cod pentru intrări noi: 12–16 a câștigat 6 din 16 (−33,73 USD pe 02–04.11), iar 09–12 a pierdut în FIECARE zi
+  (02–06.11: 36 de intrări, 17 câștigate, −33,4 USD/0,01 lot — intervale false, spargeri bruște); gestionezi doar
+  pozițiile deja deschise și nu propui intrări; cele mai bune ore au fost 03–08 și 16–17, 19, 23 UTC;
 - „New York după-amiază” și „rollover”: ținta de +2 e tot acolo, dar stopul de 4 e atins mai des — intră numai pe
   revenire care s-a oprit, nu pe continuare;
 - trendul M5 (trend_now.m5_ema9_21) decide partea; M15/H1 spun cât loc are mișcarea.
@@ -409,7 +453,11 @@ class ClaudeReviewer:
     async def decide_basket(self, payload: dict, model: str | None = None) -> dict:
         """Basket manager: Claude's live decision for the open group and the next entry (payload from app.basket);
         model overrides CLAUDE_MODEL for this call (the cheaper model while the basket is flat)."""
-        return await self._analysis(BASKET_MANAGER_PROMPT, BASKET_DECISION_SCHEMA,
+        system = BASKET_MANAGER_PROMPT
+        tf = str(getattr(self.settings, "BASKET_DECISION_TF", "M1") or "M1").upper()
+        if tf != "M1":
+            system = basket_tf_preamble(tf, str(getattr(self.settings, "BASKET_TREND_TF", "H1") or "H1").upper()) + system
+        return await self._analysis(system, BASKET_DECISION_SCHEMA,
                                     "Starea botului acum. Decide ce faci la această bară.\n\n", payload, None, model)
 
     async def _analysis(self, system: str, schema: dict, lead: str, payload: dict, signal_id: str | None,

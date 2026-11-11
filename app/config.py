@@ -57,7 +57,22 @@ PROFILES: dict[str, dict] = {
         "BASKET_HEDGE_AT_PRICE": 0.0, "BASKET_CLAUDE_HEDGE": False, "BASKET_ZR_MULT": 4.0, "BASKET_MAX_LOSS_USD": 15.0,
         # exits re-measured 04.11 on 53 real Exness entries: TP 1.5 / SL 4 = +23.0, TP 2 / SL 4 = +26.0, plus a 20-minute
         # time stop = +34.2 (the losers never reached +1.0, the winners that reach +1.5 mostly reach +2)
-        "BASKET_SCALP_TP_PRICE": 2.0, "BASKET_SCALP_TIME_STOP_MINUTES": 20,
+        "BASKET_SCALP_TP_PRICE": 2.0,
+        # 09.11: M15 decisions in the H1 trend (see BASKET_DECISION_TF): exits TP = SL = 1.5 x ATR14 M15 (floors 2 / 4
+        # USD only matter below ATR 1.3 / 2.7), 12-bar time stop = 180 min, no hour block, no ATR cap (M15 ATR runs
+        # 4-10 USD), pullback look-back 3 bars, same-level re-entry window 45 min, EMA50 distance 0.5-2.0 ATR (the
+        # geometry that gave PF 1.33 / +371 on the backtest)
+        "BASKET_DECISION_TF": "M15", "BASKET_TREND_TF": "H1",
+        "BASKET_SCALP_TP_ATR_MULT": 1.0, "BASKET_SCALP_SL_ATR_MULT": 1.5, "BASKET_SCALP_TIME_STOP_MINUTES": 180,
+        # 09.11 (owner: more trades, more of them winners): trend gap 0.2 instead of 0.4 and TP 1.0 x ATR15 instead of
+        # 1.5 - on the same 79 weekdays 312 trades (3.9/day) instead of 248 (3.1), 64 % winners instead of 56 %, +393 USD
+        # instead of +344, drawdown -95 instead of -112, no losing month
+        "BASKET_MIN_M5_GAP_ATR": 0.2,
+        # second strategy: Asian-range breakout held for hours (+2.5R target), see SESSION_BREAKOUT_*; the mix of both made
+        # +11.2 USD/day at 0.01 on 4.2 trades/day (backtest), at the price of a deeper drawdown (-154 vs -95)
+        "SESSION_BREAKOUT_ENABLED": True,
+        "BASKET_NO_ENTRY_UTC_HOURS": "", "BASKET_MAX_ATR_M1": 0.0, "BASKET_PULLBACK_LOOKBACK_BARS": 3,
+        "BASKET_REENTRY_MINUTES": 45, "BASKET_MIN_DIST_EMA50_ATR": 0.5, "BASKET_MAX_STRETCH_EMA50_ATR": 2.0,
     },
 }
 
@@ -214,6 +229,36 @@ class Settings(BaseSettings):
     # impulse against the entry of >= this x ATR14 M1 waits for the impulse to stall (13:34 and 14:23: BUY filled inside
     # a 5-ATR drop and stopped out within a minute)
     BASKET_M5_GATE: bool = True
+    # 09.11: timeframe of the basket's decisions. "M1" = the original scalper (guards, ATR14 and Claude's cadence on M1
+    # bars, trend from BASKET_TREND_TF = M5). The gold profile runs "M15" with the trend from H1: a mechanical replay of
+    # the M1 rules over 104,642 M1 bars (21.07-09.11.2026, spread 0.24) lost -254.8 USD per 0.01 lot (1451 trades, PF
+    # 0.89, every month negative, no SL/TP/time-stop/hour/ADX variant positive), while the same pullback on M15 bars in
+    # the H1 EMA9/21 trend with TP = SL = 1.5 x ATR14 M15 and a 12-bar time stop made +261.5 (297 trades, 54 %, PF 1.19,
+    # every month positive, PF 1.12 at spread 0.40). On M15 the 09-16 UTC block HURTS (+64 instead of +262) and the
+    # 12-15 UTC hours are the best of the day. Claude is called only at the close of a decision bar on which the
+    # mechanical setup exists (_setup_side); the fast loop (fills, stops, time stop) stays in code on every M1 bar.
+    BASKET_DECISION_TF: str = "M1"
+    BASKET_TREND_TF: str = "M5"
+    # "no pullback yet" looks at the last closed decision bar and the net move over this many bars (10 on M1, 3 on M15)
+    BASKET_PULLBACK_LOOKBACK_BARS: int = 10
+    # Asian-range breakout (app.session_breakout, 09.11): a second, mechanical strategy next to the basket - range of the
+    # M1 bars RANGE_START-RANGE_END UTC, first break of its high/low after that opens at market, SL = range height capped
+    # at SL_CAP_PCT % of price, TP = TP_R x risk, SL to entry at BE_R x risk, flat at FLAT_UTC, one trade a day, days with
+    # a range outside MIN-MAX_RANGE_PCT % skipped. 0.01 lot on 21.07-09.11: 70 trades, 47 %, +510 USD, PF 1.69, DD -126
+    SESSION_BREAKOUT_ENABLED: bool = False
+    SESSION_BREAKOUT_RANGE_START_UTC: int = 0
+    SESSION_BREAKOUT_RANGE_END_UTC: int = 5
+    SESSION_BREAKOUT_FLAT_UTC: int = 21
+    SESSION_BREAKOUT_TP_R: float = 2.5
+    SESSION_BREAKOUT_BE_R: float = 1.5
+    SESSION_BREAKOUT_MIN_RANGE_PCT: float = 0.30
+    SESSION_BREAKOUT_MAX_RANGE_PCT: float = 1.60
+    SESSION_BREAKOUT_SL_CAP_PCT: float = 0.6
+    # 06.11, 140 live entries since 03.11: with the M5 EMA9-EMA21 gap (in the entry's direction) under 0.4 x ATR14 M1 -
+    # a flat / glued M5, a range - entries won 17 of 35 and lost 28.4 USD per 0.01 lot; the other 105 won 74 (-2.3). Same
+    # split on the all-rules period (3 of 6, -7.5 vs 13 of 22, -4.4). 06.11 06:20 and 07:40: two SELLs at a 0.3-0.4 USD
+    # gap inside a 3-hour range, both stopped out by the upside breakout (-39.8 USD). 0 = off
+    BASKET_MIN_M5_GAP_ATR: float = 0.4
     # API cost (03.11: ~30 USD/day pace against a 84 USD account at 0.01 lot): while an armed entry is live and the price
     # is still within ARMED_MOVE_ATR x ATR M1 of it, the next M1 bars do not call Claude (the code fills the entry itself);
     # with a position open (fixed SL/TP, not hedged) Claude is called on the first bar, then every OPEN_EVERY_BARS bars;
@@ -252,8 +297,11 @@ class Settings(BaseSettings):
     # UTC hours with no new entries (and no flat Claude calls): the London/New York overlap. Measured 02-04.11 on the
     # real log: 12:00-15:59 UTC 16 trades, 6 wins, -33.73 USD; the other hours 108 trades, 77 wins; on 04.11 alone
     # 7 trades there, 2 wins, -15.53. Gold's 1-minute range there is 2.2-3.1 USD, so the 4 USD stop sits inside the
-    # noise. Comma-separated hours, empty = off
-    BASKET_NO_ENTRY_UTC_HOURS: str = "12,13,14,15"
+    # noise. 06.11, 141 live entries since 02.11: 09:00-11:59 UTC lost on every single day (36 trades, 17 wins, -33.4 USD
+    # per 0.01 lot; 03.11 -14.8, 04.11 -8.1, 05.11 -2.4, 06.11 -8.0) under every exit variant simulated, while the
+    # other hours won 61 of 84 with the M5 filter; the same hours burned 24% of the Claude spend. Comma-separated hours,
+    # empty = off
+    BASKET_NO_ENTRY_UTC_HOURS: str = "9,10,11,12,13,14,15"
     # a same-side entry within REENTRY_MINUTES of the previous close must sit at least REENTRY_MIN_ATR x ATR14 M1 away
     # from the previous entry price - a new level, not the same one again. Measured 02-04.11 (126 entries, sim TP 2 /
     # SL 4): re-entries within 0.5 ATR of the last entry won 24 of 36 (-1.1 USD), entries > 1.5 ATR away 19 of 24
@@ -269,9 +317,18 @@ class Settings(BaseSettings):
     # volatility-scaled exits: TP = max(BASKET_SCALP_TP_PRICE, TP_ATR_MULT x ATR14 M1), SL = max(BASKET_SCALP_SL_PRICE,
     # SL_ATR_MULT x ATR14 M1). 05.11 on 135 entries (sim, 20-min stop): ATR < 2 the fixed 2/4 is best (+13.5); ATR 2-3
     # fixed +2.0 vs 1xATR/2xATR +12.0; ATR >= 3 fixed -8.0 vs +14.9 -> the fixed stop sits inside the noise once ATR
-    # passes 2 USD. 0 = fixed exits only
+    # passes 2 USD. 06.11 re-measured on the real entries (sim, floors 2/4): SL 2xATR vs 2.5xATR - all-rules period
+    # (29) -18.7 vs +3.0, since 03.11 (103) +1.7 vs +16.1, with the M5 filter (82) +27.3 vs +48.7; SL 3xATR similar
+    # (+7.9 / +25.1 / +41.9). A 30-minute time stop beats 20 on every sample (+9.1 vs +4.1, +20.8 vs +14.7); a
+    # break-even stop after +0.5 ATR cuts the winners (46 of 103 instead of 71). 0 = fixed exits only
+    # a pullback that went too far is no pullback: no fill while the price is more than MAX_DEPTH x ATR14 M1 beyond the
+    # EMA20 M1 against the trade, or within MIN_DIST_EMA50 x ATR of the EMA50 M1 (the move came all the way back to the
+    # slow mean = consumed). 05.11 on 152 entries (sim, current exits): the two cases together 27 of 47 (-21.4 USD), the
+    # rest 75 of 105 (+64.1); on the all-rules period 4 of 10 (-14.8) vs 10 of 12 (+24.6). 0 = off
+    BASKET_PULLBACK_MAX_DEPTH_ATR: float = 0.7
+    BASKET_MIN_DIST_EMA50_ATR: float = 0.5
     BASKET_SCALP_TP_ATR_MULT: float = 1.0
-    BASKET_SCALP_SL_ATR_MULT: float = 2.0
+    BASKET_SCALP_SL_ATR_MULT: float = 2.5
     # share of the free margin an entry may use; the rest stays free for the SL and the spread (03.11: 0.02 lot on 84 USD
     # left ~4 USD free and the broker cut the lot anyway)
     BASKET_MARGIN_USE_FRAC: float = 0.5

@@ -19,6 +19,7 @@ from .paper import PaperBroker
 from .risk import pyramid_blocker
 from .state import Runtime
 from .basket import BasketTrader
+from .session_breakout import SessionBreakout
 
 WARMUP_S = 30.0  # no new signals right after process start
 CALENDAR_STALE_S = 1800.0
@@ -51,6 +52,7 @@ class Engine:
         self.executor.on_update = self._on_intent_update
         self.ai = ClaudeReviewer(settings)
         self.basket = BasketTrader(self)
+        self.session_bo = SessionBreakout(self)
         self.tasks: list[asyncio.Task] = []
         self.known_mt5_positions: dict[int, dict] = {}
         self._paper_dirty = False
@@ -1079,6 +1081,10 @@ class Engine:
                 self.basket.tick(now)
             except Exception as e:
                 rt.log("ERROR", "basket", f"coș: {e!r}")
+            try:
+                self.session_bo.tick(now)
+            except Exception as e:
+                rt.log("ERROR", "session", f"spargere sesiune: {e!r}")
         self.executor.check_timeouts(now)
 
     async def _loop(self) -> None:

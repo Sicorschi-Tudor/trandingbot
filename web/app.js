@@ -435,8 +435,11 @@ async function loadBasket() {
       (b.lot_scale > 1 ? ` (−${b.max_loss_per_001_usd} × ${b.lot_scale})` : '');
     $('#start-lot').value = b.start_lot || 0;
     $('#start-lot-current').textContent = b.start_lot ? `Lot curent: ${b.start_lot}` : 'Lot curent: după sold';
-    $('#start-lot-note').textContent = b.start_lot ? `Sumele în USD ale coșului (limita) sunt ×${b.lot_scale} față de 0.01 lot; ` +
-      `lotul maxim al lui Claude: ${b.claude_max_lot}.` : '0 = lotul crește cu soldul.';
+    const scl = b.scalp || {};
+    const perLot = (b.start_lot || 0.01) * 100;
+    $('#start-lot-note').textContent = b.start_lot ? `La ${b.start_lot} lot: TP ≈ +${(scl.tp_price * perLot).toFixed(0)} USD, SL ≈ −${(scl.sl_price * perLot).toFixed(0)} USD ` +
+      `(distanțele de preț rămân +${scl.tp_price} / −${scl.sl_price}, lărgite la ${scl.tp_atr_mult}×ATR / ${scl.sl_atr_mult}×ATR când volatilitatea e mare); ` +
+      `limita coșului e ×${b.lot_scale} față de 0.01 lot; lotul maxim al lui Claude: ${b.claude_max_lot}.` : '0 = lotul crește cu soldul.';
     $('#btn-bot-stop').disabled = !b.running;
     $('#btn-bot-start').disabled = b.running;
     const st = $('#bot-state');
@@ -448,7 +451,8 @@ async function loadBasket() {
       : '<span class="faint">Claude decide la următoarea bară M1…</span>';
     const sc = b.scalp || {};
     $('#strategy-note').textContent = (b.running ? '' : 'Botul e oprit: nu deschide și nu închide nimic (pozițiile rămân cu SL/TP la broker). ') +
-      `Claude alege direcția la fiecare bară M1; fiecare intrare are TP fix +${sc.tp_price} și SL ${sc.sl_price} (preț).`;
+      `Claude alege direcția; fiecare intrare are TP +${sc.tp_price} și SL −${sc.sl_price} (preț, ×100×lot în USD), ` +
+      `TP = ${sc.tp_atr_mult}×ATR / SL = ${sc.sl_atr_mult}×ATR ale barei de decizie (din 09.11: decizii la închiderea barei M15, trend H1, fără fereastră orară blocată; stop de timp 180 min).`;
     $('#basket-sub').textContent = b.enabled ? `acum −${b.max_loss_usd} USD (${b.source})` : 'modul coș nu este activ';
     $('#basket-note').textContent = 'Limita închide toate pozițiile botului odată, ca plasă de siguranță peste SL-ul fiecărei poziții.';
   } catch (e) { $('#basket-sub').textContent = 'eroare: ' + (e.detail || e.message); }

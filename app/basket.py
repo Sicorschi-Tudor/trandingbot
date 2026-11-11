@@ -52,6 +52,9 @@ class BasketTrader:
                "loss_close_min": float(s.BASKET_CLAUDE_LOSS_CLOSE_MIN_MINUTES),
                "scalp_tp": float(s.BASKET_SCALP_TP_PRICE), "scalp_sl": float(s.BASKET_SCALP_SL_PRICE),
                "m5_gate": bool(s.BASKET_M5_GATE), "impulse_atr": float(s.BASKET_PULLBACK_IMPULSE_ATR),
+               "min_m5_gap": float(s.BASKET_MIN_M5_GAP_ATR),
+               "tf": str(s.BASKET_DECISION_TF or "M1").upper(), "trend_tf": str(s.BASKET_TREND_TF or "M5").upper(),
+               "pb_look": max(1, int(s.BASKET_PULLBACK_LOOKBACK_BARS or 10)),
                "max_run": int(s.BASKET_MAX_RUN_BARS), "sure_conf": float(s.BASKET_SURE_MIN_CONFIDENCE),
                "time_stop": int(s.BASKET_SCALP_TIME_STOP_MINUTES), "max_stretch": float(s.BASKET_MAX_STRETCH_EMA50_ATR),
                "claude_hedge": bool(s.BASKET_CLAUDE_HEDGE), "needs_pullback": bool(s.BASKET_ENTRY_NEEDS_PULLBACK),
@@ -60,6 +63,7 @@ class BasketTrader:
                "reentry_atr": float(s.BASKET_REENTRY_MIN_ATR), "reentry_min": int(s.BASKET_REENTRY_MINUTES),
                "max_atr": float(s.BASKET_MAX_ATR_M1),
                "tp_atr": float(s.BASKET_SCALP_TP_ATR_MULT), "sl_atr": float(s.BASKET_SCALP_SL_ATR_MULT),
+               "max_depth": float(s.BASKET_PULLBACK_MAX_DEPTH_ATR), "min_d50": float(s.BASKET_MIN_DIST_EMA50_ATR),
                "armed_skip": bool(s.BASKET_CLAUDE_ARMED_SKIP), "armed_move": float(s.BASKET_CLAUDE_ARMED_MOVE_ATR),
                "open_every": int(s.BASKET_CLAUDE_OPEN_EVERY_BARS),
                "flat_every": int(s.BASKET_CLAUDE_FLAT_WAIT_EVERY_BARS), "flat_move": float(s.BASKET_CLAUDE_FLAT_WAIT_MOVE_ATR),
@@ -147,10 +151,15 @@ class BasketTrader:
                           for k, v in self.armed.items() if v},
                 "start_lot": c["start_lot"], "lot_scale": c["lot_scale"],
                 "max_loss_per_001_usd": round(c["limit"] / c["lot_scale"], 2),
-                "scalp": {"tp_price": c["scalp_tp"], "sl_price": c["scalp_sl"]}}
+                "scalp": {"tp_price": c["scalp_tp"], "sl_price": c["scalp_sl"],
+                          "tp_atr_mult": c["tp_atr"] or None, "sl_atr_mult": c["sl_atr"] or None}}
 
     def positions(self, symbol: str) -> list[dict]:
-        return [p for p in self.engine.bot_positions(self.engine.mode()) if p.get("symbol") == symbol]
+        """The basket's own positions: the bot's positions on `symbol` minus those of the session breakout (09.11), which
+        run to their own TP/SL/flat time and are never managed, time-stopped or shown to Claude here."""
+        sb = getattr(self.engine, "session_bo", None)
+        return [p for p in self.engine.bot_positions(self.engine.mode())
+                if p.get("symbol") == symbol and not (sb is not None and sb.owns(p))]
 
     @staticmethod
     def net(p: dict) -> float:
@@ -328,6 +337,25 @@ class BasketTrader:
                 self.armed[sym] = []
                 st["waited_px"] = None  # after the blackout the first bar asks Claude again
                 return f"{roll} — Claude nu e chemat cât ține blocajul (nicio intrare nu ar fi acceptată)"
+            if c["tf"] != "M1":
+                # M15 mode (09.11): Claude is asked only at the close of a decision bar on which the mechanical setup
+                # exists - the backtest edge is in the setup, the LLM is the gate; fills, stops and the time stop run in
+                # code on every M1 bar regardless
+                step = self.TF_SECONDS.get(c["tf"], 900)
+                if (bar_t + 60) % step != 0:
+                    left = (step - (bar_t + 60) % step) // 60
+                    return f"decizie pe {c['tf']}: următoarea bară se închide peste {left} min — Claude nu e chemat între bare"
+                side = self._setup_side(sym, q, bar_t + 60)
+                gap, atr = self.m5_gap_atr(sym, bar_t + 60), self.atr_m1(sym, bar_t + 60)
+                self.engine.rt.log("INFO", "basket", f"Coș {sym}: bara {c['tf']} închisă — trend {c['trend_tf']} gap "
+                                                     f"{gap:+.2f}×ATR, ATR {atr:.2f}, setup mecanic: {side or 'niciunul'}"
+                                   if gap is not None and atr else
+                                   f"Coș {sym}: bara {c['tf']} închisă — date insuficiente pentru trend/ATR (gap {gap}, ATR {atr})")
+                if side is None:
+                    self.armed[sym] = []
+                    return f"bara {c['tf']} s-a închis fără setup mecanic (trend + revenire la EMA20) — Claude nu e chemat"
+                st["setup_side"] = side
+                return None
             arms = [x for x in self.armed.get(sym, []) if x["expires"] > bar_t]
             atr = self.atr_m1(sym, bar_t + 60) or 0.0
             px = float(q.get("bid") or 0)
@@ -341,11 +369,21 @@ class BasketTrader:
             # FLAT_WAIT_MOVE_ATR x ATR from where it decided - a bar that changed nothing costs a call for nothing
             m5_close = ((bar_t + 60) // 60) % c["flat_every"] == 0
             moved = atr and abs(px - float(st["waited_px"])) >= c["flat_move"] * atr
-            if m5_close or moved:
+            if m5_close or (moved and not arms):
                 return None
             left = c["flat_every"] - ((bar_t + 60) // 60) % c["flat_every"]
+            if arms:
+                # the price ran away from a live arm: re-arming on every bar of an impulse never fills (06.11 18:45-19:00:
+                # 7 Opus calls in 15 minutes, the arm moved up 6 USD behind the price, no fill) - the M5 close is enough
+                return ("intrare armată activă, prețul a fugit de ea: " + "; ".join(
+                    f"{x['side']} la {x['price']:g}" for x in arms) + f" — Claude e rechemat la închiderea M5 (peste {left} bare)")
             return (f"Claude a spus „aștept” la {float(st['waited_px']):g}: e rechemat la închiderea M5 (peste {left} bare) "
                     f"sau dacă prețul se mișcă {c['flat_move']:g}×ATR")
+        if c["tf"] != "M1":
+            step = self.TF_SECONDS.get(c["tf"], 900)
+            if hedged or (bar_t + 60) % step == 0:
+                return None
+            return f"poziție deschisă cu SL/TP fixe — următoarea decizie Claude la închiderea barei {c['tf']}"
         if hedged or c["open_every"] <= 1:
             return None
         n = int(st.get("open_bars") or 0) + 1
@@ -397,10 +435,14 @@ class BasketTrader:
                             "auto_hedge_at_price": c["hedge_at"] or None,
                             "investigation_every_usd": c["rec_trig"],
                             "loss_close_min_minutes": c["loss_close_min"], "m5_gate": c["m5_gate"],
+                            "m5_min_gap_atr": c["min_m5_gap"] or None,
+                            "decision_tf": c["tf"], "trend_tf": c["trend_tf"],
                             "pullback_waits_on_impulse_atr": c["impulse_atr"],
                             "no_entry_after_run_of_m1_bars": c["max_run"] or None,
                             "no_entry_beyond_ema50_m1_atr": c["max_stretch"] or None,
                             "entry_needs_counter_m1_bar": c["needs_pullback"],
+                            "pullback_max_depth_beyond_ema20_atr": c["max_depth"] or None,
+                            "no_entry_within_atr_of_ema50": c["min_d50"] or None,
                             "pullback_dropped_past_level_atr": c["max_overshoot"] or None,
                             "reentry_needs_new_level": {"min_atr_from_last_entry": c["reentry_atr"],
                                                         "within_minutes": c["reentry_min"]} if c["reentry_atr"] > 0 else None,
@@ -459,6 +501,21 @@ class BasketTrader:
                "m5_ema20_50": arrow(mtf.get("M5", 0)), "m15_ema20_50": arrow(mtf.get("M15", 0)),
                "h1_ema20_50": arrow(mtf.get("H1", 0)),
                "short_term_consensus": fast_side, "mtf_consensus": mtf_side}
+        c = self.cfg()
+        out["decision_tf"], out["trend_tf"] = c["tf"], c["trend_tf"]
+        gap = self.m5_gap_atr(sym, now)
+        if gap is not None:
+            # EMA9-EMA21 of the trend timeframe in ATR14 units of the decision timeframe, +sus / -jos; |gap| < m5_min_gap_atr = range
+            out["m5_gap_atr"] = out["trend_gap_atr"] = round(gap, 2)
+        if c["tf"] != "M1":
+            out["mechanical_setup"] = self._setup_side(sym, q, now)
+            tfb = self._tf_bars(sym, now)[-60:]
+            if tfb:
+                cl = [float(b["c"]) for b in tfb]
+                e20, e50 = ind.last(ind.ema(cl, 20)), ind.last(ind.ema(cl, 50))
+                out[f"{c['tf'].lower()}_ema20"] = round(e20, 2) if e20 else None
+                out[f"{c['tf'].lower()}_ema50"] = round(e50, 2) if e50 else None
+                out[f"last3_{c['tf'].lower()}"] = [("sus" if b["c"] > b["o"] else "jos" if b["c"] < b["o"] else "=") for b in tfb[-3:]]
         if bars and q.get("bid"):
             hi, lo = max(b["h"] for b in bars), min(b["l"] for b in bars)
             px = float(q["bid"])
@@ -585,7 +642,9 @@ class BasketTrader:
     def _entry_max_lot(self, c: dict, q: dict) -> float:
         """Biggest lot of a new entry: CLAUDE_MAX_LOT, the free margin (margin_max_lot) and the risk cap (risk_max_lot)."""
         mx = min(x for x in (c["claude_max_lot"], self.margin_max_lot(q), self.risk_max_lot(q)) if x is not None)
-        return round(mx, 2)
+        # the owner's start lot is always allowed (within the margin): the risk cap only limits Claude's upsizing
+        floor = min(c["start_lot"] or 0.01, self.margin_max_lot(q) or 99.0)
+        return round(max(mx, floor), 2)
 
     def risk_max_lot(self, q: dict) -> float | None:
         """Biggest lot whose fixed scalp SL loses at most BASKET_MAX_RISK_PCT_PER_ENTRY % of the balance; None when the
@@ -629,9 +688,16 @@ class BasketTrader:
             return None, "un singur model"
         if investigate:
             return None, "investigație (grupul pe minus)"
+        if self.cfg()["tf"] != "M1":
+            return None, f"decizie pe {self.cfg()['tf']} (apeluri rare, modelul principal)"
         if not pos:
             if s.BASKET_CLAUDE_SMART_ROUTE and self.fast_vote(sym, now)[0]:
-                return None, "M1 și M5 aliniate — decizie de direcție"
+                # 06.11: with the M5 EMA9/21 gap under BASKET_MIN_M5_GAP_ATR no entry can pass anyway (17:54-18:27: 11 Opus
+                # calls, 0.53 USD, all "aștept"); the light model watches, and escalates if it wants to enter
+                gap, k = self.m5_gap_atr(sym, now), self.cfg()["min_m5_gap"]
+                if k <= 0 or gap is None or abs(gap) >= k:
+                    return None, "M1 și M5 aliniate — decizie de direcție"
+                return light, f"M5 fără trend (gap {gap:+.2f}×ATR, minim {k:g}) — rutină"
             return light, "fără poziție, rutină"
         if not s.BASKET_CLAUDE_SMART_ROUTE:
             return None, "poziție deschisă"
@@ -773,11 +839,14 @@ class BasketTrader:
                             continue
                         note = f" (lot redus de la {lot:g} la {mx:g}: atât permite marja liberă)"
                         lot = mx
-                    rx = self.risk_max_lot(q)
-                    if rx is not None and lot > rx:
-                        note = f" (lot redus de la {lot:g} la {rx:g}: SL-ul fix nu poate risca peste {c['risk_pct']:g} % din sold)"
-                        lot = rx
+                    # the per-entry risk cap trims only what Claude adds ABOVE the owner's start lot: the lot set in the
+                    # dashboard is the owner's decision (05.11) and is honoured as long as the margin allows it
                     lo = c["start_lot"] or 0.01
+                    rx = self.risk_max_lot(q)
+                    if rx is not None and lot > max(rx, lo):
+                        cap = max(rx, lo)
+                        note = f" (lot redus de la {lot:g} la {cap:g}: SL-ul nu poate risca peste {c['risk_pct']:g} % din sold)"
+                        lot = cap
                     if lot > lo and (why := self._big_lot_block(sym, side, a.get("confidence"), now)):
                         note = f" (lot redus de la {lot:g} la {lo:g}: {why})"
                         lot = lo
@@ -799,12 +868,13 @@ class BasketTrader:
                 elif not pos and (why := self.reopen_note(sym, now)):
                     done.append(f"OPEN {side} refuzat: {why}")
                     continue
-                elif not pos and (why := self._against_m5(sym, side, now)):
+                elif not pos and (why := self._against_m5(sym, side, now) or self._m5_flat(sym, side, now)):
                     done.append(f"OPEN {side} refuzat: {why}")
                     continue
                 elif not pos and (why := self._chasing_run(sym, side, now) or self._stretched(sym, side, q, now)
                                   or self._no_pullback_yet(sym, side, now)
-                                  or self._same_level_reentry(sym, side, float(q["ask"] if side == "BUY" else q["bid"]), now)):
+                                  or self._same_level_reentry(sym, side, float(q["ask"] if side == "BUY" else q["bid"]), now)
+                                  or self._pullback_exhausted(sym, side, q, now)):
                     done.append(f"OPEN {side} refuzat: {why}")
                     continue
                 self.last_action[sym] = 0  # Claude's actions are not throttled by the open gap
@@ -875,14 +945,71 @@ class BasketTrader:
 
     def _against_m5(self, sym: str, side: str, now: float) -> str | None:
         """Why a new entry is refused by the M5 gate (BASKET_M5_GATE): the M5 trend (EMA9 vs EMA21) points against it."""
-        if not self.cfg()["m5_gate"]:
+        c = self.cfg()
+        if not c["m5_gate"]:
             return None
-        _, votes = self.fast_vote(sym, now)
-        v = votes.get("M5", 0)
+        gap = self.m5_gap_atr(sym, now)
+        v = 0 if gap is None or abs(gap) < 1e-9 else (1 if gap > 0 else -1)
         if v == 0 or v == (1 if side == "BUY" else -1):
             return None
-        return (f"contra trendului M5 (EMA9 {'sub' if v < 0 else 'peste'} EMA21) — pe 02–03.11 intrările contra M5 au "
-                "câștigat 5 din 12; intră doar în sensul M5")
+        return (f"contra trendului {c['trend_tf']} (EMA9 {'sub' if v < 0 else 'peste'} EMA21) — pe 02–03.11 intrările contra "
+                f"trendului au câștigat 5 din 12; intră doar în sensul {c['trend_tf']}")
+
+    def m5_gap_atr(self, sym: str, now: float) -> float | None:
+        """EMA9 - EMA21 on closed bars of the trend timeframe (BASKET_TREND_TF: M5 for the M1 scalper, H1 in the M15
+        gold profile), in ATR14 units of the decision timeframe (positive = trend up); None without enough bars."""
+        closes = [b["c"] for b in self.engine.rt.closed_bars(sym, self.cfg()["trend_tf"], now)[-120:]]
+        atr = self.atr_m1(sym, now)
+        if len(closes) < 30 or not atr:
+            return None
+        f, s_ = ind.last(ind.ema(closes, 9)), ind.last(ind.ema(closes, 21))
+        if f is None or s_ is None:
+            return None
+        return (f - s_) / atr
+
+    def _m5_flat(self, sym: str, side: str, now: float) -> str | None:
+        """Why a new entry waits (BASKET_MIN_M5_GAP_ATR): the M5 EMA9/EMA21 gap in the entry's direction is under that
+        many ATR14 M1 - M5 has no trend (a range). 06.11 on 140 entries: 17 of 35 won that way (-28.4 USD per 0.01 lot),
+        the other 105 won 74 (-2.3)."""
+        k = self.cfg()["min_m5_gap"]
+        if k <= 0:
+            return None
+        gap = self.m5_gap_atr(sym, now)
+        if gap is None:
+            return None
+        signed = gap if side == "BUY" else -gap
+        if signed >= k:
+            return None
+        return (f"M5 fără trend: EMA9−EMA21 M5 e la {signed:+.2f}×ATR M1 în sensul intrării (minim {k:g}) — e un interval, "
+                "nu un trend (17 din 35 câștigate așa, −28 USD/0,01 lot); aștept să se desprindă EMA-urile M5")
+
+    def _setup_side(self, sym: str, q: dict, now: float) -> str | None:
+        """The side on which the mechanical entry rules hold right now (the backtested M15 setup: trend gap, price between
+        0.7 ATR below and 0.3 ATR above the EMA20 of the decision bars, a counter bar, 0.5-2.0 ATR from the EMA50, no run,
+        not the same level again), or None. Decides whether Claude is called at all on a decision-bar close."""
+        c = self.cfg()
+        gap = self.m5_gap_atr(sym, now)
+        atr = self.atr_m1(sym, now)
+        if gap is None or not atr or not q.get("bid") or not q.get("ask"):
+            return None
+        closes = [float(b["c"]) for b in self._tf_bars(sym, now)[-200:]]
+        if len(closes) < 60:
+            return None
+        e20 = ind.last(ind.ema(closes, 20))
+        if e20 is None:
+            return None
+        for side in ("BUY", "SELL"):
+            sign = 1 if side == "BUY" else -1
+            if gap * sign < max(c["min_m5_gap"], 1e-9):
+                continue
+            px = float(q["ask"]) if side == "BUY" else float(q["bid"])
+            if (px - e20) * sign / atr > 0.3:  # not pulled back to the EMA20 yet
+                continue
+            if (self._chasing_run(sym, side, now) or self._stretched(sym, side, q, now) or self._no_pullback_yet(sym, side, now)
+                    or self._pullback_exhausted(sym, side, q, now) or self._same_level_reentry(sym, side, px, now)):
+                continue
+            return side
+        return None
 
     def _impulse_against(self, sym: str, side: str, q: dict, now: float) -> str | None:
         """Why a PULLBACK fill waits (BASKET_PULLBACK_IMPULSE_ATR): the forming M1 bar, or the last closed one, is an
@@ -961,18 +1088,49 @@ class BasketTrader:
         return (f"același nivel ca intrarea {side} precedentă ({float(row[0]['price_open']):g}, închisă acum {mins:.0f} min, "
                 f"la {dist:.2f}×ATR) — reintrările la același nivel au câștigat 24 din 36 (−1,1 USD); aștept un nivel nou")
 
+    def _pullback_exhausted(self, sym: str, side: str, q: dict, now: float) -> str | None:
+        """Why an entry waits (BASKET_PULLBACK_MAX_DEPTH_ATR / BASKET_MIN_DIST_EMA50_ATR): the price is already more
+        than MAX_DEPTH x ATR beyond the EMA20 M1 against the trade (the EMA20 pullback failed), or sits within
+        MIN_DIST x ATR of the EMA50 M1 (the move came back to the slow mean - consumed). 05.11 on 152 entries: these
+        won 27 of 47 (-21.4 USD), the others 75 of 105 (+64.1)."""
+        c = self.cfg()
+        if c["max_depth"] <= 0 and c["min_d50"] <= 0:
+            return None
+        atr = self.atr_m1(sym, now)
+        if not atr or not q.get("bid"):
+            return None
+        closes = [float(b["c"]) for b in self._tf_bars(sym, now)[-200:]]
+        if len(closes) < 60:
+            return None
+        sign = 1 if side == "BUY" else -1
+        px = float(q["ask"]) if side == "BUY" else float(q["bid"])
+        e20, e50 = ind.last(ind.ema(closes, 20)), ind.last(ind.ema(closes, 50))
+        if e20 is None or e50 is None:
+            return None
+        d20 = (px - e20) * sign / atr   # negative = beyond the EMA20 against the trade
+        d50 = (px - e50) * sign / atr
+        if c["max_depth"] > 0 and d20 < -c["max_depth"]:
+            return (f"revenire prea adâncă: prețul e la {-d20:.2f}×ATR {'sub' if side == 'BUY' else 'peste'} EMA20 M1 "
+                    f"(limita {c['max_depth']:g}) — nivelul a cedat (27 din 47 câștigate așa); aștept întoarcerea la EMA20")
+        if c["min_d50"] > 0 and abs(d50) < c["min_d50"]:
+            return (f"prețul e lipit de EMA50 M1 ({d50:+.2f}×ATR) — mișcarea s-a consumat până la media lentă "
+                    "(12 din 24 câștigate așa); aștept să se desprindă")
+        return None
+
     def _no_pullback_yet(self, sym: str, side: str, now: float) -> str | None:
         """Why an entry waits (BASKET_ENTRY_NEEDS_PULLBACK): neither the last closed M1 bar nor the last 10 minutes net
         moved against the trade - the price has not pulled back at all, the entry would chase. 04.11, 57 real entries:
         after a counter move 31 of 35 won (+41.6), straight after a bar in the own direction 13 of 22 (-15.4)."""
-        if not self.cfg()["needs_pullback"]:
+        c = self.cfg()
+        if not c["needs_pullback"]:
             return None
-        bars = self.engine.rt.closed_bars(sym, "M1", now)
-        if len(bars) < 11:
+        bars = self._tf_bars(sym, now)
+        look = c["pb_look"]
+        if len(bars) < look + 1:
             return None
         sign = 1 if side == "BUY" else -1
         last = (float(bars[-1]["c"]) - float(bars[-1]["o"])) * sign
-        net10 = (float(bars[-1]["c"]) - float(bars[-11]["c"])) * sign
+        net10 = (float(bars[-1]["c"]) - float(bars[-1 - look]["c"])) * sign
         if last < 0 or net10 < 0:
             return None
         return ("nicio revenire încă: ultima bară M1 și ultimele 10 minute merg în sensul intrării — aștept o bară contra "
@@ -985,7 +1143,7 @@ class BasketTrader:
         atr = self.atr_m1(sym, now) if k > 0 else None
         if not atr or not q.get("bid"):
             return None
-        closes = [float(b["c"]) for b in self.engine.rt.closed_bars(sym, "M1", now)[-200:]]
+        closes = [float(b["c"]) for b in self._tf_bars(sym, now)[-200:]]
         if len(closes) < 60:
             return None
         e50 = ind.last(ind.ema(closes, 50))
@@ -1030,7 +1188,7 @@ class BasketTrader:
         n = self.cfg()["max_run"]
         if n <= 0:
             return None
-        bars = self.engine.rt.closed_bars(sym, "M1", now)
+        bars = self._tf_bars(sym, now)
         if len(bars) < n:
             return None
         sign = 1 if side == "BUY" else -1
@@ -1104,9 +1262,10 @@ class BasketTrader:
                                                      f"nivel cu {over[0]:.2f} USD ({over[1]:.2f}×ATR M1, limita "
                                                      f"{self.cfg()['max_overshoot']:g}); nivelul a cedat (0 din 4 câștigate așa)")
                 continue
-            elif (why := self._impulse_against(sym, x["side"], q, now) or self._chasing_run(sym, x["side"], now)
+            elif (why := self._impulse_against(sym, x["side"], q, now) or self._m5_flat(sym, x["side"], now)
+                  or self._chasing_run(sym, x["side"], now)
                   or self._stretched(sym, x["side"], q, now) or self._no_pullback_yet(sym, x["side"], now)
-                  or self._same_level_reentry(sym, x["side"], px, now)):
+                  or self._same_level_reentry(sym, x["side"], px, now) or self._pullback_exhausted(sym, x["side"], q, now)):
                 st = self.state.setdefault(sym, {})
                 if st.get("impulse_note") != x["price"]:
                     st["impulse_note"] = x["price"]
@@ -1240,8 +1399,15 @@ class BasketTrader:
             return None
         return round(math.floor(free * self.cfg()["margin_frac"] / per001) * 0.01, 2)
 
+    TF_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400}
+
+    def _tf_bars(self, sym: str, now: float) -> list[dict]:
+        """Closed bars of the decision timeframe (BASKET_DECISION_TF) - what every entry guard and the ATR read."""
+        return self.engine.rt.closed_bars(sym, self.cfg()["tf"], now)
+
     def atr_m1(self, sym: str, now: float) -> float | None:
-        bars = self.engine.rt.closed_bars(sym, "M1", now)[-120:]
+        """ATR14 of the decision timeframe (named for the original M1 scalper; "M15" in the gold profile since 09.11)."""
+        bars = self._tf_bars(sym, now)[-120:]
         if len(bars) < 30:
             return None
         return ind.last(ind.atr([b["h"] for b in bars], [b["l"] for b in bars], [b["c"] for b in bars], 14))
